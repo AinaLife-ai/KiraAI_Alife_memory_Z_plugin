@@ -918,3 +918,35 @@ def archives_flat(value):
     if isinstance(value, dict):
         return list(value.get("permanent") or []) + list(value.get("recent") or [])
     return list(value or [])
+
+# ── 给模型看的一行真实示例（由渲染器产出 ✓ 所以永远不会与格式脱节）──
+def grouped_example():
+    """示例用的固定样本：主体短码 n1 + 两条事实（含重要度、关系、时间）。"""
+    return bot_facts_grouped(
+        [
+            {
+                "category": "profile",
+                "subject": "qq:1",
+                "content": "周武是大学室友",
+                "importance": 7,
+                "event_at": 1755648000,
+            },
+            {
+                "category": "event",
+                "subject": "qq:1",
+                "content": "上周一起吃了饭",
+                "importance": 6,
+                "event_at": 1755648000,
+            },
+        ],
+        "",
+        codes={"qq:1": "n1"},
+    )
+
+
+GROUPED_EXAMPLE_LINE = (
+    "读取示例（真实渲染输出）："
+    + __import__("json").dumps(grouped_example(), ensure_ascii=False, separators=(",", ":"))
+    + " —— 组键是主体短码，组内每行按 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?] 读；"
+    "names 里查短码对应的账号与名字。\n"
+)

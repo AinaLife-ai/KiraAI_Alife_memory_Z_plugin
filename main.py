@@ -46,6 +46,7 @@ from .retrieval import (
     CATEGORY_RANK,
     archives_flat,
     FACT_VIEW_GROUPED,
+    GROUPED_EXAMPLE_LINE,
     pack_facts,
     short_names,
     SYNTHETIC_NAMES,
@@ -78,10 +79,11 @@ MEMORY_RULES = (
     "缺上下文先检索再答，不得假装记得。\n"
     "跨会话记忆要核对来源会话、用户与时间；别人的经历不等于当前用户的；同名不代表同一人；"
     "needs_review 只是待核对描述。\n"
-    "事实短键：c=类别(ev/fa/pr/co/re/pf/rs/sf) u=主体ID x=内容 imp=重要度(略=5) "
-    "src=来源存档ID t=事件日期(跨天给 t2) rec=记录日期(与事件相差远时才有) "
-    "sp=存档里「这句谁说的」；names 是「账号/群号 → 名称」。\n"
-    "要精确到分钟或核对原话：把 src 当 id 交给 SearchMemoryArchive 读原文"
+    "facts 按主体分组：键是主体短码（见 names），组内每行 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?]，"
+    "尾部为空即省略（中间位缺是空串）；时间缺失就不写；关系写作 主体>关系>客体（多条用 ; 分隔）。"
+    + GROUPED_EXAMPLE_LINE
+    + "sp=存档里「这句谁说的」；names 是「账号/群号 → 名称」。\n"
+    "要精确到分钟或核对原话：把存档短码 a 当 id 交给 SearchMemoryArchive 读原文"
     "（原文自带时间戳与发言人）。\n"
     "摘要不是回答模板；用户追问还有别的时用 SearchMemoryArchive(next_batch=true)，"
     "没找到就坦诚说明，不反复复述或编造。永久记忆只放「必须每轮在场」的约束与身份，"
