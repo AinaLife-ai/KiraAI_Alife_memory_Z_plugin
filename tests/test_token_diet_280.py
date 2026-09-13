@@ -102,7 +102,8 @@ def test_instructions_carry_the_new_limits():
     assert "scenario 不超过 20 字" in text
     assert "content 不超过 60 字" in text
     assert "records[].s 是这段对话的原文" in text
-    assert "records[].u 是实体 ID 列表" in text, "要说明 u 是 ID、名字在 names 表"
+    assert "records[].u 是**可见范围**" in text, "必须说明 u 是可见范围（旧说明写成「实体 ID 列表」曾导致主体错记 ✗）"
+    assert "sp 是**说话人的实体 ID**" in text, "必须说明 sp 是说话人 ID（压缩要据此定主体）"
     audit = e.AUDIT_INSTRUCTION
     assert "facts[].sources" not in audit, "sources 已不入参，指令不该再提它"
 
@@ -162,3 +163,78 @@ async def test_model_payloads_carry_no_raw_ids_or_float_times(tmp_path):
             for key in ("t", "t2"):
                 if key in record:
                     assert isinstance(record[key], str) and "-" in record[key]
+
+
+def test_compress_payload_carries_speaker_id():
+    """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
+    row = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "users": ["qq:1", "qq:2"],
+           "speaker": "小明", "role": "user", "level": 0, "type": "chat", "start": 1, "end": 2}
+    rec = e.compress_records([row], None, {"qq:1": "小明", "qq:2": "阿澄"})[0]
+    assert rec["sp"] == "qq:1", "sp 必须是说话人的 ID（不是名字、也不是从可见范围里随便挑 ✗）"
+    assert rec["u"] == ["qq:1", "qq:2"], "u 仍然只是可见范围"
+    # 两人重名 / 判定不出 → 宁缺勿错 ✗（不许瞎猜）
+    dup = e.compress_records([dict(row, speaker="阿澄")], None, {"qq:1": "小明", "qq:2": "小明"})[0]
+    assert "sp" not in dup, "说话人无法唯一确定时必须不给 sp（瞎猜就是这次的 bug ✗）"
+
+
+def test_audit_can_fix_attribution():
+    """审计必须**有工具**纠正归属（把 A 的话记到 B 名下是线上事故 ✗）:
+
+    ① 契约允许 correct 带 subject ✓  ② 不带 subject 仍然照旧（向后兼容 ✓）
+    ③ 应用处只对 correct 生效、只接受已知实体、拒绝时计数不写垃圾 ✓  ④ 提示词说明了这件事 ✓
+    """
+    c = importlib.import_module("alife_diet280.contracts")
+    a = c.AuditAction(action="correct", target_id="f1", source_ids=["f1"],
+                                content="x", reason="y")
+    assert a.subject is None, "不带 subject 必须仍然可用（老输出兼容 ✓）"
+    b = c.AuditAction(action="correct", target_id="f1", source_ids=["f1"],
+                                content="x", reason="y", subject="qq:1")
+    assert b.subject == "qq:1"
+    root = Path(e.__file__).parent
+    src = (root / "storage.py").read_text(encoding="utf-8")
+    assert 'a["action"] == "correct" else ""' in src, "只对 correct 生效 ✗"
+    assert "UPDATE facts SET subject=?" in src, "必须真的能改主体"
+    assert "subject_rejected" in src, "拿不准时必须拒绝并计数（不许写垃圾 ✗）"
+    assert "重名撞车时**必须拒绝**" in src, "重名时必须拒绝（任取一个就是制造新错记 ✗）"
+    assert "subject_fixed" in src
+    eng = (root / "engine.py").read_text(encoding="utf-8")
+    assert "subject 填成正确的人名" in eng, "提示词必须告诉审计它能改归属"
+
+
+def test_audit_evidence_carries_speaker():
+    """审计要能核对归属，证据里必须有「原文是谁说的」✗
+    否则它看得出"这条归给谁"，却看不出"原文是谁说的" → 只能猜（比不改更糟 ✓）"""
+    src = (Path(e.__file__).parent / "engine.py").read_text(encoding="utf-8")
+    assert 'additions[source]["sp"] = speaker' in src, "审计证据必须带说话人显示名"
+    assert "evidence[].sp 是原文**说话人显示名**" in src, "提示词必须说明核对依据"
+    assert "没有 sp 或看不出是谁说的就别改主体" in src, "必须禁止瞎猜 ✗"
+
+
+def _prompt_texts():
+    import re
+    src = Path(e.__file__).parent
+    out = {}
+    for name in ("engine.py", "main.py"):
+        text = (src / name).read_text(encoding="utf-8")
+        for m in re.finditer(r'([A-Z_]{4,})\s*=\s*\((.*?)\n\)', text, re.S):
+            body = "".join(re.findall(r'"([^"]*)"', m.group(2)))
+            if len(body) >= 150:
+                out[m.group(1)] = body
+    return out
+
+
+def test_instruction_sentences_are_not_glued():
+    """防「两句话粘一起」✗ 真实事故：追加规则时新内容被粘进 retract 那句的中间，
+    模型读成「retract 是用来改主体的」。机器怎么发现？一条经验规则：
+    **同一句里不该出现两个「：」**（那通常就是两条规则粘一起了）"""
+    for name, text in _prompt_texts().items():
+        for seg in text.split("。"):
+            assert seg.count("：") <= 1, "%s 疑似两句话粘一起：%s。" % (name, seg[:60])
+
+
+def test_prompt_budget_is_enforced():
+    """预算守卫 ✓：以后想往指令里加内容，必须先删再写（否则 token 只会一直涨 ✗）"""
+    texts = _prompt_texts()
+    assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
+    assert len(texts["AUDIT_INSTRUCTION"]) <= 500, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
+    assert len(texts["MEMORY_RULES"]) <= 560, "MEMORY_RULES 超预算 %d" % len(texts["MEMORY_RULES"])

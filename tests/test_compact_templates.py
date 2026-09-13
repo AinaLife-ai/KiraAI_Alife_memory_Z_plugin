@@ -161,3 +161,15 @@ def test_fallback_needs_two_retries():
     """兜底（退回完整自动 schema）需要 model_retries>=2 才跑得到 —— 语义不动（有测试锁着 ✓）。"""
     source = (ROOT / "engine.py").read_text(encoding="utf-8")
     assert "if attempt >= 2 and isinstance(schema, str):" in source
+
+
+def test_compression_prompt_pins_subject_attribution():
+    """压缩提示词必须钉住「主体归属」的语义（线上事故：A 的话被记到 B 名下 ✗）:
+
+    ① u 是可见范围、不是说话人 ✗  ② sp 才是说话人 ✓  ③ 判断不出就不写 ✗  ④ 来源必须是真的那条
+    只钉语义不钉句式 —— 措辞可以改，含义不能丢 ✓
+    """
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    for token in ("可见范围", "不是说话人", "说话人的实体 ID",
+                  "严禁把 A 的话记到 B 名下", "source_ids 必须指向真正含该内容的记录"):
+        assert token in src, "丢失归属语义：" + token
