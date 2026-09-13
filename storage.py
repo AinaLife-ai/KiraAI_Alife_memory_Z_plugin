@@ -709,6 +709,39 @@ class Store:
         self._fts_state = "ready"
         return True
 
+    # TODO(v2.19): 按年份分库（方案见 README「L0 容量、分库预留与决策触发线」）
+    #   触发线：库 > 500MB / FTS 查询 > 200ms / vacuum > 60s / 单年条目 > 50 万
+    #   方案：records_YYYY.db，往年库只读 + 当年库读写，检索时 ATTACH 跨库查询
+    #   开关：archive_shard_from_year（0 = 关闭，默认）。现在只保留 id/时间戳稳定这一前提 ✓
+
+    def capacity_stats(self):
+        """容量仪表：每层条数 / 库大小 / 索引条数 / 逐年增长（P0）。
+
+        供 /status 与界面显示，用来判断何时该分库（见 README 的触发线）。
+        防御式：取不到连接或某项查不到就跳过，绝不影响插件运行 ✓
+        """
+        conn = getattr(self, "conn", None) or getattr(self, "_conn", None) or getattr(self, "db", None)
+        if conn is None or not hasattr(conn, "execute"):
+            return {}
+        out = {"levels": {}, "years": {}, "db_bytes": 0, "fts_rows": 0}
+        for key, sql in (
+            ("levels", "SELECT level, count(*) FROM records GROUP BY level"),
+            ("years", "SELECT substr(datetime(created, 'unixepoch'), 1, 4), count(*) FROM records GROUP BY 1"),
+        ):
+            try:
+                out[key] = {str(k): v for k, v in conn.execute(sql)}
+            except Exception:
+                pass
+        try:
+            out["db_bytes"] = conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute("PRAGMA page_size").fetchone()[0]
+        except Exception:
+            pass
+        try:
+            out["fts_rows"] = conn.execute("SELECT count(*) FROM records_fts").fetchone()[0]
+        except Exception:
+            pass
+        return out
+
     def search_index_state(self):
         """索引状态：unavailable / ready / building（供界面显示，不查库）。"""
         return self._fts_state

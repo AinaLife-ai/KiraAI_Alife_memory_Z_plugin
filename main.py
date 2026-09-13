@@ -2551,6 +2551,7 @@ class AlifeMemoryPlugin(BasePlugin):
         status["session_names"] = {n["id"]: n["name"] for n in names if n["name"]}
         status["version"] = await asyncio.to_thread(self._plugin_version)
         status["search_index"] = await self.store.call("search_index_state")
+        status["capacity"] = await self.store.call("capacity_stats")
         status["assets"] = await asyncio.to_thread(
             lambda: hashlib.sha256(
                 b"".join(
