@@ -149,3 +149,14 @@ def test_capacity_meter_is_rendered_from_status():
     assert "let capacityEl" in js, "必须有声明，不能靠隐式全局 ✗"
     main_src = (WEB.parent / "main.py").read_text(encoding="utf-8")
     assert 'status["capacity"]' in main_src, "后端必须真的提供 /status.capacity"
+
+
+def test_no_shell_expansion_damage():
+    """抓「补丁被 shell 吃掉」的痕迹：`$(...)` 被展开后会留下 `= ;`、`$(` 消失等 ✗
+
+    这类损伤是**运行时**错误（按钮全死、数据不刷新），括号平衡测试查不出来 —— 必须单独钉住。
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "= ;" not in js, "app.js 出现空赋值：补丁疑似被 shell 展开吃掉 ✗"
+    assert 'typeof $ ===' in js or "const $ = " in js or "function $((" in js or "$(" in js, "选择器函数疑似缺失"
+    assert '$("#searchIndex")' in js, "状态区选择器必须完整（曾被 shell 展开吃掉成 `= ;` ✗）"
