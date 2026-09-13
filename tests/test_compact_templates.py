@@ -171,5 +171,5 @@ def test_compression_prompt_pins_subject_attribution():
     """
     src = (ROOT / "engine.py").read_text(encoding="utf-8")
     for token in ("可见范围", "不是说话人", "说话人的实体 ID",
-                  "严禁把 A 的话记到 B 名下", "source_ids 必须指向真正含该内容的记录"):
+                  "严禁把 A 的话记到 B 名下", "source_ids 必须指向真正含该内容的**每条**记录"):
         assert token in src, "丢失归属语义：" + token

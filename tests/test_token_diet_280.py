@@ -263,3 +263,15 @@ def test_audit_must_not_treat_silence_as_contradiction():
     assert "没提到" in src and "事实错误" in src, "缺少「沉默不等于矛盾」规则 ✗"
     assert "只有证据与事实**矛盾**才 correct" in src, "必须只在矛盾时才改"
     assert "看不到就当 keep" in src, "看不到必须保持不动"
+
+
+def test_source_list_is_widened_from_the_same_batch():
+    """B：压缩落库前必须补齐漏列的来源（模型只挑一条 → 审计因此误判）
+
+    钉住：功能存在 + 三条安全性质（只增不减 through sorted(seen)、无关键词跳过、同批次取值）
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "B：来源清单可能漏列" in src, "缺少来源补齐逻辑"
+    assert "_batch_text" in src, "缺少同批次文本读取"
+    assert "if not words:" in src, "无关键词必须跳过（不许乱补）"
+    assert "sorted(seen)" in src, "必须写回补齐后的来源（只增不减）"

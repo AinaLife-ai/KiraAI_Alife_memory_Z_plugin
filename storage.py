@@ -1883,6 +1883,27 @@ class Store:
                 if not current or tuple(current) != (row["revision"], 1, 0):
                     raise Conflict("source changed during compression")
             ids = {r["id"] for r in candidates}
+            # B：来源清单可能漏列（模型只挑了一条）→ 按内容关键词在**同批次**记录里补齐 ✗
+            #   只增不减、最多补一条、只在同批次内找：宁可漏补，不可乱补 ✓
+            def _batch_text(row):
+                try:
+                    return str(row["summary"] or "") + str(row["content"] or "")
+                except Exception:
+                    return ""
+
+            batch = {str(r["id"]): _batch_text(r) for r in candidates}
+            for fact in output["facts"]:
+                words = [w for w in re.findall(r"[\u4e00-\u9fa5]{2,6}|[A-Za-z0-9]{3,}", str(fact.get("content") or ""))]
+                if not words:
+                    continue
+                seen = {str(x) for x in (fact.get("source_ids") or [])}
+                if any(w in batch.get(rid, "") for rid in seen for w in words):
+                    continue
+                for rid, text in batch.items():
+                    if rid not in seen and any(w in text for w in words):
+                        seen.add(rid)
+                        break
+                fact["source_ids"] = sorted(seen)
             if any(not set(f["source_ids"]) <= ids for f in output["facts"]):
                 raise ValueError("unknown source id")
             start, end = (
