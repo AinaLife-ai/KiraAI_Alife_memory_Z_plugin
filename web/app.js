@@ -430,20 +430,19 @@ let capacityEl = null;   // L0 容量标签（动态插在 #searchIndex 旁）
 async function poll() {
   try {
     const next = await api("/status");
-
-    // L0 容量仪表：每层条数 / 库大小 / 索引条数 / 逐年增长（判断何时该分库用）
-    if (next.capacity && !capacityEl) {
-      capacityEl = document.createElement("span");
-      capacityEl.className = "tag";
-      capacityEl.title = "L0 容量：每层条数 / 库大小 / 索引条数 / 逐年增长（用来判断何时该分库）";
-      const badge = ;
-      if (badge && badge.parentNode) badge.parentNode.insertBefore(capacityEl, badge.nextSibling);
-    }
-    if (capacityEl && next.capacity) {
+    // L0 容量仪表：每层条数 / 库大小 / 索引条数 / 逐年增长
+    if (next.capacity) {
+      if (!capacityEl) {
+        capacityEl = document.createElement("span");
+        capacityEl.className = "tag";
+        capacityEl.title = "L0 容量：每层条数 / 库大小 / 索引条数 / 逐年增长（判断何时该分库）";
+        const badge = $("#searchIndex");
+        if (badge && badge.parentNode) badge.parentNode.insertBefore(capacityEl, badge.nextSibling);
+      }
       const cap = next.capacity;
       const levels = cap.levels || {};
       const years = cap.years || {};
-      const total = Object.values(levels).reduce((a, b) => a + b, 0);
+      const total = Object.values(levels).reduce((sum, n) => sum + n, 0);
       const parts = [];
       if (cap.db_bytes) parts.push("库 " + (cap.db_bytes / 1048576).toFixed(1) + " MB");
       if (total) parts.push("记录 " + total);
@@ -451,6 +450,7 @@ async function poll() {
       const ys = Object.keys(years).sort().slice(-2);
       if (ys.length) parts.push(ys.map((y) => y + " " + years[y]).join(" · "));
       capacityEl.textContent = parts.length ? "L0 " + parts.join(" | ") : "L0 容量 —";
+    }
     const conn = next.enabled
       ? autoRefresh
         ? "已连接 · 实时同步"
