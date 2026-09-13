@@ -199,3 +199,12 @@ def test_audit_can_fix_attribution():
     assert "subject_fixed" in src
     eng = (root / "engine.py").read_text(encoding="utf-8")
     assert "subject 填**正确主体的实体 id 或唯一名字**" in eng, "提示词必须告诉审计它能改归属"
+
+
+def test_audit_evidence_carries_speaker():
+    """审计要能核对归属，证据里必须有「原文是谁说的」✗
+    否则它看得出"这条归给谁"，却看不出"原文是谁说的" → 只能猜（比不改更糟 ✓）"""
+    src = (Path(e.__file__).parent / "engine.py").read_text(encoding="utf-8")
+    assert 'additions[source]["sp"] = speaker' in src, "审计证据必须带说话人显示名"
+    assert "evidence[].sp 是这条原文的**说话人显示名**" in src, "提示词必须说明核对依据"
+    assert "没有 sp 或看不出是谁说的，就不要改主体" in src, "必须禁止瞎猜 ✗"

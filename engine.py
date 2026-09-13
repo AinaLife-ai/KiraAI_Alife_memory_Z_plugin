@@ -64,6 +64,8 @@ AUDIT_INSTRUCTION = (
     "correct 时按证据给出修正后的值。"
     "retract 用于清理被证据推翻、或与其他事实重复冗余而无需保留的事实："
     "subject 记错了（把 A 的话记到 B 名下）就用 correct，subject 填**正确主体的实体 id 或唯一名字**；"
+    "evidence[].sp 是这条原文的**说话人显示名**，据它核对归属：与事实主体不符就用 correct，"
+    "subject 填正确的名字（唯一才行 ✗ 重名撞车别改）；没有 sp 或看不出是谁说的，就不要改主体。"
     "软删除后不再进入上下文，但原文与版本都保留、可以恢复；reason 写清为什么该删。"
 )
 
@@ -815,6 +817,14 @@ class Engine:
                         additions[source] = {
                             k: row[k] for k in ("id", "content", "start", "end")
                         }
+                        # 说话人（显示名）——**审计核对归属的唯一依据**：
+                        # 没有它，审计看得出"这条归给谁"，却看不出"原文是谁说的" ✗ 只能猜
+                        try:
+                            speaker = str(row["speaker"] or "")
+                        except (KeyError, IndexError):
+                            speaker = ""
+                        if speaker:
+                            additions[source]["sp"] = speaker
             cost = len(dump(fact)) + len(dump(list(additions.values())))
             if selected and used + cost > cfg.compress_input_chars:
                 break
