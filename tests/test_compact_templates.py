@@ -161,3 +161,16 @@ def test_fallback_needs_two_retries():
     """兜底（退回完整自动 schema）需要 model_retries>=2 才跑得到 —— 语义不动（有测试锁着 ✓）。"""
     source = (ROOT / "engine.py").read_text(encoding="utf-8")
     assert "if attempt >= 2 and isinstance(schema, str):" in source
+
+
+def test_compression_prompt_pins_subject_attribution():
+    """压缩提示词必须钉住「主体=真正说这句话的人」✗
+
+    群聊一条记录里 `u` 是**多人列表**，而 `s` 是合并原文 —— 没有这条规则时模型只能猜，
+    猜偏就是「A 说的话被记到 B 名下、来源也挂错」（线上真实事故 ✓）。
+    """
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "真正说出该内容的人" in src, "丢失「主体必须是说话人」规则"
+    assert "严禁把 A 说的话记到 B 名下" in src
+    assert "source_ids 必须指向真正含有该内容的记录 id" in src
+    assert "records[].u 是实体 ID 列表" in src, "同时必须保留 u 是列表的说明（否则模型不知道要区分）"
