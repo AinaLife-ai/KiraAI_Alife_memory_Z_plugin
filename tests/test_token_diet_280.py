@@ -102,7 +102,8 @@ def test_instructions_carry_the_new_limits():
     assert "scenario 不超过 20 字" in text
     assert "content 不超过 60 字" in text
     assert "records[].s 是这段对话的原文" in text
-    assert "records[].u 是实体 ID 列表" in text, "要说明 u 是 ID、名字在 names 表"
+    assert "records[].u 是**可见范围**" in text, "必须说明 u 是可见范围（旧说明写成「实体 ID 列表」曾导致主体错记 ✗）"
+    assert "records[].sp" in text, "必须说明 sp 是说话人 ID（压缩要据此定主体）"
     audit = e.AUDIT_INSTRUCTION
     assert "facts[].sources" not in audit, "sources 已不入参，指令不该再提它"
 
@@ -162,3 +163,15 @@ async def test_model_payloads_carry_no_raw_ids_or_float_times(tmp_path):
             for key in ("t", "t2"):
                 if key in record:
                     assert isinstance(record[key], str) and "-" in record[key]
+
+
+def test_compress_payload_carries_speaker_id():
+    """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
+    row = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "users": ["qq:1", "qq:2"],
+           "speaker": "小明", "role": "user", "level": 0, "type": "chat", "start": 1, "end": 2}
+    rec = e.compress_records([row], None, {"qq:1": "小明", "qq:2": "阿澄"})[0]
+    assert rec["sp"] == "qq:1", "sp 必须是说话人的 ID（不是名字、也不是从可见范围里随便挑 ✗）"
+    assert rec["u"] == ["qq:1", "qq:2"], "u 仍然只是可见范围"
+    # 两人重名 / 判定不出 → 宁缺勿错 ✗（不许瞎猜）
+    dup = e.compress_records([dict(row, speaker="阿澄")], None, {"qq:1": "小明", "qq:2": "小明"})[0]
+    assert "sp" not in dup, "说话人无法唯一确定时必须不给 sp（瞎猜就是这次的 bug ✗）"

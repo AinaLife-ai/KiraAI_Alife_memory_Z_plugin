@@ -164,13 +164,12 @@ def test_fallback_needs_two_retries():
 
 
 def test_compression_prompt_pins_subject_attribution():
-    """压缩提示词必须钉住「主体=真正说这句话的人」✗
+    """压缩提示词必须钉住「主体归属」的语义（线上事故：A 的话被记到 B 名下 ✗）:
 
-    群聊一条记录里 `u` 是**多人列表**，而 `s` 是合并原文 —— 没有这条规则时模型只能猜，
-    猜偏就是「A 说的话被记到 B 名下、来源也挂错」（线上真实事故 ✓）。
+    ① u 是**可见范围**、不是说话人 ✗  ② sp 才是说话人 ID ✓  ③ 判断不出就不写 ✗  ④ 来源必须是真的那条
+    只钉语义，不钉句式 —— 措辞可以改，含义不能丢 ✓
     """
     src = (ROOT / "engine.py").read_text(encoding="utf-8")
-    assert "真正说出该内容的人" in src, "丢失「主体必须是说话人」规则"
-    assert "严禁把 A 说的话记到 B 名下" in src
-    assert "source_ids 必须指向真正含有该内容的记录 id" in src
-    assert "records[].u 是实体 ID 列表" in src, "同时必须保留 u 是列表的说明（否则模型不知道要区分）"
+    for token in ("可见范围", "不是说话人", "sp 是**说话人的实体 ID**",
+                  "严禁把 A 说的话记到 B 名下", "source_ids 必须指向真正含有该内容的记录 id"):
+        assert token in src, "丢失归属规则：" + token
