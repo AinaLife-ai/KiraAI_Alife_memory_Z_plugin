@@ -95,9 +95,9 @@ def test_memory_rules_keeps_the_essential_tokens():
         "CorrectMemory",
         "names",
         "sp",
-        "rec",
-        "t2",
-        "src",
+        "按主体分组",
+        "组内每行",
+        "谁说的",
     ):
         assert token in block, token
     assert len(block) < 900, "规则块每轮全价发送，涨回去就是白花钱 ✗"

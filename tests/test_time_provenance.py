@@ -182,7 +182,8 @@ def test_rules_document_time_and_speaker_fields():
     main = (ROOT / "main.py").read_text(encoding="utf-8")
     start = main.find("MEMORY_RULES = (")
     block = main[start : main.find(")\\n", start)]
-    for field in ("t=事件日期", "t2", "rec=记录日期", "sp=存档里", "SearchMemoryArchive"):
+    # v2.17.0：事实改为按主体分组、组内位置化 —— 时间/发言人不再是键名，而是位置槽
+    for field in ("时间", "谁说的", "sp=存档里", "SearchMemoryArchive", "names"):
         assert field in block, field
 
 

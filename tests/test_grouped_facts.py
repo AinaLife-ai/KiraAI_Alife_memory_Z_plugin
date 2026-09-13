@@ -62,3 +62,20 @@ def test_same_subject_never_repeats():
         retrieval.bot_facts_grouped([_fact("profile", "qq:1", "a"), _fact("profile", "qq:1", "b")], "s", codes=CODES)
     )
     assert rendered.count("n1") == 1, "主体只出现一次（组键）"
+
+
+def test_rules_block_describes_grouped_layout():
+    """给模型每轮看的规则块必须描述分组格式，且不得残留旧字段名（v2.17.0 改格式时漏改过 ✗）。"""
+    import importlib, types
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "按主体分组" in source
+    for stale in ("u=主体ID", "t2)", "rec=记录日期", "src=来源存档ID"):
+        assert stale not in source, "规则块残留旧措辞：" + stale
+
+
+def test_grouped_example_line_matches_real_render():
+    """示例必须是渲染器**真实产出**的（否则示例会随格式改动而过期 ✗）。"""
+    import json
+    rendered = json.dumps(retrieval.grouped_example(), ensure_ascii=False, separators=(",", ":"))
+    assert rendered in retrieval.GROUPED_EXAMPLE_LINE, "示例与真实渲染不一致"
+    assert retrieval.GROUPED_EXAMPLE_LINE.startswith("读取示例")
