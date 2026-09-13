@@ -275,3 +275,14 @@ def test_source_list_is_widened_from_the_same_batch():
     assert "_batch_text" in src, "缺少同批次文本读取"
     assert "if not words:" in src, "无关键词必须跳过（不许乱补）"
     assert "sorted(seen)" in src, "必须写回补齐后的来源（只增不减）"
+
+
+def test_audit_sees_the_same_processed_text():
+    """审计看到的必须是**压缩当时那份加工后的文本**（model_text(summary)）
+
+    压缩：model_text(row["summary"])  审计证据：也必须过一遍 model_text ✗
+    否则审计会看到压缩从没见过的内容（思考块/被截断的长描述）→ 判断失据
+    """
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "model_text(row[\"summary\"], keep)" in src, "压缩必须仍用 model_text(summary)"
+    assert "model_text(str(row[\"summary\"] or \"\"))" in src, "审计证据的 summary 必须过同一加工"

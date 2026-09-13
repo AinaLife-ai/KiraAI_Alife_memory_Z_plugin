@@ -812,6 +812,8 @@ class Engine:
                         additions[source] = {
                             k: row[k] for k in ("id", "content", "summary", "start", "end")
                         }
+                        # 与压缩当时看到的逐字符一致（压缩用的是 model_text(summary)）
+                        additions[source]["summary"] = model_text(str(row["summary"] or ""))
                         # 说话人（显示名）——**审计核对归属的唯一依据**：
                         # 没有它，审计看得出"这条归给谁"，却看不出"原文是谁说的" ✗ 只能猜
                         try:
