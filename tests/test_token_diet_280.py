@@ -265,16 +265,31 @@ def test_audit_must_not_treat_silence_as_contradiction():
     assert "看不到就当 keep" in src, "看不到必须保持不动"
 
 
-def test_source_list_is_widened_from_the_same_batch():
-    """B：压缩落库前必须补齐漏列的来源（模型只挑一条 → 审计因此误判）
+def test_widen_source_ids_behavior():
+    """B 的**行为测试**（不是文本守卫）：模型只挂一条来源 → 必须补上真正含该内容的那条
 
-    钉住：功能存在 + 三条安全性质（只增不减 through sorted(seen)、无关键词跳过、同批次取值）
+    真实事故：内容在 B 记录（"紫酱 cute"），来源只挂了 A → 审计报「证据无 X」→ 把对的改坏
+    四条性质：① 该补的补 ② 已覆盖的不动 ③ 无关键词不乱补 ④ 同批次外不许补
     """
-    src = (ROOT / "storage.py").read_text(encoding="utf-8")
-    assert "B：来源清单可能漏列" in src, "缺少来源补齐逻辑"
-    assert "_batch_text" in src, "缺少同批次文本读取"
-    assert "if not words:" in src, "无关键词必须跳过（不许乱补）"
-    assert "sorted(seen)" in src, "必须写回补齐后的来源（只增不减）"
+    storage = importlib.import_module("alife_diet280.storage")
+    a = {"id": "rA", "summary": "So cheesy 听起来像刚满月的小猫", "content": ""}
+    b = {"id": "rB", "summary": "不过叫紫酱听着还挺 cute 的", "content": ""}
+
+    fact = {"content": "Shana 觉得「紫酱」还挺 cute", "source_ids": ["rA"]}
+    assert storage.widen_source_ids([fact], [a, b]) == 1
+    assert set(fact["source_ids"]) == {"rA", "rB"}, "必须补上真正含该内容的记录"
+
+    covered = {"content": "So cheesy 听起来像刚满月的小猫", "source_ids": ["rA"]}
+    assert storage.widen_source_ids([covered], [a, b]) == 0
+    assert covered["source_ids"] == ["rA"], "已覆盖就不许动"
+
+    vague = {"content": "嗯", "source_ids": ["rA"]}
+    assert storage.widen_source_ids([vague], [a, b]) == 0
+    assert vague["source_ids"] == ["rA"], "没有关键词宁可漏补，不许乱补"
+
+    outsider = {"content": "紫酱 cute", "source_ids": ["rA"]}
+    assert storage.widen_source_ids([outsider], [a]) == 0
+    assert outsider["source_ids"] == ["rA"], "同批次里没有就不许补（不许跨批次乱挂）"
 
 
 def test_audit_sees_the_same_processed_text():
