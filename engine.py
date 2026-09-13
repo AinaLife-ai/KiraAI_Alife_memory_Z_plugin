@@ -52,10 +52,11 @@ COMMON_INSTRUCTION = (
 )
 
 AUDIT_INSTRUCTION = (
-    "审计输出只含actions，禁止输出summary/facts。target_id和source_ids均来自facts[].id，"
+    "审计输出只含actions，禁 summary/facts；target_id/source_ids 取自 facts[].id，"
     "不是evidence[].id。keep/correct/retract的source_ids只能是[target_id]；"
-    "merge至少两个同会话、同主体、同分类事实ID，每个事实只能参与一次操作。"
-    "无需操作时actions=[]。依据证据审计，保留否定、时间和不确定性；不同事件不得因相似而合并。"
+    "merge至少两个同会话、同主体、同分类事实ID，每条事实只参与一次操作。"
+    "证据里**没提到** != 事实错误 ✗：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删别改。"
+    "无操作时 actions=[]。依据证据审计，保留否定、时间和不确定性；不同事件不得因相似而合并。"
     "correct 时给修正后的 relations（无 = []，不改 = null）；"
     "importance 1-10（长期价值），correct 时按证据给修正值。"
     "subject 记错了（A 的话被记到 B 名下）就用 correct：evidence[].sp 是原文**说话人显示名**，"
@@ -809,7 +810,7 @@ class Engine:
                     row = await self.store.call("get", source)
                     if row:
                         additions[source] = {
-                            k: row[k] for k in ("id", "content", "start", "end")
+                            k: row[k] for k in ("id", "content", "summary", "start", "end")
                         }
                         # 说话人（显示名）——**审计核对归属的唯一依据**：
                         # 没有它，审计看得出"这条归给谁"，却看不出"原文是谁说的" ✗ 只能猜

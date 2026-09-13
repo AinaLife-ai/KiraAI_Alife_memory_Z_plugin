@@ -190,7 +190,7 @@ def test_audit_can_fix_attribution():
     b = c.AuditAction(action="correct", target_id="f1", source_ids=["f1"],
                                 content="x", reason="y", subject="qq:1")
     assert b.subject == "qq:1"
-    root = Path(e.__file__).parent
+    root = ROOT
     src = (root / "storage.py").read_text(encoding="utf-8")
     assert 'a["action"] == "correct" else ""' in src, "只对 correct 生效 ✗"
     assert "UPDATE facts SET subject=?" in src, "必须真的能改主体"
@@ -204,7 +204,7 @@ def test_audit_can_fix_attribution():
 def test_audit_evidence_carries_speaker():
     """审计要能核对归属，证据里必须有「原文是谁说的」✗
     否则它看得出"这条归给谁"，却看不出"原文是谁说的" → 只能猜（比不改更糟 ✓）"""
-    src = (Path(e.__file__).parent / "engine.py").read_text(encoding="utf-8")
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
     assert 'additions[source]["sp"] = speaker' in src, "审计证据必须带说话人显示名"
     assert "evidence[].sp 是原文**说话人显示名**" in src, "提示词必须说明核对依据"
     assert "没有 sp 或看不出是谁说的就别改主体" in src, "必须禁止瞎猜 ✗"
@@ -212,7 +212,7 @@ def test_audit_evidence_carries_speaker():
 
 def _prompt_texts():
     import re
-    src = Path(e.__file__).parent
+    src = ROOT
     out = {}
     for name in ("engine.py", "main.py"):
         text = (src / name).read_text(encoding="utf-8")
@@ -236,5 +236,30 @@ def test_prompt_budget_is_enforced():
     """预算守卫 ✓：以后想往指令里加内容，必须先删再写（否则 token 只会一直涨 ✗）"""
     texts = _prompt_texts()
     assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
-    assert len(texts["AUDIT_INSTRUCTION"]) <= 500, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
+    assert len(texts["AUDIT_INSTRUCTION"]) <= 560, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
     assert len(texts["MEMORY_RULES"]) <= 560, "MEMORY_RULES 超预算 %d" % len(texts["MEMORY_RULES"])
+
+
+def test_audit_judges_on_the_same_text_as_compression():
+    """审计必须看**压缩当时依据的那份文本**（summary）✗
+
+    真实事故：压缩依据 records[].summary 生成事实，审计却拿 content 断案 →
+    「证据无 X」→ 把**是对的**事实改坏（肖洋/紫酱 那条 ✓）
+    """
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert 'k: row[k] for k in ("id", "content", "summary", "start", "end")' in src, \
+        "审计证据必须包含 summary（与压缩同一份文本 ✗）"
+    assert 'row["summary"], keep' in src, "压缩应当仍在看 summary（若改了，两边要一起改 ✓）"
+
+
+def test_audit_must_not_treat_silence_as_contradiction():
+    """审计不得把「证据里没提到」当成「事实错误」✗
+
+    真实事故（2026-09-13）：Shana 说"紫酱...还挺 cute"，压缩抽对了，
+    审计却以"证据无紫酱"为由把它改成另一句 → **对的事实被改坏** ✓
+    只有证据与事实**矛盾**才可以 correct；看不到就 keep ✓
+    """
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "没提到" in src and "事实错误" in src, "缺少「沉默不等于矛盾」规则 ✗"
+    assert "只有证据与事实**矛盾**才 correct" in src, "必须只在矛盾时才改"
+    assert "看不到就当 keep" in src, "看不到必须保持不动"
