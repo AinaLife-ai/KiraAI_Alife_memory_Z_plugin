@@ -63,6 +63,7 @@ AUDIT_INSTRUCTION = (
     "无须改关系时设null。importance 用 1-10 表示这条事实的长期价值，"
     "correct 时按证据给出修正后的值。"
     "retract 用于清理被证据推翻、或与其他事实重复冗余而无需保留的事实："
+    "subject 记错了（把 A 的话记到 B 名下）就用 correct，subject 填**正确主体的实体 id 或唯一名字**；"
     "软删除后不再进入上下文，但原文与版本都保留、可以恢复；reason 写清为什么该删。"
 )
 

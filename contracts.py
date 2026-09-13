@@ -201,6 +201,8 @@ class AuditAction(Strict):
     reason: Short
     relations: list[Relation] | None = Field(default=None, max_length=20)
     importance: int | None = Field(default=None, ge=1, le=10)
+    # 主体记错了就填这里（用条目里的 id）✗ 修正归属 —— 只对 correct 有意义，留空=不动主体
+    subject: Short | None = None
 
 
 class Audit(Strict):

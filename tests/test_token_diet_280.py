@@ -175,3 +175,26 @@ def test_compress_payload_carries_speaker_id():
     # 两人重名 / 判定不出 → 宁缺勿错 ✗（不许瞎猜）
     dup = e.compress_records([dict(row, speaker="阿澄")], None, {"qq:1": "小明", "qq:2": "小明"})[0]
     assert "sp" not in dup, "说话人无法唯一确定时必须不给 sp（瞎猜就是这次的 bug ✗）"
+
+
+def test_audit_can_fix_attribution():
+    """审计必须**有工具**纠正归属（把 A 的话记到 B 名下是线上事故 ✗）:
+
+    ① 契约允许 correct 带 subject ✓  ② 不带 subject 仍然照旧（向后兼容 ✓）
+    ③ 应用处只对 correct 生效、只接受已知实体、拒绝时计数不写垃圾 ✓  ④ 提示词说明了这件事 ✓
+    """
+    c = importlib.import_module("alife_diet280.contracts")
+    a = c.AuditAction(action="correct", target_id="f1", source_ids=["f1"],
+                                content="x", reason="y")
+    assert a.subject is None, "不带 subject 必须仍然可用（老输出兼容 ✓）"
+    b = c.AuditAction(action="correct", target_id="f1", source_ids=["f1"],
+                                content="x", reason="y", subject="qq:1")
+    assert b.subject == "qq:1"
+    root = Path(e.__file__).parent
+    src = (root / "storage.py").read_text(encoding="utf-8")
+    assert 'a["action"] == "correct" else ""' in src, "只对 correct 生效 ✗"
+    assert "UPDATE facts SET subject=?" in src, "必须真的能改主体"
+    assert "subject_rejected" in src, "拿不准时必须拒绝并计数（不许写垃圾 ✗）"
+    assert "subject_fixed" in src
+    eng = (root / "engine.py").read_text(encoding="utf-8")
+    assert "subject 填**正确主体的实体 id 或唯一名字**" in eng, "提示词必须告诉审计它能改归属"
