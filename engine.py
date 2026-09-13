@@ -42,7 +42,7 @@ COMMON_INSTRUCTION = (
     "records[].u 是**可见范围**（不是说话人 ✗）、sp 是**说话人的实体 ID**（可缺），名字在顶层 names 表；"
     "subject 只填实体 ID（未明确的名称按原文保留），优先取 sp，缺了就按 s 原文判断。"
     "主体必须是**真正说这话的人**（群聊里 u 可能列多人）：判断不出就别写这条事实，严禁把 A 的话记到 B 名下；"
-    "写摘要与事实时用 names 里的名字；source_ids 必须指向真正含该内容的记录。"
+    "写摘要与事实时用 names 里的名字；source_ids 必须指向真正含该内容的**每条**记录（漏列会让审计误判）✗"
     "records[].s 是这段对话的原文，records[].t 是这条消息发生的时间。"
     # 相对时间必须换算成绝对日期，否则"昨天"会永久失真 ✗
     "写摘要和事实时，把原文里的「今天/昨天/前天/刚刚/上周/去年」按 records[].t "
@@ -52,10 +52,11 @@ COMMON_INSTRUCTION = (
 )
 
 AUDIT_INSTRUCTION = (
-    "审计输出只含actions，禁止输出summary/facts。target_id和source_ids均来自facts[].id，"
+    "审计输出只含actions，禁 summary/facts；target_id/source_ids 取自 facts[].id，"
     "不是evidence[].id。keep/correct/retract的source_ids只能是[target_id]；"
-    "merge至少两个同会话、同主体、同分类事实ID，每个事实只能参与一次操作。"
-    "无需操作时actions=[]。依据证据审计，保留否定、时间和不确定性；不同事件不得因相似而合并。"
+    "merge至少两个同会话、同主体、同分类事实ID，每条事实只参与一次操作。"
+    "证据里**没提到** != 事实错误 ✗：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删别改。"
+    "无操作时 actions=[]。依据证据审计，保留否定、时间和不确定性；不同事件不得因相似而合并。"
     "correct 时给修正后的 relations（无 = []，不改 = null）；"
     "importance 1-10（长期价值），correct 时按证据给修正值。"
     "subject 记错了（A 的话被记到 B 名下）就用 correct：evidence[].sp 是原文**说话人显示名**，"
@@ -809,8 +810,10 @@ class Engine:
                     row = await self.store.call("get", source)
                     if row:
                         additions[source] = {
-                            k: row[k] for k in ("id", "content", "start", "end")
+                            k: row[k] for k in ("id", "content", "summary", "start", "end")
                         }
+                        # 与压缩当时看到的逐字符一致（压缩用的是 model_text(summary)）
+                        additions[source]["summary"] = model_text(str(row["summary"] or ""))
                         # 说话人（显示名）——**审计核对归属的唯一依据**：
                         # 没有它，审计看得出"这条归给谁"，却看不出"原文是谁说的" ✗ 只能猜
                         try:

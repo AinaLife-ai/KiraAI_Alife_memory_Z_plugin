@@ -1883,6 +1883,7 @@ class Store:
                 if not current or tuple(current) != (row["revision"], 1, 0):
                     raise Conflict("source changed during compression")
             ids = {r["id"] for r in candidates}
+            widen_source_ids(output["facts"], candidates)  # 补齐漏列来源（见模块级函数）✓
             if any(not set(f["source_ids"]) <= ids for f in output["facts"]):
                 raise ValueError("unknown source id")
             start, end = (
@@ -3701,3 +3702,37 @@ class Store:
                     "entity_names",
                 )
             }
+
+
+def widen_source_ids(facts, candidates):
+    """补齐事实**漏列**的来源（同批次内；只增不减；最多补一条；没有关键词就跳过）。
+
+    为什么需要它：压缩模型常只挑一条记录当来源，而事实可能来自**同批次**的另一条
+    （真实事故：内容在 B，来源只挂了 A → 审计报「证据无 X」→ 把**对的**事实改坏 ✗）。
+    返回被补齐的事实条数（0 = 没有动过任何事实）。
+    """
+    if not facts or not candidates:
+        return 0
+
+    def _text(row):
+        try:
+            return str(row["summary"] or "") + str(row["content"] or "")
+        except Exception:
+            return ""
+
+    batch = {str(r["id"]): _text(r) for r in candidates}
+    fixed = 0
+    for fact in facts:
+        words = re.findall(r"[\u4e00-\u9fa5]{2,6}|[A-Za-z0-9]{3,}", str(fact.get("content") or ""))
+        if not words:
+            continue  # 没有可用关键词 → 不乱补 ✗
+        seen = {str(x) for x in (fact.get("source_ids") or [])}
+        if any(w in batch.get(rid, "") for rid in seen for w in words):
+            continue  # 已声明的来源里就有该内容 → 不动 ✓
+        for rid, text in batch.items():
+            if rid not in seen and any(w in text for w in words):
+                seen.add(rid)
+                fixed += 1
+                break  # 最多补一条 ✓ 防止来源膨胀
+        fact["source_ids"] = sorted(seen)  # 只增不减 ✓
+    return fixed
