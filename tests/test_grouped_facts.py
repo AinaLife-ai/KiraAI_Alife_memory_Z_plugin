@@ -93,3 +93,27 @@ def test_grouped_example_has_no_real_looking_entities():
     assert "（示例）" in line, "示例内容必须自带「示例」标记"
     assert "n1" in line and "pf" in line, "结构教学不能丢"
     assert "组内每行" in line
+
+
+def test_model_facing_strings_have_no_user_data():
+    """只有**可能发给模型/用户**的字符串字面量必须通用（注释与 docstring 允许留真实痕迹 ✓）。
+
+    用 AST 取字符串常量并排除 docstring —— 比肉眼扫可靠，也不会因为注释而误报 ✓
+    """
+    import ast
+    banned = ("周武", "武哥", "星月", "萤火", "阿澄", "橘子", "769690776", "一起吃了饭")
+    for name in ("main.py", "engine.py", "retrieval.py", "setting_help.py"):
+        tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                first = body[0] if body else None
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    docstrings.add(id(first.value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in docstrings:
+                    continue
+                for token in banned:
+                    assert token not in node.value, name + " 模型可见字符串残留用户数据：" + token
