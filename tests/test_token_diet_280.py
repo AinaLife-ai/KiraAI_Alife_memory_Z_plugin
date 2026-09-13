@@ -195,6 +195,7 @@ def test_audit_can_fix_attribution():
     assert 'a["action"] == "correct" else ""' in src, "只对 correct 生效 ✗"
     assert "UPDATE facts SET subject=?" in src, "必须真的能改主体"
     assert "subject_rejected" in src, "拿不准时必须拒绝并计数（不许写垃圾 ✗）"
+    assert "重名撞车时**必须拒绝**" in src, "重名时必须拒绝（任取一个就是制造新错记 ✗）"
     assert "subject_fixed" in src
     eng = (root / "engine.py").read_text(encoding="utf-8")
     assert "subject 填**正确主体的实体 id 或唯一名字**" in eng, "提示词必须告诉审计它能改归属"

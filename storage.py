@@ -3496,7 +3496,10 @@ class Store:
                 #   只对 correct 生效；只接受"已知实体"（id 或唯一名字）；拿不准就拒绝，绝不写垃圾 ✓
                 wanted = (a.get("subject") or "").strip() if a["action"] == "correct" else ""
                 if wanted and wanted != old["subject"]:
-                    hit = db.execute("SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted)).fetchone()
+                    hits = {row[0] for row in db.execute(
+                        "SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted))}
+                    # 重名撞车时**必须拒绝** ✗（任取一个 = 制造新的错记，正是本次事故那一类）
+                    hit = (hits.pop(),) if len(hits) == 1 else None
                     if hit and hit[0] != old["subject"]:
                         db.execute(
                             "UPDATE facts SET subject=?,revision=revision+1 WHERE id=?",
