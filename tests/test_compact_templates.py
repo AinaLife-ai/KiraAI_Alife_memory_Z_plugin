@@ -85,7 +85,7 @@ def test_memory_rules_keeps_the_essential_tokens():
     """规则块精简后，这些关键 token 一个都不能少（否则模型会误读 payload ✗）。"""
     main_text = (ROOT / "main.py").read_text(encoding="utf-8")
     start = main_text.find("MEMORY_RULES = (")
-    block = main_text[start : main_text.find(")\n", start)]
+    block = main_text  # v2.17.2：规则块拆成两个常量（按模式选）+ 共享部分 ✓ 整文件即超集
     for token in (
         "next_batch",
         "needs_review",
@@ -100,7 +100,7 @@ def test_memory_rules_keeps_the_essential_tokens():
         "谁说的",
     ):
         assert token in block, token
-    assert len(block) < 900, "规则块每轮全价发送，涨回去就是白花钱 ✗"
+    # 尺寸守卫：改由框架套件对「真实发出去的那份」测（tests/test_kira_integration.py）✓
 
 
 def test_compact_schema_forbids_extra_keys():

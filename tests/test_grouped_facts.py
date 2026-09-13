@@ -69,8 +69,11 @@ def test_rules_block_describes_grouped_layout():
     import importlib, types
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "按主体分组" in source
-    for stale in ("u=主体ID", "t2)", "rec=记录日期", "src=来源存档ID"):
-        assert stale not in source, "规则块残留旧措辞：" + stale
+    _g = source[source.index("_GROUPED_FACT_DOC = (") : source.index("MEMORY_RULES = (")]
+    _f = source[source.index("_FLAT_FACT_DOC = (") : source.index("def memory_rules")]
+    for stale in ("u=主体ID", "t2", "rec=记录日期", "src=来源存档ID"):
+        assert stale not in _g, "分组说明残留旧措辞：" + stale
+        assert stale in _f, "扁平说明缺该模式词汇（回滚路径必须自洽）：" + stale
 
 
 def test_grouped_example_line_matches_real_render():
