@@ -82,3 +82,14 @@ def test_grouped_example_line_matches_real_render():
     rendered = json.dumps(retrieval.grouped_example(), ensure_ascii=False, separators=(",", ":"))
     assert rendered in retrieval.GROUPED_EXAMPLE_LINE, "示例与真实渲染不一致"
     assert retrieval.GROUPED_EXAMPLE_LINE.startswith("读取示例")
+
+
+def test_grouped_example_has_no_real_looking_entities():
+    """示例必须是抽象占位：不得出现具体人名/具体事件 —— 否则每个用户的提示词里都会凭空多出一个陌生人 ✗
+    （记忆插件常被问"你记得某某吗"，模型可能把示例里的名字当成真实记忆）"""
+    line = retrieval.GROUPED_EXAMPLE_LINE
+    for banned in ("周武", "室友", "吃饭"):
+        assert banned not in line, "示例里出现具体实体：" + banned
+    assert "（示例）" in line, "示例内容必须自带「示例」标记"
+    assert "n1" in line and "pf" in line, "结构教学不能丢"
+    assert "组内每行" in line
