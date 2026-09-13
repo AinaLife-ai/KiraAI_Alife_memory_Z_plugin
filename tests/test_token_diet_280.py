@@ -103,7 +103,7 @@ def test_instructions_carry_the_new_limits():
     assert "content 不超过 60 字" in text
     assert "records[].s 是这段对话的原文" in text
     assert "records[].u 是**可见范围**" in text, "必须说明 u 是可见范围（旧说明写成「实体 ID 列表」曾导致主体错记 ✗）"
-    assert "records[].sp" in text, "必须说明 sp 是说话人 ID（压缩要据此定主体）"
+    assert "sp 是**说话人的实体 ID**" in text, "必须说明 sp 是说话人 ID（压缩要据此定主体）"
     audit = e.AUDIT_INSTRUCTION
     assert "facts[].sources" not in audit, "sources 已不入参，指令不该再提它"
 
@@ -198,7 +198,7 @@ def test_audit_can_fix_attribution():
     assert "重名撞车时**必须拒绝**" in src, "重名时必须拒绝（任取一个就是制造新错记 ✗）"
     assert "subject_fixed" in src
     eng = (root / "engine.py").read_text(encoding="utf-8")
-    assert "subject 填**正确主体的实体 id 或唯一名字**" in eng, "提示词必须告诉审计它能改归属"
+    assert "subject 填成正确的人名" in eng, "提示词必须告诉审计它能改归属"
 
 
 def test_audit_evidence_carries_speaker():
@@ -206,5 +206,35 @@ def test_audit_evidence_carries_speaker():
     否则它看得出"这条归给谁"，却看不出"原文是谁说的" → 只能猜（比不改更糟 ✓）"""
     src = (Path(e.__file__).parent / "engine.py").read_text(encoding="utf-8")
     assert 'additions[source]["sp"] = speaker' in src, "审计证据必须带说话人显示名"
-    assert "evidence[].sp 是这条原文的**说话人显示名**" in src, "提示词必须说明核对依据"
-    assert "没有 sp 或看不出是谁说的，就不要改主体" in src, "必须禁止瞎猜 ✗"
+    assert "evidence[].sp 是原文**说话人显示名**" in src, "提示词必须说明核对依据"
+    assert "没有 sp 或看不出是谁说的就别改主体" in src, "必须禁止瞎猜 ✗"
+
+
+def _prompt_texts():
+    import re
+    src = Path(e.__file__).parent
+    out = {}
+    for name in ("engine.py", "main.py"):
+        text = (src / name).read_text(encoding="utf-8")
+        for m in re.finditer(r'([A-Z_]{4,})\s*=\s*\((.*?)\n\)', text, re.S):
+            body = "".join(re.findall(r'"([^"]*)"', m.group(2)))
+            if len(body) >= 150:
+                out[m.group(1)] = body
+    return out
+
+
+def test_instruction_sentences_are_not_glued():
+    """防「两句话粘一起」✗ 真实事故：追加规则时新内容被粘进 retract 那句的中间，
+    模型读成「retract 是用来改主体的」。机器怎么发现？一条经验规则：
+    **同一句里不该出现两个「：」**（那通常就是两条规则粘一起了）"""
+    for name, text in _prompt_texts().items():
+        for seg in text.split("。"):
+            assert seg.count("：") <= 1, "%s 疑似两句话粘一起：%s。" % (name, seg[:60])
+
+
+def test_prompt_budget_is_enforced():
+    """预算守卫 ✓：以后想往指令里加内容，必须先删再写（否则 token 只会一直涨 ✗）"""
+    texts = _prompt_texts()
+    assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
+    assert len(texts["AUDIT_INSTRUCTION"]) <= 500, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
+    assert len(texts["MEMORY_RULES"]) <= 560, "MEMORY_RULES 超预算 %d" % len(texts["MEMORY_RULES"])
