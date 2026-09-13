@@ -137,3 +137,15 @@ def test_status_reports_version_for_self_check():
     assert '_plugin_version' in source and 'status["version"]' in source
     js = (WEB / "app.js").read_text(encoding="utf-8")
     assert "next.version" in js, "前端要显示版本号"
+
+
+def test_capacity_meter_is_rendered_from_status():
+    """容量仪表必须真被前端消费（后端写了字段、界面不显示 = 白做 ✓）且必须在 poll() 内用返回值。"""
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "next.capacity" in js and "capacityEl" in js
+    assert "db_bytes" in js and "fts_rows" in js and "levels" in js
+    poll = js[js.index("async function poll()"):]
+    assert "next.capacity" in poll[:2500], "容量渲染必须在 poll() 内（否则 next 未定义 ✗）"
+    assert "let capacityEl" in js, "必须有声明，不能靠隐式全局 ✗"
+    main_src = (WEB.parent / "main.py").read_text(encoding="utf-8")
+    assert 'status["capacity"]' in main_src, "后端必须真的提供 /status.capacity"
