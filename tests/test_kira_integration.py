@@ -1736,3 +1736,20 @@ async def test_prewarm_hook_accepts_single_message_event(tmp_path):
         assert module.user_ids(event) == module.user_ids(make_event()) == ["test:u"]
     finally:
         await plugin.terminate()
+
+
+def test_memory_rules_per_view_are_complete_and_bounded():
+    """B2：真正发出去的那份规则块按模式选 —— 必须①含齐该模式的读法词汇 ②受尺寸约束
+    ③同模式逐字节稳定（前缀缓存的前提）。用**真实对象**校验 ✓ 不做文本切片 ✓"""
+    grouped = module.memory_rules("grouped")
+    flat = module.memory_rules("flat")
+    assert isinstance(grouped, str) and isinstance(flat, str)
+    assert grouped != flat, "两种模式必须给出不同说明"
+    assert module.memory_rules(None) == grouped, "默认必须是分组视图"
+    assert module.memory_rules("grouped") == grouped and module.memory_rules("flat") == flat, "同模式必须稳定"
+    for token in ("names", "按主体分组", "组内每行", "谁说的"):
+        assert token in grouped, "分组规则块缺：" + token
+    for token in ("names", "u=主体ID", "imp=重要度"):
+        assert token in flat, "扁平规则块缺：" + token
+    for name, block in (("grouped", grouped), ("flat", flat)):
+        assert len(block) < 900, name + " 规则块每轮全价发送，涨回去就是白花钱 ✗"

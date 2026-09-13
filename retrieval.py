@@ -927,14 +927,14 @@ def grouped_example():
             {
                 "category": "profile",
                 "subject": "qq:1",
-                "content": "周武是大学室友",
+                "content": "某条画像事实（示例）",
                 "importance": 7,
                 "event_at": 1755648000,
             },
             {
                 "category": "event",
                 "subject": "qq:1",
-                "content": "上周一起吃了饭",
+                "content": "某条事件事实（示例）",
                 "importance": 6,
                 "event_at": 1755648000,
             },
