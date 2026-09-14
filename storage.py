@@ -770,7 +770,9 @@ class Store:
                 rows = db.execute(
                     "SELECT DISTINCT json_extract(rel.value, '$.object')"
                     " FROM facts f, json_each(f.relations) rel"
-                    " WHERE f.deleted=0 AND f.subject IN (%s)" % marks,
+                    # relations 为空串时 json_each 会抛 malformed JSON ✗ 必须先过滤（实测确认）
+                    " WHERE f.deleted=0 AND f.relations IS NOT NULL AND f.relations != ''"
+                    " AND f.subject IN (%s)" % marks,
                     ids,
                 ).fetchall()
                 for (obj,) in rows:
@@ -2489,7 +2491,11 @@ class Store:
                 if _expand_on:
                     base_tokens = query_tokens(lexical)
                     if 0 < len(base_tokens) <= 3:
-                        extra = self.expand_query(lexical)
+                        # 扩展是**增益**，绝不能拖垮召回 ✗ —— 任何异常都退回不扩（实测过空串 relations 会抛错）
+                        try:
+                            extra = self.expand_query(lexical)
+                        except Exception:
+                            extra = []
                         if extra:
                             lexical = lexical + " " + " ".join(extra)
                 tokens = query_tokens(lexical)

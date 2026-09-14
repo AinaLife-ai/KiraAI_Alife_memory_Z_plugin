@@ -386,7 +386,7 @@ def test_search_wires_expansion_only_for_narrow_queries():
     ③ 默认开启但可用属性关掉（便于排查）④ 扩展器本身只读
     """
     src = (ROOT / "storage.py").read_text(encoding="utf-8")
-    seg = src.split("v2.18 第5项：查询词过一层")[1][:700]
+    seg = src.split("v2.18 第5项：查询词过一层")[1][:1400]
     assert "if 0 < len(base_tokens) <= 3:" in seg, "必须有词元数门控（否则等于无差别扩词）"
     assert 'lexical = lexical + " " + " ".join(extra)' in seg, "扩展词只许追加到查询串"
     assert "expand=None" in src, "search 必须有 expand 参数（配置入口）"
@@ -395,6 +395,39 @@ def test_search_wires_expansion_only_for_narrow_queries():
     sch = (ROOT / "schema.json").read_text(encoding="utf-8")
     assert "expand_query" in sch, "schema 必须有该设置项（与 Settings 同步）"
     assert "self.expand_query(lexical)" in seg, "必须调用扩展器"
+
+
+def test_prompt_field_references_exist():
+    """**系统性**防「空头指令」✗：提示词里提到的每个 x[].y 字段，必须能在载荷构造里找到
+
+    真实踩过：审计提示词叫模型用「名字@短码」，可审计载荷里**没有短码表** →
+    模型永远无法执行该指令（要么忽略、要么瞎编）。这条守卫让这类问题不再靠人肉核。
+    """
+    import re as _re
+
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    prompts = {}
+    for name in ("COMMON_INSTRUCTION", "AUDIT_INSTRUCTION", "DEDUPE_CONSERVATIVE_INSTRUCTION"):
+        m = _re.search(name + r"\s*=\s*\((.*?)\n\)", src, _re.S)
+        if m:
+            prompts[name] = "".join(_re.findall(r'"([^"]*)"', m.group(1)))
+    assert prompts, "没找到提示词常量"
+    missing = []
+    for name, text in prompts.items():
+        for owner, field in sorted(set(_re.findall(r"([a-z_]+)\[\]\.([a-z_]+)", text))):
+            if ('"' + field + '"') not in src and ("'" + field + "'") not in src:
+                missing.append(name + " 提到 " + owner + "[." + "]" + "." + field + "，载荷里没有")
+    assert not missing, "提示词指向模型看不到的字段 ✗：" + "；".join(missing)
+
+
+def test_expansion_cannot_break_recall():
+    """扩展是增益 ✗ 绝不能拖垮召回：① SQL 过滤空串/NULL events（实测 json_each 遇空串抛错）
+    ② 调用点有兜底 try/except（任何异常都退回不扩）
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "f.relations IS NOT NULL AND f.relations" in src, "必须过滤空串（否则 json_each 抛 malformed JSON）"
+    call = src.split("v2.18 第5项：查询词过一层")[1][:1400]
+    assert "except Exception:" in call and "extra = []" in call, "调用点必须有兜底"
 
 
 def test_recall_usage_counters():
