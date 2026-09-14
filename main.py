@@ -2658,7 +2658,14 @@ class AlifeMemoryPlugin(BasePlugin):
         for pid, provider in providers.items():
             for kind in ("llm", "embedding"):
                 for mid in provider.get("model_config", {}).get(kind, {}):
-                    result.append({"id": f"{pid}:{mid}", "name": mid, "kind": kind})
+                    result.append({
+                        "id": f"{pid}:{mid}",
+                        "name": mid,
+                        "model": mid,
+                        # v2.18.1：带上"用户在 KiraAI 里看到的提供商名字"，前端别再显示内部 id ✗
+                        "provider": provider.get("name") or pid,
+                        "kind": kind,
+                    })
         return {"models": result}
 
     @register.api(method="POST", path="/search", auth=True)

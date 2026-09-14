@@ -1138,7 +1138,11 @@ function renderConfig(values) {
                 '" ' +
                 (value === m.id ? "selected" : "") +
                 ">" +
-                esc(m.id) +
+                esc(
+                  (m.provider || String(m.id).split(":")[0] || "") +
+                  " · " +
+                  (m.model || m.name || m.id),
+                ) +
                 "</option>",
             )
             .join("") +

@@ -137,6 +137,7 @@ small,
   min-height: 100vh;
 }
 aside {
+  overflow: hidden;   /* v2.18.1：让内部区域自己滚，别把导航裁掉 */
   padding: 30px 18px;
   border-right: 1px solid var(--line);
   background: var(--panel);
@@ -169,6 +170,10 @@ aside {
 .nav {
   display: grid;
   gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;        /* flex 子项必须能收缩，否则 overflow 不生效 ✗ */
+  overflow-y: auto;     /* v2.18.1：侧栏导航可滚动（窄屏/小窗口也能点到「偏好设置」） */
+  overscroll-behavior: contain;
 }
 .nav button {
   text-align: left;
