@@ -3497,8 +3497,17 @@ class Store:
                 #   只对 correct 生效；只接受"已知实体"（id 或唯一名字）；拿不准就拒绝，绝不写垃圾 ✓
                 wanted = (a.get("subject") or "").strip() if a["action"] == "correct" else ""
                 if wanted and wanted != old["subject"]:
-                    hits = {row[0] for row in db.execute(
-                        "SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted))}
+                    if "@" in wanted:
+                        # v2.18：消歧写法「名字@短码」—— 重名时审计也能改对归属 ✓
+                        # 短码是库里持久稳定的 ✓；解析不到就按"拒绝"处理（不猜 ✗）
+                        _base, _sep, code = wanted.rpartition("@")
+                        _row = db.execute(
+                            "SELECT real FROM short_ids WHERE short=?", (code.strip(),)
+                        ).fetchone()
+                        hits = {_row[0]} if _row else set()
+                    else:
+                        hits = {row[0] for row in db.execute(
+                            "SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted))}
                     # 重名撞车时**必须拒绝** ✗（任取一个 = 制造新的错记，正是本次事故那一类）
                     hit = (hits.pop(),) if len(hits) == 1 else None
                     if hit and hit[0] != old["subject"]:

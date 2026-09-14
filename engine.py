@@ -60,7 +60,7 @@ AUDIT_INSTRUCTION = (
     "correct 时给修正后的 relations（无 = []，不改 = null）；"
     "importance 1-10（长期价值），correct 时按证据给修正值。"
     "subject 记错了（A 的话被记到 B 名下）就用 correct：evidence[].sp 是原文**说话人显示名**，"
-    "与之不符就把 subject 填成正确的人名（必须唯一 ✗ 重名别改）；没有 sp 或看不出是谁说的就别改主体。"
+    "与之不符就把 subject 填成正确的人名（须唯一；重名用「名字@短码」；拿不准别改）；没有 sp 或看不出是谁说的就别改主体。"
     "retract 用于清理被证据推翻或重复冗余的事实：软删除后不再进入上下文，原文与版本保留可恢复；reason 写清为什么删。"
 )
 

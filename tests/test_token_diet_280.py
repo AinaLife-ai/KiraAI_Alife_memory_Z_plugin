@@ -330,3 +330,32 @@ def test_audit_sees_the_same_processed_text():
     src = (ROOT / "engine.py").read_text(encoding="utf-8")
     assert "model_text(row[\"summary\"], keep)" in src, "压缩必须仍用 model_text(summary)"
     assert "model_text(str(row[\"summary\"] or \"\"))" in src, "审计证据的 summary 必须过同一加工"
+
+
+def test_audit_subject_disambiguation():
+    """第 2 项：重名时审计也能改对归属（「名字@短码」）
+
+    ① 短码解析走 short_ids 表（持久稳定）✓
+    ② 解析不到 → 按拒绝处理（不猜）✓
+    ③ 普通名字路径**不受影响**（唯一才收）✓
+    ④ 提示词必须告诉审计这个写法 ✓
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert 'SELECT real FROM short_ids WHERE short=?' in src, "短码解析必须查 short_ids 表"
+    seg = src.split("v2.18：消歧写法")[1][:600] if "v2.18：消歧写法" in src else ""
+    assert "hits = {_row[0]} if _row else set()" in seg, "解析不到必须置空（走拒绝路径）"
+    assert 'SELECT id FROM entities WHERE id=? OR name=?' in src, "普通名字路径必须保留"
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "重名用「名字@短码」" in eng, "提示词必须说明消歧写法"
+
+
+def test_disambiguation_form_never_reaches_content():
+    """「名字@短码」只是入参写法 ✗ 落库必须写回**解析出的真实实体 ID**
+
+    ① 短码查 short_ids 表 ② 解析不到就走拒绝路径（不许回退到名字匹配乱猜）③ 普通名字路径保留
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "SELECT real FROM short_ids WHERE short=?" in src, "短码必须查表解析"
+    assert "if _row else set()" in src, "解析不到必须置空 → 走拒绝路径"
+    assert "UPDATE facts SET subject=?" in src, "必须写回真实 ID"
+    assert "entities WHERE id=? OR name=?" in src, "普通名字路径必须保留（唯一才收）"
