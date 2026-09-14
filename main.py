@@ -2113,6 +2113,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 vector=vector,
                 model=model,
                 lexical=q.prompt if not vector else "",
+                expand=self.settings.expand_query,
                 exclude_ids=excluded,
                 # 归档是否参与由设置决定（默认参与，召回更全）；
                 # 冷归档与软删永远搜不到。

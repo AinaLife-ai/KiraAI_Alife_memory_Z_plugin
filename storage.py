@@ -2401,6 +2401,7 @@ class Store:
         vector=None,
         model="",
         lexical="",
+        expand=None,
         exclude_sid="",
         exclude_ids=(),
         prefer_sid="",
@@ -2484,7 +2485,8 @@ class Store:
                 # v2.18 第5项：查询词过一层"库里已有线索"的扩展（实体别名 + 已核实关系客体）
                 #   门控：**只在该查询词元很少时**启动（这正是召回变窄的场景）✗
                 #   扩展词全部有库内出处 ✓ 只**补**词元、不改打分口径 ✓
-                if getattr(self, "_expand_enabled", True):
+                _expand_on = getattr(self, "_expand_enabled", True) if expand is None else bool(expand)
+                if _expand_on:
                     base_tokens = query_tokens(lexical)
                     if 0 < len(base_tokens) <= 3:
                         extra = self.expand_query(lexical)
