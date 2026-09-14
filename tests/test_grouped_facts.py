@@ -40,7 +40,8 @@ def test_tail_omission_keeps_middle_slot():
         "sid-a", codes=CODES,
     )["n1"][0]
     assert row[2] == "", "中间位（重要性）缺 → 补空串占位"
-    assert row[3] == "n1>朋友>n2", "关系用短码三元组"
+    # 关系主体 == 本组主体 → 省略主体（第 4 项：省 4~6 字符/条，图例已说明 ✓）
+    assert row[3] == ">朋友>n2", "关系用短码三元组，本组主体可省"
 
 
 def test_flat_view_is_byte_identical():
@@ -84,9 +85,30 @@ def test_grouped_example_line_matches_real_render():
     assert retrieval.GROUPED_EXAMPLE_LINE.startswith("读取示例")
 
 
-def test_grouped_example_has_no_real_looking_entities():
+def test_relation_omits_own_subject_only():
+    """第 4 项：关系里**只有当主体就是本组主体时**才省略（省 4~6 字符/条，且零歧义）
+
+    ① 主体 == 本组主体 → 省略（`>朋友>n2`）✓
+    ② 主体 ≠ 本组主体（别人提到第三方）→ **照旧写全**（否则会错意）✓
+    ③ 图例必须说明省略的含义（主 LLM 才看得懂）✓
+    """
+    codes = {"qq:1": "n1", "qq:2": "n2", "qq:3": "n3"}
+    own = {"category": "relationship", "subject": "qq:1", "content": "养了只猫叫橘子",
+           "relations": [{"subject": "qq:1", "predicate": "养的猫", "object": "橘子"}]}
+    row = retrieval.bot_facts_grouped([own], "", codes=codes)["n1"][0]
+    assert row[3] == ">养的猫>橘子", "本组主体的关系应省略主体"
+
+    other = {"category": "fact", "subject": "qq:1", "content": "小夏提到周武养猫",
+             "relations": [{"subject": "qq:3", "predicate": "养的猫", "object": "橘子"}]}
+    row2 = retrieval.bot_facts_grouped([other], "", codes=codes)["n1"][0]
+    assert row2[3] == "n3>养的猫>橘子", "非本组主体必须写全（否则会错意）"
+
+    legend = retrieval.FACT_GROUP_LEGEND
+    assert "省略主体即本组主体" in legend, "图例必须说明省略含义"
+
     """示例必须是抽象占位：不得出现具体人名/具体事件 —— 否则每个用户的提示词里都会凭空多出一个陌生人 ✗
     （记忆插件常被问"你记得某某吗"，模型可能把示例里的名字当成真实记忆）"""
+def test_grouped_example_has_no_real_looking_entities():
     line = retrieval.GROUPED_EXAMPLE_LINE
     for banned in ("周武", "室友", "吃饭"):
         assert banned not in line, "示例里出现具体实体：" + banned
