@@ -742,6 +742,47 @@ class Store:
             pass
         return out
 
+    def expand_query(self, keyword, limit=4):
+        """查询词沿**已记录的线索**扩一步：实体别名 + 已核实关系的客体 ✓
+
+        设计原则：**不做自由联想** ✗ —— 只用库里已经写明的东西（别名表 + 关系 JSON）。
+        四条闸门：
+          ① 只走一步（不沿着新词再扩，防止越扩越远）
+          ② 最多 limit 个扩展词
+          ③ 词长 ≥2（丢掉单字与标点）
+          ④ 去重，且不得包含原查询词
+        只读 ✓ 不改任何数据。返回额外词列表（可能为空）。
+        """
+        words = [w for w in re.split(r"[\s,，、;；/|]+", str(keyword or "")) if len(w) >= 2][:4]
+        if not words:
+            return []
+        extra, seen = [], set(words)
+        with self.connect() as db:
+            for word in words:
+                ids = [r[0] for r in db.execute(
+                    "SELECT id FROM entities WHERE name=?"
+                    " UNION SELECT entity_id FROM entity_names WHERE name=?",
+                    (word, word),
+                )]
+                if not ids:
+                    continue
+                marks = ",".join("?" * len(ids))
+                rows = db.execute(
+                    "SELECT DISTINCT json_extract(rel.value, '$.object')"
+                    " FROM facts f, json_each(f.relations) rel"
+                    " WHERE f.deleted=0 AND f.subject IN (%s)" % marks,
+                    ids,
+                ).fetchall()
+                for (obj,) in rows:
+                    obj = str(obj or "").strip()
+                    # 只扩"人能读的名字" ✗ —— 实体 id（如 qq:2）当检索词只会带来噪声
+                    if len(obj) >= 2 and ":" not in obj and obj not in seen:
+                        seen.add(obj)
+                        extra.append(obj)
+                        if len(extra) >= limit:
+                            return extra
+        return extra
+
     def search_index_state(self):
         """索引状态：unavailable / ready / building（供界面显示，不查库）。"""
         return self._fts_state

@@ -359,3 +359,20 @@ def test_disambiguation_form_never_reaches_content():
     assert "if _row else set()" in src, "解析不到必须置空 → 走拒绝路径"
     assert "UPDATE facts SET subject=?" in src, "必须写回真实 ID"
     assert "entities WHERE id=? OR name=?" in src, "普通名字路径必须保留（唯一才收）"
+
+
+def test_expand_query_gates():
+    """第 5 项：查询扩展器的四道闸门 + 不许拿实体 id 当检索词（只读、只沿库里已有线索）
+
+    ① 只走一步（不递归）② 最多 limit 个 ③ 词长 ≥2 ④ 不含原词
+    ⑤ 过滤实体 id（qq:x）——它当检索词只会添噪声
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "def expand_query(self, keyword, limit=4)" in src, "缺少扩展器"
+    seg = src.split("def expand_query")[1][:1800]
+    assert '": " not in obj' in seg or '"：" not in obj' in seg or chr(34) + ":" + chr(34) + " not in obj" in seg, "必须过滤实体 id"
+    assert "if len(extra) >= limit:" in seg, "必须有条数上限"
+    assert "len(w) >= 2" in seg, "必须过滤过短词（含单字/标点）"
+    assert "extra, seen = [], set(words)" in seg, "必须去重且不含原词"
+    assert "json_each(f.relations)" in seg, "只沿库里的关系扩"
+    assert "SELECT 1" not in seg and "INSERT" not in seg and "UPDATE" not in seg, "扩展器必须只读"
