@@ -160,3 +160,18 @@ def test_no_shell_expansion_damage():
     assert "= ;" not in js, "app.js 出现空赋值：补丁疑似被 shell 展开吃掉 ✗"
     assert 'typeof $ ===' in js or "const $ = " in js or "function $((" in js or "$(" in js, "选择器函数疑似缺失"
     assert '$("#searchIndex")' in js, "状态区选择器必须完整（曾被 shell 展开吃掉成 `= ;` ✗）"
+
+
+def test_recall_usage_is_rendered():
+    """第 6 项前端：召回用量必须被真的消费（后端写了字段、界面不显示 = 白做）
+
+    且必须在 poll() 内使用返回值（写在函数外会导致 next 未定义 → 按钮全死 ✗，2.17.4 的教训）
+    """
+    js = (APP / "app.js").read_text(encoding="utf-8") if "APP" in dir() else (WEB / "app.js").read_text(encoding="utf-8")
+    assert "next.recall_usage" in js and "usageEl" in js
+    assert "total_calls" in js and "total_chars" in js
+    poll = js[js.index("async function poll()"):]
+    assert "next.recall_usage" in poll[:3000], "用量渲染必须在 poll() 内"
+    assert "let usageEl" in js, "必须有声明（不许隐式全局 ✗）"
+    main_src = (WEB.parent / "main.py").read_text(encoding="utf-8")
+    assert 'status["recall_usage"]' in main_src, "后端必须真的提供该字段"

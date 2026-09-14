@@ -426,11 +426,24 @@ async function openJob(id) {
 $("#closeJob").onclick = () => $("#jobDialog").close();
 
 let capacityEl = null;   // L0 容量标签（动态插在 #searchIndex 旁）
+let usageEl = null;      // v2.18 第6项：召回用量标签
 
 async function poll() {
   try {
     const next = await api("/status");
-    // L0 容量仪表：每层条数 / 库大小 / 索引条数 / 逐年增长
+    // v2.18 第6项：召回用量（工具调用次数 / 返回字符数）
+    if (next.recall_usage && !usageEl) {
+      usageEl = document.createElement("span");
+      usageEl.className = "tag";
+      usageEl.title = "召回用量：工具被调用多少次、返回了多少字符（用来判断是否该精简返回）";
+      const badge = $("#searchIndex");
+      if (badge && badge.parentNode) badge.parentNode.insertBefore(usageEl, badge.nextSibling);
+    }
+    if (usageEl && next.recall_usage) {
+      const u = next.recall_usage;
+      const kb = ((u.total_chars || 0) / 1024).toFixed(1);
+      usageEl.textContent = "召回 " + (u.total_calls || 0) + " 次 | " + kb + "k 字符";
+    }
     if (next.capacity) {
       if (!capacityEl) {
         capacityEl = document.createElement("span");

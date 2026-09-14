@@ -390,3 +390,17 @@ def test_search_wires_expansion_only_for_narrow_queries():
     assert 'lexical = lexical + " " + " ".join(extra)' in seg, "扩展词只许追加到查询串"
     assert 'getattr(self, "_expand_enabled", True)' in seg, "默认开启且可关闭（排查用）"
     assert "self.expand_query(lexical)" in seg, "必须调用扩展器"
+
+
+def test_recall_usage_counters():
+    """第 6 项：召回用量计数必须在**唯一出口** recall_result 上做，并在 /status 暴露
+
+    ① 计数挂在 recall_result（所有工具返回都过它）② 懒创建（不动 __init__）
+    ③ /status 暴露 total_calls/total_chars/sessions ④ 前端可消费（web_audit 会校验接口一致性）
+    """
+    src = (ROOT / "main.py").read_text(encoding="utf-8")
+    seg = src.split("v2.18 第6项：召回用量计数")[1][:400]
+    assert 'row["calls"] += 1' in seg and 'row["chars"] += len(text)' in seg, "必须在出口处同时计次数与字符"
+    assert "_recall_stats" in seg and "getattr(self, \"_recall_stats\", None)" in seg, "必须懒创建"
+    assert 'status["recall_usage"]' in src, "/status 必须暴露用量"
+    assert '"total_calls"' in src and '"total_chars"' in src and '"sessions"' in src
