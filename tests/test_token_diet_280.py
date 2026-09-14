@@ -564,3 +564,24 @@ def test_settings_tab_sits_above_trash():
     nav = html.split('class="nav"')[1].split("</nav>")[0]
     assert nav.index("偏好设置") < nav.index("回收站"), "偏好设置必须排在回收站上面"
     assert nav.index("后台任务") < nav.index("偏好设置"), "偏好设置应紧跟后台任务之后"
+
+
+def test_sidebar_polish():
+    """v2.18.3 侧栏三处打磨（用户反馈）：
+    ① 滚动条细、贴右、用主题紫  ② 底部块更矮（把空间让给导航）  ③ 寄语两行+斜体+第二行缩进
+    """
+    css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    nav = css.split(".nav {")[1].split("\n}")[0]
+    assert "scrollbar-width: thin" in nav, "细滚动条（Firefox）"
+    assert "-10px" in nav and "padding-right: 10px" in nav, "滚动条要贴右"
+    assert "scrollbar-color: var(--accent) transparent" in nav, "滚动条用主题紫"
+    assert ".nav::-webkit-scrollbar" in css and "width: 5px" in css, "细滚动条（Chrome）"
+    thumb = css.split(".nav::-webkit-scrollbar-thumb")[1][:120]
+    assert "var(--accent)" in thumb, "thumb 用主题紫"
+    foot = css.split(".aside-foot {")[1].split("}")[0]
+    assert "padding: 8px 12px 9px" in foot, "底部块要更矮"
+    assert ".motto" in css and "font-style: italic" in css, "寄语必须斜体"
+    assert ".motto-2" in css and "padding-left: 1.2em" in css, "第二行要缩进"
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert "让每段记忆，都有来处" in html and "让每个故事，都有归处" in html, "寄语文案"
+    assert "让每一段经历" not in html, "旧寄语应已替换"
