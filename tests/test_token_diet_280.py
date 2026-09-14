@@ -553,3 +553,14 @@ def test_sidebar_nav_is_scrollable():
     assert "min-height: 0" in nav, "flex 子项必须能收缩（否则 overflow 不生效 ✗）"
     aside = css.split("aside {")[1].split("}")[0]
     assert "overflow: hidden" in aside, "aside 内部自己滚，不裁内容"
+
+
+def test_settings_tab_sits_above_trash():
+    """v2.18.1：侧栏里「偏好设置」必须排在「回收站」**上面**（用户要求：更好找）
+
+    原来它在最后一位 ✗ 小窗口下最容易被忽略；现在紧跟后台任务、在回收站之前 ✓
+    """
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    nav = html.split('class="nav"')[1].split("</nav>")[0]
+    assert nav.index("偏好设置") < nav.index("回收站"), "偏好设置必须排在回收站上面"
+    assert nav.index("后台任务") < nav.index("偏好设置"), "偏好设置应紧跟后台任务之后"
