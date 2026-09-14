@@ -770,13 +770,18 @@ class Store:
                 rows = db.execute(
                     "SELECT DISTINCT json_extract(rel.value, '$.object')"
                     " FROM facts f, json_each(f.relations) rel"
-                    # relations 为空串时 json_each 会抛 malformed JSON ✗ 必须先过滤（实测确认）
-                    " WHERE f.deleted=0 AND f.relations IS NOT NULL AND f.relations != ''"
+                    # relations 为空串/脏值时 json_each 会抛 malformed JSON ✗ → 必须 json_valid 过滤（实测确认）
+                    " WHERE f.deleted=0 AND json_valid(f.relations)"
+                    " AND f.relations IS NOT NULL AND f.relations != ''"
                     " AND f.subject IN (%s)" % marks,
                     ids,
                 ).fetchall()
                 for (obj,) in rows:
-                    obj = str(obj or "").strip()
+                    # 只接受**非空字符串**：缺 object / object 是 null 或数字时，
+                    # json_extract 会给 None 或数字 ✗ —— str(None) 会变成字面量 "None" 被当检索词（实测坑）
+                    if not isinstance(obj, str):
+                        continue
+                    obj = obj.strip()
                     # 只扩"人能读的名字" ✗ —— 实体 id（如 qq:2）当检索词只会带来噪声
                     if len(obj) >= 2 and ":" not in obj and obj not in seen:
                         seen.add(obj)

@@ -430,6 +430,40 @@ def test_expansion_cannot_break_recall():
     assert "except Exception:" in call and "extra = []" in call, "调用点必须有兜底"
 
 
+def test_expand_query_survives_dirty_relations():
+    """脏 relations 的完整防护（实测 8 种形态：缺 object / null / 数字 / not json / {} / 空串 / NULL / 正常）
+
+    ① `json_valid` 过滤 → 脏值不再抛 malformed JSON ✗
+    ② 只接受**非空字符串** → 避免 `str(None)` 变成字面量 "None"、数字变成 "123" 被当检索词 ✗
+    实测结果：8 种形态下最终只保留「橘子」✓
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "json_valid(f.relations)" in src, "必须用 json_valid 过滤脏值"
+    assert "if not isinstance(obj, str):" in src, "必须只接受字符串（否则 None/数字会变成检索词）"
+
+
+def test_frontend_runtime_smoke():
+    """前端**真跑一遍**（node + 最小 DOM 桩）——抓 `node --check` 抓不到的**运行时**错误
+
+    2.17.4「按钮全死」就是这一类：语法没错、一执行就炸（poll() 抛错 → status 永不更新）。
+    有 node 就跑；没有则跳过（不阻塞无 node 的环境）。
+    """
+    import shutil, subprocess
+
+    node = shutil.which("node")
+    if not node:
+        import pytest as _pytest
+        _pytest.skip("环境里没有 node")
+    app_js = ROOT / "web" / "app.js"
+    smoke = ROOT / "tests" / "js_smoke.mjs"
+    assert smoke.exists(), "缺少前端冒烟脚本"
+    check = subprocess.run([node, "--check", str(app_js)], capture_output=True, text=True, timeout=60)
+    assert check.returncode == 0, "app.js 语法检查未通过：\n" + (check.stderr or "")[:500]
+    run = subprocess.run([node, str(smoke)], capture_output=True, text=True, timeout=90)
+    assert run.returncode == 0, "前端运行时冒烟失败：\n" + (run.stderr or run.stdout)[:900]
+    assert "JS-SMOKE-OK" in run.stdout
+
+
 def test_recall_usage_counters():
     """第 6 项：召回用量计数必须在**唯一出口** recall_result 上做，并在 /status 暴露
 
