@@ -174,6 +174,25 @@ aside {
   min-height: 0;        /* flex 子项必须能收缩，否则 overflow 不生效 ✗ */
   overflow-y: auto;     /* v2.18.1：侧栏导航可滚动（窄屏/小窗口也能点到「偏好设置」） */
   overscroll-behavior: contain;
+  /* v2.18.3：滚动条细一些、贴右边、用主题紫（用户反馈：太粗、偏左、颜色不统一） */
+  margin-right: -10px;
+  padding-right: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) transparent;
+}
+
+.nav::-webkit-scrollbar {
+  width: 5px;
+}
+.nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+.nav::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 99px;
+}
+.nav::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 .nav button {
   text-align: left;
@@ -194,10 +213,22 @@ aside {
 }
 .aside-foot {
   margin-top: auto;
-  padding: 14px;
-  font-size: 12px;
+  /* v2.18.3：压低高度，把纵向空间让给导航（用户反馈） */
+  padding: 8px 12px 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
   color: var(--muted);
   border-top: 1px solid var(--line);
+}
+.motto {
+  margin: 5px 0 0;
+  font-style: italic;          /* v2.18.3：寄语用斜体（用户要求） */
+  color: var(--accent);
+  opacity: .82;
+  font-size: 11px;
+}
+.motto-2 {
+  padding-left: 1.2em;         /* 第二行缩进，读起来像落款 */
 }
 .dot {
   display: inline-block;
