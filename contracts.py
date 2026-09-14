@@ -270,6 +270,8 @@ class Settings(Strict):
     inject_recent_raw: bool = False
     auto_inject: bool = True
     fact_view: Literal["grouped", "flat"] = "grouped"
+    # v2.18 第5项：查询词很少时，沿库内线索（别名 + 已核实关系客体）扩词召回
+    expand_query: bool = True
     threshold: int = Field(default=50, ge=4, le=10000)
     batch_size: int = Field(default=40, ge=2, le=9999)
     probability: float = Field(default=0.8, ge=0, le=1)

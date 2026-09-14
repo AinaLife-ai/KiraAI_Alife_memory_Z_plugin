@@ -165,6 +165,35 @@ async def test_model_payloads_carry_no_raw_ids_or_float_times(tmp_path):
                     assert isinstance(record[key], str) and "-" in record[key]
 
 
+def test_compress_payload_speaker_candidates():
+    """第 1 项：说话人**知道是谁但定位不到唯一账号**时给候选 sp_c（重名/多人场景）
+
+    四条保证（正确性）：
+      ① 能唯一确定时仍然给 sp，**行为不变** ✓
+      ② 候选只取**原文里真实出现过**的名字（不得凭空造人）✓
+      ③ 原文里一个名字都没有 → **不给** sp_c（宁可漏，不许猜）✓
+      ④ 候选可逐字符在该记录文本里定位 ✓
+    """
+    base = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "u": ["qq:1", "qq:2"],
+            "users": ["qq:1", "qq:2"], "speaker": "小明", "role": "user", "level": 0,
+            "type": "chat", "start": 1, "end": 2}
+    dup = {"qq:1": "小明", "qq:2": "小明"}
+
+    rec = e.compress_records([base], None, dup)[0]
+    assert "sp" not in rec, "重名时不许猜出单一说话人"
+    assert rec["sp_c"] == ["小明"], "重名时应给候选（原文里出现过的小明）"
+    assert all(name in (base["summary"] + base["content"]) for name in rec["sp_c"]), "候选必须能在原文里定位"
+
+    # ① 唯一可确定 → 行为与以前完全一致（给 sp，不给 sp_c）
+    single = e.compress_records([dict(base, speaker="阿澄")], None, {"qq:1": "小明", "qq:2": "阿澄"})[0]
+    assert single["sp"] == "qq:2" and "sp_c" not in single, "能唯一确定时行为必须不变"
+
+    # ③ 原文里没有任何已知名字 → 不给候选
+    stranger = e.compress_records([dict(base, speaker="小明", summary="他说周末去了杭州")],
+                                  None, {"qq:1": "小明", "qq:2": "小明"})[0]
+    assert "sp_c" not in stranger, "名字没在原文出现就不许给候选（不许猜）"
+
+    """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
 def test_compress_payload_carries_speaker_id():
     """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
     row = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "users": ["qq:1", "qq:2"],
@@ -198,7 +227,7 @@ def test_audit_can_fix_attribution():
     assert "重名撞车时**必须拒绝**" in src, "重名时必须拒绝（任取一个就是制造新错记 ✗）"
     assert "subject_fixed" in src
     eng = (root / "engine.py").read_text(encoding="utf-8")
-    assert "subject 填成正确的人名" in eng, "提示词必须告诉审计它能改归属"
+    assert "subject 填成正确的**实体 id**" in eng, "提示词必须给出模型真能用的写法（载荷里有 subject id ✗ 短码它看不到）"
 
 
 def test_audit_evidence_carries_speaker():
@@ -301,3 +330,201 @@ def test_audit_sees_the_same_processed_text():
     src = (ROOT / "engine.py").read_text(encoding="utf-8")
     assert "model_text(row[\"summary\"], keep)" in src, "压缩必须仍用 model_text(summary)"
     assert "model_text(str(row[\"summary\"] or \"\"))" in src, "审计证据的 summary 必须过同一加工"
+
+
+def test_audit_subject_disambiguation():
+    """第 2 项：重名时审计也能改对归属（「名字@短码」）
+
+    ① 短码解析走 short_ids 表（持久稳定）✓
+    ② 解析不到 → 按拒绝处理（不猜）✓
+    ③ 普通名字路径**不受影响**（唯一才收）✓
+    ④ 提示词必须告诉审计这个写法 ✓
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert 'SELECT real FROM short_ids WHERE short=?' in src, "短码解析必须查 short_ids 表"
+    seg = src.split("v2.18：消歧写法")[1][:600] if "v2.18：消歧写法" in src else ""
+    assert "hits = {_row[0]} if _row else set()" in seg, "解析不到必须置空（走拒绝路径）"
+    assert 'SELECT id FROM entities WHERE id=? OR name=?' in src, "普通名字路径必须保留"
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "照 facts[].subject" in eng, "提示词必须指向载荷里真实存在的 subject id"
+    assert "「名字@短码」" not in eng, "不许提示模型用它看不到的短码 ✗（载荷里没有短码表）"
+
+
+def test_disambiguation_form_never_reaches_content():
+    """「名字@短码」只是入参写法 ✗ 落库必须写回**解析出的真实实体 ID**
+
+    ① 短码查 short_ids 表 ② 解析不到就走拒绝路径（不许回退到名字匹配乱猜）③ 普通名字路径保留
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "SELECT real FROM short_ids WHERE short=?" in src, "短码必须查表解析"
+    assert "if _row else set()" in src, "解析不到必须置空 → 走拒绝路径"
+    assert "UPDATE facts SET subject=?" in src, "必须写回真实 ID"
+    assert "entities WHERE id=? OR name=?" in src, "普通名字路径必须保留（唯一才收）"
+
+
+def test_expand_query_gates():
+    """第 5 项：查询扩展器的四道闸门 + 不许拿实体 id 当检索词（只读、只沿库里已有线索）
+
+    ① 只走一步（不递归）② 最多 limit 个 ③ 词长 ≥2 ④ 不含原词
+    ⑤ 过滤实体 id（qq:x）——它当检索词只会添噪声
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "def expand_query(self, keyword, limit=4)" in src, "缺少扩展器"
+    seg = src.split("def expand_query")[1][:3000]
+    assert "not in obj" in src and "len(obj) >= 2" in src, "必须有实体 id / 短词的过滤（qq:x 当检索词只会添噪声）"
+    assert "if len(extra) >= limit:" in seg, "必须有条数上限"
+    assert "len(w) >= 2" in seg, "必须过滤过短词（含单字/标点）"
+    assert "extra, seen = [], set(words)" in seg, "必须去重且不含原词"
+    assert "json_each(f.relations)" in seg, "只沿库里的关系扩"
+    assert "SELECT 1" not in seg and "INSERT" not in seg and "UPDATE" not in seg, "扩展器必须只读"
+
+
+def test_search_wires_expansion_only_for_narrow_queries():
+    """第 5 项接线：扩展只在**词元很少**时启动（= 召回变窄的场景）✗ 其余情况行为不变
+
+    ① 有门控（0 < 词元数 <= 3）② 扩展词只**追加**到查询串（不改打分口径）
+    ③ 默认开启但可用属性关掉（便于排查）④ 扩展器本身只读
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    seg = src.split("v2.18 第5项：查询词过一层")[1][:1400]
+    assert "if 0 < len(base_tokens) <= 3:" in seg, "必须有词元数门控（否则等于无差别扩词）"
+    assert 'lexical = lexical + " " + " ".join(extra)' in seg, "扩展词只许追加到查询串"
+    assert "expand=None" in src, "search 必须有 expand 参数（配置入口）"
+    assert "if expand is None else bool(expand)" in src, "配置必须优先于内置默认"
+    assert "expand=self.settings.expand_query" in (ROOT / "main.py").read_text(encoding="utf-8"), "工具调用必须传配置"
+    sch = (ROOT / "schema.json").read_text(encoding="utf-8")
+    assert "expand_query" in sch, "schema 必须有该设置项（与 Settings 同步）"
+    assert "self.expand_query(lexical)" in seg, "必须调用扩展器"
+
+
+def test_prompt_field_references_exist():
+    """**系统性**防「空头指令」✗：提示词里提到的每个 x[].y 字段，必须能在载荷构造里找到
+
+    真实踩过：审计提示词叫模型用「名字@短码」，可审计载荷里**没有短码表** →
+    模型永远无法执行该指令（要么忽略、要么瞎编）。这条守卫让这类问题不再靠人肉核。
+    """
+    import re as _re
+
+    src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    prompts = {}
+    for name in ("COMMON_INSTRUCTION", "AUDIT_INSTRUCTION", "DEDUPE_CONSERVATIVE_INSTRUCTION"):
+        m = _re.search(name + r"\s*=\s*\((.*?)\n\)", src, _re.S)
+        if m:
+            prompts[name] = "".join(_re.findall(r'"([^"]*)"', m.group(1)))
+    assert prompts, "没找到提示词常量"
+    missing = []
+    for name, text in prompts.items():
+        for owner, field in sorted(set(_re.findall(r"([a-z_]+)\[\]\.([a-z_]+)", text))):
+            if ('"' + field + '"') not in src and ("'" + field + "'") not in src:
+                missing.append(name + " 提到 " + owner + "[." + "]" + "." + field + "，载荷里没有")
+    assert not missing, "提示词指向模型看不到的字段 ✗：" + "；".join(missing)
+
+
+def test_expansion_cannot_break_recall():
+    """扩展是增益 ✗ 绝不能拖垮召回：① SQL 过滤空串/NULL events（实测 json_each 遇空串抛错）
+    ② 调用点有兜底 try/except（任何异常都退回不扩）
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "f.relations IS NOT NULL AND f.relations" in src, "必须过滤空串（否则 json_each 抛 malformed JSON）"
+    call = src.split("v2.18 第5项：查询词过一层")[1][:1400]
+    assert "except Exception:" in call and "extra = []" in call, "调用点必须有兜底"
+
+
+def test_expand_query_survives_dirty_relations():
+    """脏 relations 的完整防护（实测 8 种形态：缺 object / null / 数字 / not json / {} / 空串 / NULL / 正常）
+
+    ① `json_valid` 过滤 → 脏值不再抛 malformed JSON ✗
+    ② 只接受**非空字符串** → 避免 `str(None)` 变成字面量 "None"、数字变成 "123" 被当检索词 ✗
+    实测结果：8 种形态下最终只保留「橘子」✓
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "json_valid(f.relations)" in src, "必须用 json_valid 过滤脏值"
+    assert "if not isinstance(obj, str):" in src, "必须只接受字符串（否则 None/数字会变成检索词）"
+
+
+def test_settings_backwards_compatible_with_old_config():
+    """第4条·升级路径：旧配置文件（只有老字段）必须能加载 —— 新字段全靠默认值补齐"""
+    c = importlib.import_module("alife_diet280.contracts")
+    s = c.Settings(enabled=True, recall_scope="global")
+    assert s.expand_query is True, "新字段必须有默认值，否则旧配置加载会炸"
+    assert s.fact_view in ("grouped", "flat")
+
+
+def test_concurrency_safeguards_present():
+    """第3条·并发：多会话同时压缩/审计不会互相锁死 —— WAL + 20 秒忙等在位"""
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "sqlite3.connect(self.path, timeout=20)" in src, "缺少忙等超时"
+    assert "PRAGMA journal_mode=WAL" in src, "缺少 WAL（读不阻塞写）"
+
+
+def test_new_features_are_isolated_from_flat_view():
+    """第5条·回滚隔离：`flat` 模式下新特性互不干扰
+
+    ① 关系省略只在 grouped 渲染器里 ✗ flat 用的 bot_facts 必须一字不变
+    ② sp_c 是压缩输入的事 ✗ 与 fact_view 无耦合
+    ③ 扩展查询在窄查询门控内 ✗ 与视图模式无关
+    """
+    src = (ROOT / "retrieval.py").read_text(encoding="utf-8")
+    flat_body = src.split("def bot_facts(")[1].split("\ndef ")[0]
+    assert "省略主体" not in flat_body, "flat 渲染器不得引入关系省略（回滚路径必须逐字不变）"
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    i = eng.index('record["sp_c"]')
+    assert "fact_view" not in eng[max(0, i - 600):i + 200], "sp_c 不该与视图模式耦合"
+
+
+def test_expand_query_short_circuits_on_empty_db():
+    """第6条·空库/新装：命中不到实体就直接返回空扩展（连 facts 都不查）"""
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    seg = src.split("def expand_query")[1][:3000]
+    assert "if not ids:" in seg and "continue" in seg, "命中不到实体必须短路，不许继续查 facts"
+
+
+def test_frontend_runtime_smoke():
+    """前端**真跑一遍**（node + 最小 DOM 桩）——抓 `node --check` 抓不到的**运行时**错误
+
+    2.17.4「按钮全死」就是这一类：语法没错、一执行就炸（poll() 抛错 → status 永不更新）。
+    有 node 就跑；没有则跳过（不阻塞无 node 的环境）。
+    """
+    import shutil, subprocess
+
+    node = shutil.which("node")
+    if not node:
+        import pytest as _pytest
+        _pytest.skip("环境里没有 node")
+    app_js = ROOT / "web" / "app.js"
+    smoke = ROOT / "tests" / "js_smoke.mjs"
+    assert smoke.exists(), "缺少前端冒烟脚本"
+    check = subprocess.run([node, "--check", str(app_js)], capture_output=True, text=True, timeout=60)
+    assert check.returncode == 0, "app.js 语法检查未通过：\n" + (check.stderr or "")[:500]
+    run = subprocess.run([node, str(smoke)], capture_output=True, text=True, timeout=90)
+    assert run.returncode == 0, "前端运行时冒烟失败：\n" + (run.stderr or run.stdout)[:900]
+    assert "JS-SMOKE-OK" in run.stdout
+
+
+def test_recall_usage_counters():
+    """第 6 项：召回用量计数必须在**唯一出口** recall_result 上做，并在 /status 暴露
+
+    ① 计数挂在 recall_result（所有工具返回都过它）② 懒创建（不动 __init__）
+    ③ /status 暴露 total_calls/total_chars/sessions ④ 前端可消费（web_audit 会校验接口一致性）
+    """
+    src = (ROOT / "main.py").read_text(encoding="utf-8")
+    seg = src.split("v2.18 第6项：召回用量计数")[1][:400]
+    assert 'row["calls"] += 1' in seg and 'row["chars"] += len(text)' in seg, "必须在出口处同时计次数与字符"
+    assert "_recall_stats" in seg and "getattr(self, \"_recall_stats\", None)" in seg, "必须懒创建"
+    assert 'status["recall_usage"]' in src, "/status 必须暴露用量"
+    assert '"total_calls"' in src and '"total_chars"' in src and '"sessions"' in src
+
+
+def test_audit_usage_counters():
+    """第 6 项审计侧：轮次 / 本轮涉及会话数 / 上次时间 / 今日调用数 必须被统计并暴露
+
+    ① 在审计调度点计数（懒创建 ✓）② /status.audit_usage 暴露 ③ 今日调用数取引擎已有计数
+    """
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    seg = eng.split("v2.18 第6项：审计侧计数")[1][:400]
+    assert '_as["rounds"]' in seg and 'round_sessions' in seg and 'last_round_at' in seg
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'status["audit_usage"]' in main
+    for key in ("rounds", "round_sessions", "last_round_at", "calls_today"):
+        assert key in main, "缺少字段：" + key
+    assert 'getattr(self.engine, "audit_calls", 0)' in main, "今日调用数取引擎已有计数"

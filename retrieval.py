@@ -827,11 +827,15 @@ def _grouped_row(fact, codes, current_sid):
     row.append(importance if importance not in (None, "", 5) else "")
 
     rels = []
+    own = codes.get(str(fact.get("subject") or ""), str(fact.get("subject") or ""))
     for rel in fact.get("verified_relations") or fact.get("relations") or []:
         if not isinstance(rel, dict):
             continue
         head = codes.get(str(rel.get("subject") or ""), str(rel.get("subject") or ""))
         tail = codes.get(str(rel.get("object") or ""), str(rel.get("object") or ""))
+        # 省略主体 = 就是本组主体（仅此一种情况 ✗ 其他一律写全，避免歧义 ✓）
+        if head and own and head == own:
+            head = ""
         rels.append("%s>%s>%s" % (head, rel.get("predicate") or "", tail))
     row.append(";".join(rels))
 
@@ -906,7 +910,7 @@ def short_names(names, codes):
 
 FACT_GROUP_LEGEND = (
     "事实按主体分组：facts 的键是主体短码，组内每行 [类别, 内容, 重要性?, 关系?, 时间?, 谁说的?]，"
-    "尾部省略；关系写作 主体>关系>客体（多条用 ; 分隔）；短码与名字见 names（短码→[真实ID, 名字]）"
+    "尾部省略；关系写作 主体>关系>客体，**省略主体即本组主体**（如 >朋友>小A）；短码与名字见 names（短码→[真实ID, 名字]）"
 )
 
 

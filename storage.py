@@ -742,6 +742,54 @@ class Store:
             pass
         return out
 
+    def expand_query(self, keyword, limit=4):
+        """查询词沿**已记录的线索**扩一步：实体别名 + 已核实关系的客体 ✓
+
+        设计原则：**不做自由联想** ✗ —— 只用库里已经写明的东西（别名表 + 关系 JSON）。
+        四条闸门：
+          ① 只走一步（不沿着新词再扩，防止越扩越远）
+          ② 最多 limit 个扩展词
+          ③ 词长 ≥2（丢掉单字与标点）
+          ④ 去重，且不得包含原查询词
+        只读 ✓ 不改任何数据。返回额外词列表（可能为空）。
+        """
+        words = [w for w in re.split(r"[\s,，、;；/|]+", str(keyword or "")) if len(w) >= 2][:4]
+        if not words:
+            return []
+        extra, seen = [], set(words)
+        with self.connect() as db:
+            for word in words:
+                ids = [r[0] for r in db.execute(
+                    "SELECT id FROM entities WHERE name=?"
+                    " UNION SELECT entity_id FROM entity_names WHERE name=?",
+                    (word, word),
+                )]
+                if not ids:
+                    continue
+                marks = ",".join("?" * len(ids))
+                rows = db.execute(
+                    "SELECT DISTINCT json_extract(rel.value, '$.object')"
+                    " FROM facts f, json_each(f.relations) rel"
+                    # relations 为空串/脏值时 json_each 会抛 malformed JSON ✗ → 必须 json_valid 过滤（实测确认）
+                    " WHERE f.deleted=0 AND json_valid(f.relations)"
+                    " AND f.relations IS NOT NULL AND f.relations != ''"
+                    " AND f.subject IN (%s)" % marks,
+                    ids,
+                ).fetchall()
+                for (obj,) in rows:
+                    # 只接受**非空字符串**：缺 object / object 是 null 或数字时，
+                    # json_extract 会给 None 或数字 ✗ —— str(None) 会变成字面量 "None" 被当检索词（实测坑）
+                    if not isinstance(obj, str):
+                        continue
+                    obj = obj.strip()
+                    # 只扩"人能读的名字" ✗ —— 实体 id（如 qq:2）当检索词只会带来噪声
+                    if len(obj) >= 2 and ":" not in obj and obj not in seen:
+                        seen.add(obj)
+                        extra.append(obj)
+                        if len(extra) >= limit:
+                            return extra
+        return extra
+
     def search_index_state(self):
         """索引状态：unavailable / ready / building（供界面显示，不查库）。"""
         return self._fts_state
@@ -2360,6 +2408,7 @@ class Store:
         vector=None,
         model="",
         lexical="",
+        expand=None,
         exclude_sid="",
         exclude_ids=(),
         prefer_sid="",
@@ -2440,6 +2489,20 @@ class Store:
                 # （score = Σ 命中词元的长度），但全程在 C 层跑——
                 # 此前 relevance() 每行都要重切一次查询词元，是秒级开销的来源。
                 # 词元不再截断：原来 [:24] 会让长消息静默少召回。
+                # v2.18 第5项：查询词过一层"库里已有线索"的扩展（实体别名 + 已核实关系客体）
+                #   门控：**只在该查询词元很少时**启动（这正是召回变窄的场景）✗
+                #   扩展词全部有库内出处 ✓ 只**补**词元、不改打分口径 ✓
+                _expand_on = getattr(self, "_expand_enabled", True) if expand is None else bool(expand)
+                if _expand_on:
+                    base_tokens = query_tokens(lexical)
+                    if 0 < len(base_tokens) <= 3:
+                        # 扩展是**增益**，绝不能拖垮召回 ✗ —— 任何异常都退回不扩（实测过空串 relations 会抛错）
+                        try:
+                            extra = self.expand_query(lexical)
+                        except Exception:
+                            extra = []
+                        if extra:
+                            lexical = lexical + " " + " ".join(extra)
                 tokens = query_tokens(lexical)
                 lexical_sql = _lexical_sql("lower(summary)", tokens)
                 clauses.append("(%s)>0" % lexical_sql)
@@ -3497,8 +3560,17 @@ class Store:
                 #   只对 correct 生效；只接受"已知实体"（id 或唯一名字）；拿不准就拒绝，绝不写垃圾 ✓
                 wanted = (a.get("subject") or "").strip() if a["action"] == "correct" else ""
                 if wanted and wanted != old["subject"]:
-                    hits = {row[0] for row in db.execute(
-                        "SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted))}
+                    if "@" in wanted:
+                        # v2.18：消歧写法「名字@短码」—— 重名时审计也能改对归属 ✓
+                        # 短码是库里持久稳定的 ✓；解析不到就按"拒绝"处理（不猜 ✗）
+                        _base, _sep, code = wanted.rpartition("@")
+                        _row = db.execute(
+                            "SELECT real FROM short_ids WHERE short=?", (code.strip(),)
+                        ).fetchone()
+                        hits = {_row[0]} if _row else set()
+                    else:
+                        hits = {row[0] for row in db.execute(
+                            "SELECT id FROM entities WHERE id=? OR name=?", (wanted, wanted))}
                     # 重名撞车时**必须拒绝** ✗（任取一个 = 制造新的错记，正是本次事故那一类）
                     hit = (hits.pop(),) if len(hits) == 1 else None
                     if hit and hit[0] != old["subject"]:
