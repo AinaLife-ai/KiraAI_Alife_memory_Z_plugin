@@ -408,3 +408,18 @@ def test_recall_usage_counters():
     assert "_recall_stats" in seg and "getattr(self, \"_recall_stats\", None)" in seg, "必须懒创建"
     assert 'status["recall_usage"]' in src, "/status 必须暴露用量"
     assert '"total_calls"' in src and '"total_chars"' in src and '"sessions"' in src
+
+
+def test_audit_usage_counters():
+    """第 6 项审计侧：轮次 / 本轮涉及会话数 / 上次时间 / 今日调用数 必须被统计并暴露
+
+    ① 在审计调度点计数（懒创建 ✓）② /status.audit_usage 暴露 ③ 今日调用数取引擎已有计数
+    """
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    seg = eng.split("v2.18 第6项：审计侧计数")[1][:400]
+    assert '_as["rounds"]' in seg and 'round_sessions' in seg and 'last_round_at' in seg
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'status["audit_usage"]' in main
+    for key in ("rounds", "round_sessions", "last_round_at", "calls_today"):
+        assert key in main, "缺少字段：" + key
+    assert 'getattr(self.engine, "audit_calls", 0)' in main, "今日调用数取引擎已有计数"

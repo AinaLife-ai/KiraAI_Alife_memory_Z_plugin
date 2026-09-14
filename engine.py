@@ -1835,6 +1835,13 @@ class Engine:
                         max(1, cfg.worker_count),
                         cfg.audit_recheck_days * 86400,
                     )
+                    # v2.18 第6项：审计侧计数（轮次 / 本轮涉及会话数 / 上次轮询时间）
+                    _as = getattr(self, "_audit_stats", None)
+                    if _as is None:
+                        _as = self._audit_stats = {}
+                    _as["rounds"] = _as.get("rounds", 0) + 1
+                    _as["round_sessions"] = len(sessions)
+                    _as["last_round_at"] = time.time()
                     for sid in sessions:
                         if (
                             cfg.audit_daily_calls > 0

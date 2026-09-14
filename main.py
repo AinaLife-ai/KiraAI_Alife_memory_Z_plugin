@@ -2582,6 +2582,14 @@ class AlifeMemoryPlugin(BasePlugin):
         status["capacity"] = await self.store.call("capacity_stats")
         # v2.18 第6项：召回用量（每次工具返回的次数与字符数）—— 用来判断"工具是否被频繁调用/返回是否过大"
         usage = getattr(self, "_recall_stats", None) or {}
+        # v2.18 第6项：审计侧计数（轮次 / 本轮涉及会话数 / 上次轮询时间 / 今日调用数）
+        _audit = getattr(self, "_audit_stats", None) or {}
+        status["audit_usage"] = {
+            "rounds": _audit.get("rounds", 0),
+            "round_sessions": _audit.get("round_sessions", 0),
+            "last_round_at": _audit.get("last_round_at", 0),
+            "calls_today": getattr(self.engine, "audit_calls", 0),
+        }
         status["recall_usage"] = {
             "total_calls": sum(row.get("calls", 0) for row in usage.values()),
             "total_chars": sum(row.get("chars", 0) for row in usage.values()),
