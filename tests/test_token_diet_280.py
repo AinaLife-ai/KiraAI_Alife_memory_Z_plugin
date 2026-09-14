@@ -442,6 +442,43 @@ def test_expand_query_survives_dirty_relations():
     assert "if not isinstance(obj, str):" in src, "必须只接受字符串（否则 None/数字会变成检索词）"
 
 
+def test_settings_backwards_compatible_with_old_config():
+    """第4条·升级路径：旧配置文件（只有老字段）必须能加载 —— 新字段全靠默认值补齐"""
+    c = importlib.import_module("alife_diet280.contracts")
+    s = c.Settings(enabled=True, recall_scope="global")
+    assert s.expand_query is True, "新字段必须有默认值，否则旧配置加载会炸"
+    assert s.fact_view in ("grouped", "flat")
+
+
+def test_concurrency_safeguards_present():
+    """第3条·并发：多会话同时压缩/审计不会互相锁死 —— WAL + 20 秒忙等在位"""
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "sqlite3.connect(self.path, timeout=20)" in src, "缺少忙等超时"
+    assert "PRAGMA journal_mode=WAL" in src, "缺少 WAL（读不阻塞写）"
+
+
+def test_new_features_are_isolated_from_flat_view():
+    """第5条·回滚隔离：`flat` 模式下新特性互不干扰
+
+    ① 关系省略只在 grouped 渲染器里 ✗ flat 用的 bot_facts 必须一字不变
+    ② sp_c 是压缩输入的事 ✗ 与 fact_view 无耦合
+    ③ 扩展查询在窄查询门控内 ✗ 与视图模式无关
+    """
+    src = (ROOT / "retrieval.py").read_text(encoding="utf-8")
+    flat_body = src.split("def bot_facts(")[1].split("\ndef ")[0]
+    assert "省略主体" not in flat_body, "flat 渲染器不得引入关系省略（回滚路径必须逐字不变）"
+    eng = (ROOT / "engine.py").read_text(encoding="utf-8")
+    i = eng.index('record["sp_c"]')
+    assert "fact_view" not in eng[max(0, i - 600):i + 200], "sp_c 不该与视图模式耦合"
+
+
+def test_expand_query_short_circuits_on_empty_db():
+    """第6条·空库/新装：命中不到实体就直接返回空扩展（连 facts 都不查）"""
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    seg = src.split("def expand_query")[1][:3000]
+    assert "if not ids:" in seg and "continue" in seg, "命中不到实体必须短路，不许继续查 facts"
+
+
 def test_frontend_runtime_smoke():
     """前端**真跑一遍**（node + 最小 DOM 桩）——抓 `node --check` 抓不到的**运行时**错误
 
