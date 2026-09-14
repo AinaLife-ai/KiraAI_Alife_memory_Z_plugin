@@ -165,6 +165,35 @@ async def test_model_payloads_carry_no_raw_ids_or_float_times(tmp_path):
                     assert isinstance(record[key], str) and "-" in record[key]
 
 
+def test_compress_payload_speaker_candidates():
+    """第 1 项：说话人**知道是谁但定位不到唯一账号**时给候选 sp_c（重名/多人场景）
+
+    四条保证（正确性）：
+      ① 能唯一确定时仍然给 sp，**行为不变** ✓
+      ② 候选只取**原文里真实出现过**的名字（不得凭空造人）✓
+      ③ 原文里一个名字都没有 → **不给** sp_c（宁可漏，不许猜）✓
+      ④ 候选可逐字符在该记录文本里定位 ✓
+    """
+    base = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "u": ["qq:1", "qq:2"],
+            "users": ["qq:1", "qq:2"], "speaker": "小明", "role": "user", "level": 0,
+            "type": "chat", "start": 1, "end": 2}
+    dup = {"qq:1": "小明", "qq:2": "小明"}
+
+    rec = e.compress_records([base], None, dup)[0]
+    assert "sp" not in rec, "重名时不许猜出单一说话人"
+    assert rec["sp_c"] == ["小明"], "重名时应给候选（原文里出现过的小明）"
+    assert all(name in (base["summary"] + base["content"]) for name in rec["sp_c"]), "候选必须能在原文里定位"
+
+    # ① 唯一可确定 → 行为与以前完全一致（给 sp，不给 sp_c）
+    single = e.compress_records([dict(base, speaker="阿澄")], None, {"qq:1": "小明", "qq:2": "阿澄"})[0]
+    assert single["sp"] == "qq:2" and "sp_c" not in single, "能唯一确定时行为必须不变"
+
+    # ③ 原文里没有任何已知名字 → 不给候选
+    stranger = e.compress_records([dict(base, speaker="小明", summary="他说周末去了杭州")],
+                                  None, {"qq:1": "小明", "qq:2": "小明"})[0]
+    assert "sp_c" not in stranger, "名字没在原文出现就不许给候选（不许猜）"
+
+    """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
 def test_compress_payload_carries_speaker_id():
     """压缩载荷必须带 sp = 说话人的**实体 ID**：A 说的话不能被记到 B 名下（线上事故 ✗）"""
     row = {"id": "r1", "summary": "小明说他周末去了杭州", "content": "", "users": ["qq:1", "qq:2"],
