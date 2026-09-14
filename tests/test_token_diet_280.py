@@ -528,3 +528,28 @@ def test_audit_usage_counters():
     for key in ("rounds", "round_sessions", "last_round_at", "calls_today"):
         assert key in main, "缺少字段：" + key
     assert 'getattr(self.engine, "audit_calls", 0)' in main, "今日调用数取引擎已有计数"
+
+
+def test_model_options_show_provider_name():
+    """v2.18.1：模型选择必须显示「提供商名 · 模型名」（用户在 KiraAI 里看到的名字）
+
+    别再显示内部 id 一串字符 ✗ —— 用户会弄混（真实反馈）。前端要有回退，后端故障时不至于空白 ✗
+    """
+    app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "m.provider" in app and "m.model || m.name || m.id" in app, "选项文本必须用显示名并带回退"
+    assert "esc(m.id)" not in app.split("m.provider")[1][:600], "不许再直接显示内部 id ✗"
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'provider.get("name") or pid' in main, "后端必须带提供商显示名（缺了回退到 pid）"
+
+
+def test_sidebar_nav_is_scrollable():
+    """v2.18.1：侧栏导航可滚动 —— 小窗口/窄屏也要能点到「偏好设置」（真实反馈）
+
+    aside 固定 height:100vh ✗ 若 .nav 不滚，下面的条目会被裁掉且够不着。
+    """
+    css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    nav = css.split(".nav {")[1].split("}")[0]
+    assert "overflow-y: auto" in nav, "导航必须可滚动"
+    assert "min-height: 0" in nav, "flex 子项必须能收缩（否则 overflow 不生效 ✗）"
+    aside = css.split("aside {")[1].split("}")[0]
+    assert "overflow: hidden" in aside, "aside 内部自己滚，不裁内容"
