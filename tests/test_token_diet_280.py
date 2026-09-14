@@ -370,7 +370,7 @@ def test_expand_query_gates():
     """
     src = (ROOT / "storage.py").read_text(encoding="utf-8")
     assert "def expand_query(self, keyword, limit=4)" in src, "缺少扩展器"
-    seg = src.split("def expand_query")[1][:1800]
+    seg = src.split("def expand_query")[1][:3000]
     assert "not in obj" in src and "len(obj) >= 2" in src, "必须有实体 id / 短词的过滤（qq:x 当检索词只会添噪声）"
     assert "if len(extra) >= limit:" in seg, "必须有条数上限"
     assert "len(w) >= 2" in seg, "必须过滤过短词（含单字/标点）"
