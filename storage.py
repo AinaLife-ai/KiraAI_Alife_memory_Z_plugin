@@ -2481,6 +2481,15 @@ class Store:
                 # （score = Σ 命中词元的长度），但全程在 C 层跑——
                 # 此前 relevance() 每行都要重切一次查询词元，是秒级开销的来源。
                 # 词元不再截断：原来 [:24] 会让长消息静默少召回。
+                # v2.18 第5项：查询词过一层"库里已有线索"的扩展（实体别名 + 已核实关系客体）
+                #   门控：**只在该查询词元很少时**启动（这正是召回变窄的场景）✗
+                #   扩展词全部有库内出处 ✓ 只**补**词元、不改打分口径 ✓
+                if getattr(self, "_expand_enabled", True):
+                    base_tokens = query_tokens(lexical)
+                    if 0 < len(base_tokens) <= 3:
+                        extra = self.expand_query(lexical)
+                        if extra:
+                            lexical = lexical + " " + " ".join(extra)
                 tokens = query_tokens(lexical)
                 lexical_sql = _lexical_sql("lower(summary)", tokens)
                 clauses.append("(%s)>0" % lexical_sql)

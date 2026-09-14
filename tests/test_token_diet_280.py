@@ -376,3 +376,17 @@ def test_expand_query_gates():
     assert "extra, seen = [], set(words)" in seg, "必须去重且不含原词"
     assert "json_each(f.relations)" in seg, "只沿库里的关系扩"
     assert "SELECT 1" not in seg and "INSERT" not in seg and "UPDATE" not in seg, "扩展器必须只读"
+
+
+def test_search_wires_expansion_only_for_narrow_queries():
+    """第 5 项接线：扩展只在**词元很少**时启动（= 召回变窄的场景）✗ 其余情况行为不变
+
+    ① 有门控（0 < 词元数 <= 3）② 扩展词只**追加**到查询串（不改打分口径）
+    ③ 默认开启但可用属性关掉（便于排查）④ 扩展器本身只读
+    """
+    src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    seg = src.split("v2.18 第5项：查询词过一层")[1][:700]
+    assert "if 0 < len(base_tokens) <= 3:" in seg, "必须有词元数门控（否则等于无差别扩词）"
+    assert 'lexical = lexical + " " + " ".join(extra)' in seg, "扩展词只许追加到查询串"
+    assert 'getattr(self, "_expand_enabled", True)' in seg, "默认开启且可关闭（排查用）"
+    assert "self.expand_query(lexical)" in seg, "必须调用扩展器"
