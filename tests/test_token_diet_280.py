@@ -227,7 +227,7 @@ def test_audit_can_fix_attribution():
     assert "重名撞车时**必须拒绝**" in src, "重名时必须拒绝（任取一个就是制造新错记 ✗）"
     assert "subject_fixed" in src
     eng = (root / "engine.py").read_text(encoding="utf-8")
-    assert "subject 填成正确的人名" in eng, "提示词必须告诉审计它能改归属"
+    assert "subject 填成正确的**实体 id**" in eng, "提示词必须给出模型真能用的写法（载荷里有 subject id ✗ 短码它看不到）"
 
 
 def test_audit_evidence_carries_speaker():
@@ -346,7 +346,8 @@ def test_audit_subject_disambiguation():
     assert "hits = {_row[0]} if _row else set()" in seg, "解析不到必须置空（走拒绝路径）"
     assert 'SELECT id FROM entities WHERE id=? OR name=?' in src, "普通名字路径必须保留"
     eng = (ROOT / "engine.py").read_text(encoding="utf-8")
-    assert "重名用「名字@短码」" in eng, "提示词必须说明消歧写法"
+    assert "照 facts[].subject" in eng, "提示词必须指向载荷里真实存在的 subject id"
+    assert "「名字@短码」" not in eng, "不许提示模型用它看不到的短码 ✗（载荷里没有短码表）"
 
 
 def test_disambiguation_form_never_reaches_content():
