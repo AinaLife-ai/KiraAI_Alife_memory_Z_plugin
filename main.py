@@ -41,7 +41,7 @@ from .contracts import (
 from . import identity
 from .engine import Engine, compression_plan
 from .storage import Conflict, Store
-from .migration import HIPPOCAMPUS, SOURCES, newest_legacy_mtime, source_roots
+from .migration import SOURCES, newest_legacy_mtime, source_roots
 from .retrieval import (
     CATEGORY_RANK,
     archives_flat,

@@ -236,6 +236,40 @@ def test_host_schema_matches_every_validated_setting():
         assert field.default == module.Settings().model_dump()[key]
 
 
+def test_every_setting_has_a_chinese_label():
+    """每个配置项都必须有中文 name ✓
+
+    审计发现的空洞：`/config` 的 labels 只收录有 name 的项 ✗
+    一旦漏写 name，界面就会**退回英文键名**（app.js 的 fields 兜底 ✗ 也很容易忘记同步 ✓）
+    """
+    schema = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
+    missing = [
+        k
+        for k, v in schema["alife"]["fields"].items()
+        if not isinstance(v, dict) or not str(v.get("name") or "").strip()
+    ]
+    assert not missing, "这些配置项缺 name（界面会显示键名 ✗）：%s" % ", ".join(missing)
+
+
+def test_frontend_label_fallbacks_reference_real_settings():
+    """app.js 里那张**兜底**标签表不许出现"配置里已经没有的键" ✗
+
+    审计发现的空洞：`fields` 表曾是唯一的标签来源，后来 schema 的 name 成为优先项 ✓
+    但没人检查这张表 ✗ → 重命名/删除配置项后它会留下**陈旧文案**（本轮就抓到一条
+    "KiraOS 迁移字符上限" ✗ 而配置早已覆盖三个来源 ✓）
+    """
+    import json, re
+
+    schema = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
+    known = set(schema["alife"]["fields"])
+    js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    start = js.index("const fields = {")
+    body = js[start : js.index("};", start)]
+    fallbacks = set(re.findall(r"^\s{2}([a-z_]+):", body, re.M))
+    stale = sorted(fallbacks - known)
+    assert not stale, "app.js 兜底标签表里有已经不存在的配置项：%s" % ", ".join(stale)
+
+
 @pytest.mark.asyncio
 async def test_global_recall_has_provenance_names_and_no_vector_calls(tmp_path):
     ctx = types.SimpleNamespace(
