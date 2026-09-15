@@ -505,15 +505,19 @@ def test_frontend_runtime_smoke():
 
 
 def test_recall_usage_counters():
-    """第 6 项：召回用量计数必须在**唯一出口** recall_result 上做，并在 /status 暴露
+    """召回用量：**工具调用**与**被动注入**两条路径都要计数 ✓
 
-    ① 计数挂在 recall_result（所有工具返回都过它）② 懒创建（不动 __init__）
-    ③ /status 暴露 total_calls/total_chars/sessions ④ 前端可消费（web_audit 会校验接口一致性）
+    ① 计数在唯一函数 `note_recall` 里 ✓（懒创建 ✓ 不动 __init__ ✓）
+    ② 工具出口 `recall_result` 调它 ✓
+    ③ **被动注入**（每轮都发的那块）也调它 ✗ ← 以前漏了 → 工作台一直显示 `—` ✗
+    ④ /status 暴露 total_calls/total_chars/sessions ✓ 前端可消费 ✓
     """
     src = (ROOT / "main.py").read_text(encoding="utf-8")
-    seg = src.split("v2.18 第6项：召回用量计数")[1][:400]
-    assert 'row["calls"] += 1' in seg and 'row["chars"] += len(text)' in seg, "必须在出口处同时计次数与字符"
-    assert "_recall_stats" in seg and "getattr(self, \"_recall_stats\", None)" in seg, "必须懒创建"
+    seg = src.split("def note_recall(self, sid, text):")[1][:900]
+    assert 'row["calls"] += 1' in seg and 'row["chars"] += len(text)' in seg, "计数要在出口做"
+    assert "_recall_stats" in seg, "懒创建，不动 __init__ ✗"
+    # 两条入口都必须调用它 ✗（少了被动注入 → 普通聊天永远是 0 ✓ 界面显示 `—` ✓）
+    assert src.count("self.note_recall(") >= 2, "工具出口与被动注入都要计数 ✗"
     assert 'status["recall_usage"]' in src, "/status 必须暴露用量"
     assert '"total_calls"' in src and '"total_chars"' in src and '"sessions"' in src
 

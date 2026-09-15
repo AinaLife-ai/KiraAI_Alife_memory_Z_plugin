@@ -1784,6 +1784,11 @@ class AlifeMemoryPlugin(BasePlugin):
             ],
             fact_ids,
         )
+        # v2.18.9：**被动注入也计入「召回用量」** ✗
+        # 以前只有工具调用计数 ✓ → 普通聊天永远是 0 → 工作台一直显示 `—` ✗
+        # 只在**真有记忆被注入**时计数 ✓（空块不算一次召回 ✓）
+        if with_evidence or related_now or perception.get("archives"):
+            self.note_recall(sid, content)
         req.user_prompt.insert(
             0,
             Prompt(
@@ -1878,15 +1883,23 @@ class AlifeMemoryPlugin(BasePlugin):
             if compression_plan(rows, self.settings):
                 await self.engine.enqueue("compress", sid, automatic=True)
 
-    def recall_result(self, event, value):
-        text = dump(value)
-        # v2.18 第6项：召回用量计数（工作台可见）——懒创建，避免动 __init__ ✓
+    def note_recall(self, sid, text):
+        """v2.18.9：把「记忆进入上下文」的体量记下来 ✓（工作台可见 ✓）
+
+        以前只有**工具调用**计数 ✗ → 普通聊天永远是 0 ✓ 工作台一直显示 `—` ✗
+        而**被动注入**（每轮都发的那块 ✓）才是开销大头 ✓ 所以两个入口都要数 ✓
+        """
         stats = getattr(self, "_recall_stats", None)
         if stats is None:
             stats = self._recall_stats = {}
-        row = stats.setdefault(str(event.sid), {"calls": 0, "chars": 0})
+        row = stats.setdefault(str(sid), {"calls": 0, "chars": 0})
         row["calls"] += 1
         row["chars"] += len(text)
+
+    def recall_result(self, event, value):
+        text = dump(value)
+        # v2.18 第6项：召回用量计数（工作台可见）——懒创建，避免动 __init__ ✓
+        self.note_recall(event.sid, text)
         digest = hashlib.sha256(text.encode()).hexdigest()
         key = (event.sid, str(event.event_id), digest)
         self._recall_outputs[key] = None
