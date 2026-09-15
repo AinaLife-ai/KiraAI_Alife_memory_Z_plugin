@@ -127,7 +127,7 @@ COMPACT_SCHEMAS = {
     "fact_merge": (
         '返回 JSON（无 markdown、无额外字段）：\n'
         '{"groups": [{"target_id": str, "source_ids": [str], "content": str,\n'
-        '             "reason": str, "action": "merge"}]}\n'
+        '             "reason": str, "action": "merge|relabel|drop"}]}\n'
         '必填：groups；每组 target_id/source_ids/reason（action=merge 时 content 不能为空）。\n'
         '上限：content 目标 ≤80 字（硬上限 150）、reason ≤15 字（硬上限 40）。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
