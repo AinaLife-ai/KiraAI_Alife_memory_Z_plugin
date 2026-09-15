@@ -203,6 +203,9 @@ class AuditAction(Strict):
     importance: int | None = Field(default=None, ge=1, le=10)
     # 主体记错了就填这里（用条目里的 id）✗ 修正归属 —— 只对 correct 有意义，留空=不动主体
     subject: Short | None = None
+    # v2.18.9 回声防线：证据只有助手自己（evidence[].bot=1）时填 true ✓
+    # 应用侧会**拒绝据此提升 importance** ✗（不许自我强化）
+    only_self: bool = False
 
 
 class Audit(Strict):
@@ -231,6 +234,10 @@ FACT_MERGE_PROMPT = (
     "- merge：确认是同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、"
     "条件、状态补进去；冲突以时间较晚者为准；不同对象要分别写明，不得丢弃独有信息。"
     "content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。\n"
+    # v2.18.9 回声防线：来源强度优先于时间 ✗
+    "**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是"
+    "**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；"
+    "没有证据就按原事实里的说法保留，不要凭“更晚”擅自改结论。\n"
     "- relabel：确实是同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n"
     "- drop：其中若干条是纯冗余或错误记录 → 保留 target_id，其余进 source_ids 被删除（可恢复）。\n"
     "跨类别时（组内 category 不一致）必须给 category，写明统一后的类别；"
@@ -340,6 +347,8 @@ class Settings(Strict):
     dedupe_threshold: float = Field(default=0.25, ge=0.1, le=0.95)
     fact_recall_min_score: int = Field(default=2, ge=0, le=20)
     search_active_only: bool = False
+    # v2.18.9：只有表情/图片的消息默认不进召回 ✓（数据仍保留 ✓ 关掉即可召回）
+    recall_skip_media: bool = True
     cold_after_days: int = Field(default=180, ge=0, le=3650)
     fact_merge_enabled: bool = True
     fact_merge_threshold: float = Field(default=0.25, ge=0.1, le=0.95)

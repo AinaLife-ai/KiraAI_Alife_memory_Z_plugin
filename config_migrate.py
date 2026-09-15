@@ -7,7 +7,11 @@ defaults (including prompt wording) without overriding personal choices.
 
 from .contracts import FACT_MERGE_PROMPT, RECORD_MERGE_PROMPT
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
+
+# v2.18.9 之前的 fact_merge_prompt 默认文案 ✓
+# 只用来把"从没改过措辞"的存量配置升到新文案 ✓ 用户自己改过的一律不碰 ✓
+_OLD_FACT_MERGE_PROMPT = '输入是若干组相似事实（groups[]）：同组同主体，类别可能相同也可能不同；组内 facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n为每一组输出一条结果，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：确认是同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象要分别写明，不得丢弃独有信息。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。\n- relabel：确实是同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：其中若干条是纯冗余或错误记录 → 保留 target_id，其余进 source_ids 被删除（可恢复）。\n跨类别时（组内 category 不一致）必须给 category，写明统一后的类别；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{"groups":[{"target_id":"…","source_ids":["…"],"action":"merge|relabel|drop","category":"…","content":"…","reason":"…"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。'
 
 # version -> [(key, previous default, new default), ...]
 MIGRATIONS = {
@@ -19,6 +23,12 @@ MIGRATIONS = {
         # 但老配置里多半存着旧默认 true。只改写「仍等于旧默认」的那一个键，
         # 用户自己设过的一律不动。
         ("search_active_only", True, False),
+    ],
+    4: [
+        # v2.18.9：合并提示词新增"来源强度优先于时间"（助手更晚的转述不能覆盖
+        # 用户更早的原话 ✓）。存量配置里若还存着旧默认文案 → 升级 ✓
+        # 若用户自己改过措辞 → 保持不动 ✓
+        ("fact_merge_prompt", _OLD_FACT_MERGE_PROMPT, FACT_MERGE_PROMPT),
     ],
 }
 

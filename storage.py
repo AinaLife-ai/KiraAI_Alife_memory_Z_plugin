@@ -1191,8 +1191,8 @@ class Store:
                 db.execute(
                     """INSERT OR IGNORE INTO records
                   (id,sid,role,level,start,end,summary,content,users,speaker,
-                   position,event_key,created,search_body)
-                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?)""",
+                   position,event_key,created,search_body,category)
+                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         uid(),
                         sid,
@@ -1210,6 +1210,9 @@ class Store:
                         # 建索引体：否则新记录要等到下次启动回填才进索引，
                         # 加速会随会话进行而失效（且编辑后可能静默漏召回）。
                         search_body_of(summary),
+                        # v2.18.9：category="media" = 只有表情/图片的消息 ✓
+                        # 数据照留（不丢 ✓）但默认不进召回 ✗（描述平均 276 字符，纯噪音）
+                        str(msg.get("category") or ""),
                     ),
                 )
             self.bump(db)
@@ -2430,8 +2433,13 @@ class Store:
         cold_after_days=0,
         include_cold=False,
         strict_session=False,
+        skip_media=True,
     ):
         clauses, args = ["deleted=0"], []
+        if skip_media:
+            # v2.18.9：只有表情/图片的消息默认不进召回 ✗（纯占上下文 ✓）
+            # 数据仍在库里 ✓ 关掉开关即可召回 ✓
+            clauses.append("category != 'media'")
         if not include_cold:
             clauses.append("cold=0")
             if cold_after_days:
@@ -2497,7 +2505,7 @@ class Store:
 
             db.create_function("squeeze", 1, squeeze)
             if lexical and not vector:
-                from .retrieval import query_tokens, relevance
+                from .retrieval import query_tokens
 
                 # 打分整段下推到 SQL：与逐行 Python 打分口径完全一致
                 # （score = Σ 命中词元的长度），但全程在 C 层跑——
@@ -2598,8 +2606,6 @@ class Store:
         没有向量时不走这里，行为与以前完全一致。
         """
         import math
-
-        from .retrieval import relevance
 
         db.create_function("lexical_score", 1, _lexical_scorer(lexical))
         norm = math.sqrt(sum(x * x for x in vector))
@@ -2721,7 +2727,7 @@ class Store:
         tier_sql = (", ".join(tier_parts) + ", ") if tier_parts else ""
         with self.connect() as db:
             if lexical:
-                from .retrieval import query_tokens, relevance
+                from .retrieval import query_tokens
 
                 # 同样下推到 SQL（含 min_score 门槛），全程 C 层
                 tokens = query_tokens(lexical)
@@ -3520,8 +3526,31 @@ class Store:
         by_id = {r["id"]: r for r in candidates}
         validate_audit(candidates, output)
         counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
+        clamped = 0   # v2.18.9：自我来源想提权、被压回原值的次数 ✓
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # v2.18.9 回声防线（**服务端自己判定** ✗ 不依赖模型自觉 ✓）：
+            # 若一条事实的**全部来源都是助手自己的发言** → 一律不许提 importance ✓
+            # （模型可能没看懂 bot 标记、或干脆不填 only_self ✓ 那就拦不住了 ✓）
+            source_ids = {
+                sid for old in candidates for sid in (old.get("sources") or [])
+            }
+            # v2.18.9：周围上下文也算证据 ✓ 用来判断"审计是不是看得到用户那一侧" ✓
+            bot_only = set()
+            if source_ids:
+                # ⚠️ 分批查：老 SQLite 的变量上限是 999 ✗ 一批里来源可能上千 ✓
+                # 超限会直接 OperationalError → 审计任务整体失败 ✗（防御性分批 ✓）
+                ordered = list(source_ids)
+                for start in range(0, len(ordered), 500):
+                    chunk = ordered[start : start + 500]
+                    rows = db.execute(
+                        "SELECT id,role FROM records WHERE id IN (%s)"
+                        % ",".join("?" * len(chunk)),
+                        tuple(chunk),
+                    ).fetchall()
+                    bot_only |= {
+                        r[0] for r in rows if str(r[1] or "") == "assistant"
+                    }
             for old in candidates:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
@@ -3531,6 +3560,17 @@ class Store:
             for a in output["actions"]:
                 old = by_id[a["target_id"]]
                 group = {a["target_id"], *a["source_ids"]}
+                # v2.18.9 回声防线 —— **服务端只留这一条** ✗
+                # 一条事实的来源**全是助手自己**（或压根没有来源 ✓）时：
+                # 不许靠"她自己说过"来**提升重要度** ✗（那是自我强化的燃料 ✓）
+                # 其余一切（改正文 ✓ 合并 ✓ 软删 ✓）**完全交还给模型判断** ✓
+                # —— "不让改"没有意义 ✓ 提示词已经讲清"以用户为准" ✓
+                #    （而且原文与版本都留着 ✓ 被改错了也能恢复 ✓）
+                sources = old.get("sources") or []
+                self_only = not sources or all(s in bot_only for s in sources)
+                if self_only:
+                    a = dict(a)
+                    a["only_self"] = True
                 counts[a["action"]] += 1
                 if a["action"] == "merge":
                     counts["merged_facts"] += len(group) - 1
@@ -3539,9 +3579,23 @@ class Store:
                     (old["id"], dump(old), a["reason"], time.time()),
                 )
                 if a.get("importance") is not None:
+                    new_imp = a["importance"]
+                    # 模型自报 or **服务端判定**（后者才是真正的防线 ✓）
+                    sources = old.get("sources") or []
+                    server_self_only = bool(sources) and all(
+                        s in bot_only for s in sources
+                    )
+                    if a.get("only_self") or server_self_only:
+                        # v2.18.9 回声防线：来源全是助手自己 → **只许降不许升** ✗
+                        # 提升 = "我自己说过 → 越来越可信" ✓ 正是自我强化的燃料 ✓
+                        # 下调是安全的（越来越不重要），仍予保留 ✓
+                        old_imp = old.get("importance")
+                        if isinstance(old_imp, int) and new_imp > old_imp:
+                            new_imp = old_imp
+                            clamped += 1
                     db.execute(
                         "UPDATE facts SET importance=?,revision=revision+1 WHERE id=?",
-                        (a["importance"], a["target_id"]),
+                        (new_imp, a["target_id"]),
                     )
                 if a["action"] == "keep":
                     continue
@@ -3638,6 +3692,9 @@ class Store:
                             }
                         )
             self.add_job_items(job_id, items)
+        if clamped:
+            # 提权被压回也要记账 ✓ 否则报告会少报"她想给自己加权重"的次数 ✗
+            counts["only_self_clamped"] = clamped
         return counts
 
     def set_vector(self, record_id, model, revision, vector):
