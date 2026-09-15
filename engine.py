@@ -7,7 +7,6 @@ import time
 import logging
 from . import identity
 from .retrieval import (
-    CATEGORY_CODES,
     bare_id,
     full_time,
     model_text,

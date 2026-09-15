@@ -5,7 +5,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import logging
 import random
 import re
 import time

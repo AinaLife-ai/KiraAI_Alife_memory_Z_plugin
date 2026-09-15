@@ -2505,7 +2505,7 @@ class Store:
 
             db.create_function("squeeze", 1, squeeze)
             if lexical and not vector:
-                from .retrieval import query_tokens, relevance
+                from .retrieval import query_tokens
 
                 # 打分整段下推到 SQL：与逐行 Python 打分口径完全一致
                 # （score = Σ 命中词元的长度），但全程在 C 层跑——
@@ -2606,8 +2606,6 @@ class Store:
         没有向量时不走这里，行为与以前完全一致。
         """
         import math
-
-        from .retrieval import relevance
 
         db.create_function("lexical_score", 1, _lexical_scorer(lexical))
         norm = math.sqrt(sum(x * x for x in vector))
@@ -2729,7 +2727,7 @@ class Store:
         tier_sql = (", ".join(tier_parts) + ", ") if tier_parts else ""
         with self.connect() as db:
             if lexical:
-                from .retrieval import query_tokens, relevance
+                from .retrieval import query_tokens
 
                 # 同样下推到 SQL（含 min_score 门槛），全程 C 层
                 tokens = query_tokens(lexical)

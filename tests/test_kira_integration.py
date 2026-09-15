@@ -1826,3 +1826,19 @@ def test_every_source_is_mutually_exclusive():
         assert module.AlifeMemoryPlugin.runtime_settings(off).enabled is True, pid
         free = Fake([pid], [pid], mutual=False)
         assert module.AlifeMemoryPlugin.runtime_settings(free).enabled is True, pid
+
+
+def test_every_setting_is_actually_used():
+    """配置项不许"定义了却没人用" ✗
+
+    暴露给用户的开关如果代码里根本没读，是最伤人的假象 ✓
+    （同类病：`bot:1` 标了没人用 ✗ / `confidence` 字段只有建表语句 ✗）
+    """
+    names = list(module.Settings.model_fields)
+    files = (
+        "main.py", "storage.py", "engine.py", "retrieval.py",
+        "identity.py", "migration.py", "output_validation.py",
+    )
+    blob = "".join((ROOT / f).read_text(encoding="utf-8") for f in files)
+    unused = [k for k in names if k not in blob]
+    assert not unused, "这些配置项在代码里从未被引用：%s" % ", ".join(unused)
