@@ -404,6 +404,29 @@ def permanent_clusters(rows, threshold, size=5, cross_threshold=0.0):
     return [group[:size] for group in groups.values() if len(group) > 1]
 
 
+def _round_end(rows, start, cap):
+    """[start, end) —— 从 start 起把「同一轮」走完，并说明是否碰到**真正的轮边界** ✓
+
+    轮的定义（与 KiraOS 的 chunk 一致 ✓）：
+      用户（们）发言 → 助手回复；边界在「**助手说完之后、下一条用户发言之前**」
+    ⇒ 连续的用户消息同属一轮 ✓ 连续的助手消息也同属一轮 ✓
+    ⇒ 判据：**下一条是用户、且当前这条不是用户** ＝ 轮边界 ✓
+
+    cap 是安全上限 ✗ 一轮异常长（助手一直没回 / 用户刷屏）时别无界增长 ✓
+    """
+    if start >= len(rows):
+        return start, True
+    end = start
+    for i in range(start, len(rows)):
+        end = i + 1
+        nxt = rows[i + 1] if i + 1 < len(rows) else None
+        if nxt is not None and nxt.get("role") == "user" and rows[i].get("role") != "user":
+            return end, True
+        if end - start >= cap:
+            return end, False
+    return end, False
+
+
 def compression_plan(rows, cfg):
     # The level comes from compression depth, never importance or classification.
     # Canonical ordering repairs reversed persisted regions without forging depth.
@@ -415,7 +438,12 @@ def compression_plan(rows, cfg):
         if level >= cfg.max_level:
             continue
         group = [r for r in ordered if r["level"] == level]
-        threshold, count = (cfg.threshold, cfg.batch_size) if level == 0 else (4, 3)
+        leaf = level == 0
+        # v2.18.11：叶子层可选用"按轮"还是"按条" ✓ 摘要层保持深度批次 ✓
+        mode = getattr(cfg, "compress_batch_mode", "rounds") if leaf else "depth"
+        threshold, count = (cfg.threshold, cfg.batch_size) if leaf else (4, 3)
+        # 安全上限按**整批总长**算 ✓ 扩展预算 = 2×count → 总长 ≤ 3×count ✓
+        cap = count * 2
         # One archive carries a single visibility, so mixed buckets must not be
         # packed together; each visibility compresses on its own schedule.
         buckets = {}
@@ -423,8 +451,27 @@ def compression_plan(rows, cfg):
             buckets.setdefault(row.get("visibility", "session"), []).append(row)
         for visibility in sorted(buckets, key=lambda v: (-len(buckets[v]), v)):
             subset = buckets[visibility]
-            if len(subset) >= threshold:
-                return subset[:count], level + 1
+            if leaf and mode == "rounds":
+                # **纯按轮**：攒够 N 个**完整轮**才动手 ✗ 绝不切半轮 ✓
+                rounds, pos = [], 0
+                while pos < len(subset):
+                    end, closed = _round_end(subset, pos, cap)
+                    if closed:
+                        rounds.append((pos, end))
+                    pos = end
+                if len(rounds) >= cfg.compress_rounds:
+                    return subset[: rounds[cfg.compress_rounds - 1][1]], level + 1
+            elif len(subset) >= threshold:
+                # **按条**：取 count 条 ✓ 但**叶子层**的最后一轮必须收尾完整 ✗（无视条数 ✓ 只受安全上限约束 ✓）
+                # ⚠️ 两个前提：① 只在叶子层（摘要层不是"轮" ✗ 保持纯条数 ✓）
+                #            ② 这一批里真的存在助手回复 ✗ 否则谈不上"收尾"（用户连发时退回按条 ✓）
+                if not leaf:
+                    return subset[:count], level + 1
+                has_reply = any(r.get("role") == "assistant" for r in subset)
+                # 从**最后取到的那条**（count-1）往后找它所属那一轮的结尾 ✗
+                # （从 count 开始会多抓一整轮 ✓ 批次平白翻倍 ✗）
+                end = _round_end(subset, count - 1, cap)[0] if has_reply else count
+                return subset[:end], level + 1
     return None
 
 

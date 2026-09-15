@@ -412,6 +412,8 @@ async def test_real_provider_sdk_failures_reach_compression_retry(tmp_path, erro
             "alife": {
                 "probability": 0.0,
                 "audit_enabled": False,
+                # 该用例测的是**按条**批次的重试链路 ✓ 显式声明模式（新默认是按轮 ✓）
+                "compress_batch_mode": "records",
                 "threshold": 4,
                 "batch_size": 2,
                 "model_retries": 1,

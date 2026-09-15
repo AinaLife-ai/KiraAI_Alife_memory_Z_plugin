@@ -263,6 +263,10 @@ class Settings(Strict):
     inject_recent_raw: bool = False
     auto_inject: bool = True
     fact_view: Literal["grouped", "flat"] = "grouped"
+    # v2.18.11：压缩的分批方式 —— rounds=按整轮（默认 ✓ 抽取更准）/ records=按条数
+    compress_batch_mode: Literal["rounds", "records"] = "rounds"
+    # rounds 模式：每次压缩几轮 ✓（records 模式仍用 threshold/batch_size ✓）
+    compress_rounds: int = Field(default=10, ge=1, le=200)
     # v2.18 第5项：查询词很少时，沿库内线索（别名 + 已核实关系客体）扩词召回
     expand_query: bool = True
     threshold: int = Field(default=50, ge=4, le=10000)

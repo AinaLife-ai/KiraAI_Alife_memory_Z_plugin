@@ -149,7 +149,7 @@ async def test_model_payloads_carry_no_raw_ids_or_float_times(tmp_path):
         seen.append((purpose, payload))
         return c.dump({"summary": "摘要", "facts": []})
 
-    cfg = c.Settings(probability=1.0, threshold=4, batch_size=2, model_retries=0)
+    cfg = c.Settings(compress_batch_mode="records", probability=1.0, threshold=4, batch_size=2, model_retries=0)
     await e.Engine(store, lambda: cfg, model, None, None).compress("qq:gm:1")
     assert seen, "压缩必须调用模型"
     for purpose, payload in seen:

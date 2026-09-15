@@ -196,7 +196,7 @@ class MergeCase(unittest.TestCase):
             ],
         )
         rows = [r for r in self.store.active("qq:gm:1") if r["level"] == 0][-4:]
-        cfg = c.Settings(threshold=4, batch_size=2, probability=1.0)
+        cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, probability=1.0)
 
         async def model(*args):
             if args[1] == "compress":

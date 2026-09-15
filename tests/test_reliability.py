@@ -37,7 +37,7 @@ async def test_compression_recovers_from_transient_provider_timeout(tmp_path):
             raise asyncio.TimeoutError()
         return '{"summary":"约好今晚看星星", "facts":[]}'
 
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=1)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=1)
     engine = e.Engine(store, lambda: cfg, provider, None, None)
     await engine.compress("qq:gm:188395693")
     assert len(calls) == 2
@@ -72,7 +72,7 @@ async def test_timeout_shrinks_batch_without_losing_any_source(tmp_path):
             raise TimeoutError()
         return c.dump({"summary": "合并前两条原文", "facts": []})
 
-    cfg = c.Settings(threshold=8, batch_size=6, model_retries=2)
+    cfg = c.Settings(compress_batch_mode="records", threshold=8, batch_size=6, model_retries=2)
     await e.Engine(store, lambda: cfg, provider, None, None).compress(sid)
     assert sizes == [6, 3, 2]
     assert all(store.get(r["id"])["content"] == r["content"] for r in originals)
@@ -97,7 +97,7 @@ async def test_failed_worker_has_actionable_detail_and_cooldown(tmp_path):
         raise TimeoutError()
 
     cfg = c.Settings(
-        threshold=4, batch_size=2, model_retries=0, probability=0.0, audit_enabled=False
+        compress_batch_mode="records", threshold=4, batch_size=2, model_retries=0, probability=0.0, audit_enabled=False
     )
     engine = e.Engine(store, lambda: cfg, provider, None, None)
     await engine.enqueue("compress", "legacy:unscoped")
@@ -264,7 +264,7 @@ async def test_mixed_model_failures_share_one_retry_budget(tmp_path):
             raise TimeoutError()
         return "``` invalid JSON ```"
 
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=2)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=2)
     with pytest.raises(ValueError, match="structured_output_rejected"):
         await e.Engine(store, lambda: cfg, provider, None, None).compress("a:dm:u")
     assert len(calls) == 3 and len(store.active("a:dm:u")) == 4
@@ -310,7 +310,7 @@ async def test_mixed_visibility_compresses_without_valueerror(tmp_path):
                     1.0,
                 ),
             )
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=0)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=0)
     plan = e.compression_plan(store.active(sid), cfg)
     assert plan is not None
     assert len({row["visibility"] for row in plan[0]}) == 1
