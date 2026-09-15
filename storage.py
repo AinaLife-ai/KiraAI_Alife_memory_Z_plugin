@@ -1191,8 +1191,8 @@ class Store:
                 db.execute(
                     """INSERT OR IGNORE INTO records
                   (id,sid,role,level,start,end,summary,content,users,speaker,
-                   position,event_key,created,search_body)
-                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?)""",
+                   position,event_key,created,search_body,category)
+                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         uid(),
                         sid,
@@ -1210,6 +1210,9 @@ class Store:
                         # 建索引体：否则新记录要等到下次启动回填才进索引，
                         # 加速会随会话进行而失效（且编辑后可能静默漏召回）。
                         search_body_of(summary),
+                        # v2.18.9：category="media" = 只有表情/图片的消息 ✓
+                        # 数据照留（不丢 ✓）但默认不进召回 ✗（描述平均 276 字符，纯噪音）
+                        str(msg.get("category") or ""),
                     ),
                 )
             self.bump(db)
@@ -2430,8 +2433,13 @@ class Store:
         cold_after_days=0,
         include_cold=False,
         strict_session=False,
+        skip_media=True,
     ):
         clauses, args = ["deleted=0"], []
+        if skip_media:
+            # v2.18.9：只有表情/图片的消息默认不进召回 ✗（纯占上下文 ✓）
+            # 数据仍在库里 ✓ 关掉开关即可召回 ✓
+            clauses.append("category != 'media'")
         if not include_cold:
             clauses.append("cold=0")
             if cold_after_days:
@@ -3539,9 +3547,17 @@ class Store:
                     (old["id"], dump(old), a["reason"], time.time()),
                 )
                 if a.get("importance") is not None:
+                    new_imp = a["importance"]
+                    if a.get("only_self"):
+                        # v2.18.9 回声防线：证据只有助手自己 → **只许降不许升** ✗
+                        # 提升 = "我自己说过 → 越来越可信" ✓ 正是自我强化的燃料 ✓
+                        # 下调是安全的（越来越不重要），仍予保留 ✓
+                        old_imp = old.get("importance")
+                        if isinstance(old_imp, int) and new_imp > old_imp:
+                            new_imp = old_imp
                     db.execute(
                         "UPDATE facts SET importance=?,revision=revision+1 WHERE id=?",
-                        (a["importance"], a["target_id"]),
+                        (new_imp, a["target_id"]),
                     )
                 if a["action"] == "keep":
                     continue

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from pathlib import Path
 
@@ -69,6 +70,10 @@ from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
 
 PLUGIN_ID = "alife_memory_z"
+
+# v2.18.9：只有表情/图片的消息（剥掉标记后没有别的字）→ 记为 media ✓
+# 数据保留 ✓ 但默认不进召回 ✗（视觉描述平均 276 字符，白占上下文）
+_MEDIA_ONLY = re.compile(r"^(?:\[(?:表情|图片)[^\]]*\]\s*)+$")
 logger = get_logger(PLUGIN_ID, "light_purple")
 _GROUPED_FACT_DOC = (
     "facts 按主体分组：键是主体短码（见 names），组内每行 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?]，"
@@ -1507,6 +1512,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 exclude_sid=sid,
                 active=cfg.search_active_only,
                 cold_after_days=cfg.cold_after_days,
+                # v2.18.9：表情/图片-only 的原文默认不进召回 ✗（数据在库里 ✓）
+                skip_media=cfg.recall_skip_media,
                 **prefer,
             )
             local_ids = {r["id"] for r in rows}
@@ -1537,6 +1544,10 @@ class AlifeMemoryPlugin(BasePlugin):
                 if r["speaker"]:
                     # 这条是谁说的：正文里不一定带名字，模型否则分不清谁说了哪句 ✗
                     item["sp"] = self.model_text(r["speaker"], keep_names)
+                if r["role"] == "assistant":
+                    # v2.18.9：与另外两处打包**保持一致** ✗ —— 这里以前漏了 ✓
+                    # 模型必须能分辨"这条是我自己说的" ✓（回声防线的第一道）
+                    item["bot"] = 1
                 if not r["active"]:
                     item["arch"] = 1
                 if r["sid"] and r["sid"] != sid:
@@ -1695,6 +1706,8 @@ class AlifeMemoryPlugin(BasePlugin):
             with_evidence, sid, short=fact_shorts.get,
             view=getattr(self.settings, "fact_view", None) or FACT_VIEW_GROUPED,
             codes=fact_shorts,
+            # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
+            self_id=getattr(event, "self_id", ""),
         ),
         }
         if users:
@@ -1816,16 +1829,19 @@ class AlifeMemoryPlugin(BasePlugin):
             content = capture_text(text_of(message))
             if not content:
                 continue
-            incoming.append(
-                {
-                    "role": "user",
-                    "content": content,
-                    "time": float(message.timestamp),
-                    "users": users,
-                    # 这条是谁说的（实体 id）：群聊里模型必须能分清谁说了哪句
-                    "speaker": speaker_of(message),
-                }
-            )
+            # v2.18.9：只有表情/图片（剥掉标记后没有别的字）→ 打 media 标记 ✓
+            # 数据照留（不丢 ✓）但默认不进召回 ✗ —— 视觉描述平均 276 字符，纯占上下文
+            entry = {
+                "role": "user",
+                "content": content,
+                "time": float(message.timestamp),
+                "users": users,
+                # 这条是谁说的（实体 id）：群聊里模型必须能分清谁说了哪句
+                "speaker": speaker_of(message),
+            }
+            if _MEDIA_ONLY.fullmatch(content.strip()):
+                entry["category"] = "media"
+            incoming.append(entry)
         if incoming:
             await self.store.call("capture", sid, base + ":input", incoming)
         # Bot 的输出：先剥思考块，再剥协议外壳；只剩外壳（例如只输出了 <msg/>）
@@ -2126,6 +2142,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 # 冷归档与软删永远搜不到。
                 active=self.settings.search_active_only and not include_archived,
                 cold_after_days=self.settings.cold_after_days,
+                # v2.18.9：模型召回默认跳过表情/图片-only 的原文 ✓
+                skip_media=self.settings.recall_skip_media,
             )
             raw_items = list(result["items"])  # 先留底：下面会换成紧凑形态
             keep_names = await self.store.call("spaced_names")
@@ -2331,6 +2349,8 @@ class AlifeMemoryPlugin(BasePlugin):
                     codes=await self.shortmap(
                         [v for r in rows for v in (r.get("subject"),)]
                     ),
+                    # v2.18.9 回声防线：与感知块一致 ✓
+                    self_id=getattr(event, "self_id", ""),
                 ),
                 "next_offset": offset + len(rows),
             },

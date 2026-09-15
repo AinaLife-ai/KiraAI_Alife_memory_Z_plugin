@@ -753,7 +753,7 @@ def overlap_hit(text, reply, min_hits=2):
     return False
 
 
-def bot_facts(facts, current_sid="", short=None):
+def bot_facts(facts, current_sid="", short=None, self_id=""):
     """给 Bot 看的精简事实视图：只留判断与追溯必需的字段。
 
     内部簿记（fingerprint/deleted/revision/merge_pending/audited）、
@@ -780,6 +780,10 @@ def bot_facts(facts, current_sid="", short=None):
             item["sid"] = fact["sid"]
             if fact.get("src_user"):
                 item["by"] = fact["src_user"]
+        if self_id and fact.get("src_user") == self_id:
+            # v2.18.9 回声防线：这条事实的**最新来源是助手自己** ✓
+            # 模型必须知道"这是我自己说过的话" ✗ 不能当成外部证据 ✓
+            item["self"] = 1
         source = fact.get("src") or (fact.get("sources") or [None])[-1]
         if source:
             # 短码映射里没有的（例如 sources 兜底值）就用原值，绝不输出 null
@@ -818,7 +822,7 @@ FACT_VIEW_GROUPED = "grouped"
 FACT_VIEW_FLAT = "flat"
 
 
-def _grouped_row(fact, codes, current_sid):
+def _grouped_row(fact, codes, current_sid, self_id=""):
     """一条事实 → 位置化行（尾部省略）。"""
     category = fact.get("category") or ""
     row = [CATEGORY_CODES.get(category, category), str(fact.get("content") or "")]
@@ -855,12 +859,16 @@ def _grouped_row(fact, codes, current_sid):
         who = "%s@%s" % (speaker, codes.get(room, room)) if speaker else "@" + codes.get(room, room)
     row.append(who)
 
+    # v2.18.9 回声防线：本条事实的**最新来源是助手自己** → 末尾打 self 旗标 ✓
+    # 尾部空缺会被下面的循环吞掉 ✗ 所以平时零开销 ✓
+    row.append("self" if (self_id and fact.get("src_user") == self_id) else "")
+
     while row and row[-1] == "":
         row.pop()
     return row
 
 
-def bot_facts_grouped(facts, current_sid="", codes=None):
+def bot_facts_grouped(facts, current_sid="", codes=None, self_id=""):
     """按主体分组渲染事实（v2.17.0 默认视图）。
 
     形如::
@@ -880,7 +888,7 @@ def bot_facts_grouped(facts, current_sid="", codes=None):
         if not subject:
             continue
         key = codes.get(subject, subject)
-        groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid)))
+        groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid, self_id=self_id)))
         ranks[key] = min(ranks.get(key, 99), CATEGORY_RANK.get(fact.get("category") or "", 99))
     out = {}
     for key in groups:  # 保持上游顺序（提到的人/高相关在前）
@@ -889,11 +897,11 @@ def bot_facts_grouped(facts, current_sid="", codes=None):
     return out
 
 
-def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None):
+def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None, self_id=""):
     """事实渲染入口：grouped=分组视图（默认 ✓）/ flat=旧的扁平视图（逐字节不变 ✓）。"""
     if view == FACT_VIEW_FLAT:
-        return bot_facts(facts, current_sid, short=short)
-    return bot_facts_grouped(facts, current_sid, codes=codes)
+        return bot_facts(facts, current_sid, short=short, self_id=self_id)
+    return bot_facts_grouped(facts, current_sid, codes=codes, self_id=self_id)
 
 
 def short_names(names, codes):
@@ -909,8 +917,9 @@ def short_names(names, codes):
 
 
 FACT_GROUP_LEGEND = (
-    "事实按主体分组：facts 的键是主体短码，组内每行 [类别, 内容, 重要性?, 关系?, 时间?, 谁说的?]，"
-    "尾部省略；关系写作 主体>关系>客体，**省略主体即本组主体**（如 >朋友>小A）；短码与名字见 names（短码→[真实ID, 名字]）"
+    "事实按主体分组：facts 的键是主体短码，组内每行 [类别, 内容, 重要性?, 关系?, 时间?, 谁说的?, self?]，"
+    "尾部省略；关系写作 主体>关系>客体，**省略主体即本组主体**（如 >朋友>小A）；短码与名字见 names（短码→[真实ID, 名字]）；"
+    "**末位 self 表示这条事实的最新来源是助手自己**——那是助手说过的话，不是外部证据，不可据此认定事实。"
 )
 
 
