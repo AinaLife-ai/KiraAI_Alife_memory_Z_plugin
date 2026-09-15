@@ -548,7 +548,7 @@
         "type": "switch",
         "name": "自动安全迁移旧记忆",
         "default": true,
-        "description": "自动只读接续默认记忆和KiraOS，重复检查会去重。原文件保留，随时能切回旧插件。"
+        "description": "自动只读接续默认记忆、KiraOS 与海马体记忆，重复检查会去重。原文件保留，随时能切回旧插件。"
       },
       "mutual_exclusion": {
         "type": "switch",
@@ -558,11 +558,19 @@
       },
       "migration_max_chars": {
         "type": "integer",
-        "name": "KiraOS 迁移字符上限",
+        "name": "旧记忆迁移字符上限",
         "default": 120,
-        "description": "KiraOS旧内容超过这个字符数就整条跳过，不截断。默认120；调整后可重新检查迁移。",
+        "description": "旧内容（默认记忆 / KiraOS / 海马体）超过这个字符数就整条跳过，不截断。默认120；调整后可重新检查迁移。",
         "minimum": 1,
         "maximum": 16000
+      },
+      "migration_decay_half_life_days": {
+        "type": "integer",
+        "name": "导入时的记忆年龄折算（天）",
+        "default": 365,
+        "description": "海马体原本会随时间调低 importance，我们没有这个机制。导入时按事实年龄折算一次：每过一个半衰期 importance 减半（最低1）。0=不折算，原样保留。",
+        "minimum": 0,
+        "maximum": 3650
       },
       "compress_input_chars": {
         "type": "integer",

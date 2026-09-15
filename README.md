@@ -271,7 +271,16 @@ L100 永久记忆（不参与自动压缩，只能由 Bot 主动 Memorize 或你
 这是 2.3.0 的播种保护：KSM 在改写上下文时，历史里可能混着别的会话，直接抄进来会串味。`bootstrap_seed=always` 可以强制播种，或在没装 KSM 时先播种。
 
 **Q：旧记忆插件的数据怎么办？**
-默认开启安全迁移：只读接入旧默认记忆的 `data/memory/core.txt` 和 KiraOS 的记忆文件，校验后导入，**原文件一律保留**；迁移成功后才停用冲突插件，失败则暂停自身并保持旧插件启用。
+默认开启安全迁移：只读接入三类旧插件的数据，校验后导入，**原文件一律保留**；
+
+| 旧插件 | 数据位置 | 说明 |
+|---|---|---|
+| 默认记忆 simple_memory | `data/memory/core.txt` | 老格式逐行解析 |
+| KiraOS | `data/memory/{entities,global}/**` | TOML 树 |
+| **海马体记忆** hippocampus | `data/plugin_data/kira_plugin_hippocampus_memory/memory/**` | 与 KiraOS **同构**，复用同一解析 |
+
+三者布局一致（`global/{facts,self,skills}` + `entities/<类型>_<编码ID>/{facts,reflections,skills}` + `profile.json`），
+所以**不需要额外装 KiraOS** ✓ 直接读数即可。迁移成功后才停用冲突插件，失败则暂停自身并保持旧插件启用。
 
 迁移在**后台执行**，不会卡住插件加载：启动后先在后台跑，期间记忆功能暂停（`migration_blocked`），完成后自动恢复，状态在概览页可见。如果旧记忆源文件没有变化、也没有旧插件在运行，启动时会**直接跳过扫描**（只 stat 文件、不解析），不会每次都重读一遍。
 
@@ -328,6 +337,38 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 
 **待拍板的产品决策**：原文是「永远**在线可查**」还是「永久保留但**可移出热库**（可导出/可恢复）」——
 选后者才能把老 L0 移走，这一步决定第 3 步能省多少。
+
+### v2.18.8 — 支持海马体记忆（Hippocampus）迁移，与 KiraOS 完全对齐
+
+**背景**：海马体记忆（`LyaQanYi/kira_plugin_hippocampus_memory`）已归档，官方路线是"先装 KiraOS 再迁移"。
+现在可以**直接迁到我们这里**，不用多装一个插件 ✓
+
+**为什么几乎不用改解析器**：把一份仿真海马体数据目录直接喂给现有的 KIRAOS 分支 →
+**3 文件 / 9 条 / 0 错误**，逐条映射全对 ✓（`global/self` 的反思正确落到我们的 `self` 类别 ✓）
+
+| 项 | 做法 |
+|---|---|
+| 新来源 | `HIPPOCAMPUS = "kira_plugin_hippocampus_memory"` 加入 `SOURCES` ✓ |
+| 数据根 | 各来源各自的根：`data/memory`（默认/KiraOS）/ `data/plugin_data/<id>/memory`（海马体）✓ |
+| 首次自动迁移 | 与 KiraOS 同一套：`auto_migrate` 开 → 启动后台跑 ✓ 幂等（比对源文件 mtime）✓ |
+| 字符上限 | 同一个 `migration_max_chars`（默认 120）：**超限整条跳过、不截断**，也不会让迁移失败 ✓ |
+| 互斥 | 加进 `SOURCES` 后 `conflicts()` 自动识别 ✓ 旧插件会被停用避免重复注入 ✓ |
+| 前端 | 来源下拉新增「海马体记忆」✓ 与既有两款同一套样式 ✓ 设计不另起一套 ✓ |
+| 人格/自我 | `global/self` 的反思照常迁入 `self` ✓ |
+
+**同时补上"记忆年龄折算"**（对齐海马体的衰减，但只做一次）：
+新配置 `migration_decay_half_life_days`（默认 365 天，0=关闭）——
+导入时按事实年龄折算 importance：每过一个半衰期减半（最低 1）✓
+为什么不做持续衰减：那是**行为改变**，会影响所有现有用户的排序 ✓ 导入时折叠一次更稳、可关 ✓
+
+**不迁的东西**（说清理由）：`index.db`（`memories`/`memories_fts`/`memories_vec`）与
+`access_count`/`last_accessed` —— 海马体自己就把它们定义为**可重建的运行时索引** ✓ 不是数据 ✓
+`skills/` 一如既往跳过（技能不是记忆）✓
+
+**新增守卫**：`tests/test_migration_hippocampus.py`（11 项）✓
+来源注册 / 用户实体映射 / **self 归属** / 画像展开 / skills 跳过 /
+**超限跳过但不致命** / 坏 TOML 必须上报 / 各来源数据根 / 年龄折算（含**毫秒时间戳混用**的溢出兜底）/
+前端标签覆盖全部来源 / 配置项三处同步 ✓
 
 ### v2.18.7 — 整理工作台的「L0 容量 / 召回用量」真正生效
 

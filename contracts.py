@@ -310,6 +310,9 @@ class Settings(Strict):
     auto_migrate: bool = True
     mutual_exclusion: bool = True
     migration_max_chars: int = Field(default=120, ge=1, le=16000)
+    # 导入旧记忆时按**事实年龄**折算一次 importance（海马体原本有持续衰减，我们没有）。
+    # 每过一个半衰期 importance 减半（最低 1）；设为 0 关闭折算，原样保留 ✓
+    migration_decay_half_life_days: int = Field(default=365, ge=0, le=3650)
     compress_input_chars: int = Field(default=48000, ge=4000, le=500000)
     boot_enabled: bool = True
     boot_replay_seconds: int = Field(default=90, ge=0, le=86400)

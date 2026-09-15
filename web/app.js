@@ -197,6 +197,7 @@ function renderMigration(m) {
   const names = {
     kira_plugin_simple_memory: "默认记忆",
     kira_plugin_kiraos: "KiraOS",
+    kira_plugin_hippocampus_memory: "海马体记忆",
   };
   const reasons = {
     too_long: "超过字符上限",

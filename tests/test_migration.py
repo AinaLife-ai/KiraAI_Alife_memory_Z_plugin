@@ -102,7 +102,9 @@ def test_source_immutability_limits_dedupe_reachability_and_provenance(tmp_path,
         for p in root.rglob("*")
         if p.is_file()
     }
-    for pid in m.SOURCES:
+    # 只跑"共用同一个 data/memory"的两个来源：海马体有自己的数据目录
+    # （data/plugin_data/<id>/memory）✓ 它由 test_migration_hippocampus.py 单独验证 ✓
+    for pid in (m.SIMPLE, m.KIRAOS):
         snap = m.snapshot(root, pid, 120)
         assert not snap["errors"]
         store.import_legacy(snap)

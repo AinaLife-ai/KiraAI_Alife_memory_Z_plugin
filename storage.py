@@ -1254,7 +1254,7 @@ class Store:
 
         return import_snapshot(self, snapshot)
 
-    def scan_legacy(self, root, plugin_id, limit, adapters=()):
+    def scan_legacy(self, root, plugin_id, limit, adapters=(), decay_days=365):
         from .migration import snapshot
         from .identity import Resolver
 
@@ -1262,7 +1262,7 @@ class Store:
             entities = [
                 (r["id"], r["kind"]) for r in db.execute("SELECT id,kind FROM entities")
             ]
-        return snapshot(root, plugin_id, limit, Resolver(entities, adapters))
+        return snapshot(root, plugin_id, limit, Resolver(entities, adapters), decay_days=decay_days)
 
     def legacy_migrated_at(self):
         """上次成功迁移旧记忆的时间戳（0 表示还没成功过）。"""
