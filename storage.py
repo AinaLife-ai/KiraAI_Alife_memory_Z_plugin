@@ -3564,6 +3564,21 @@ class Store:
                 # ⚠️ 没有来源的也要算自我来源 ✗（曾经漏掉它 → 助手一句话就能把它删了 ✓）
                 _sources = old.get("sources") or []
                 self_only = not _sources or all(s in bot_only for s in _sources)
+                if a["action"] == "merge":
+                    # v2.18.9：**混合组一律不许合并** ✗
+                    # 把助手的话并进用户的事实 = 把"她自己的说法"洗白成"用户背书" ✓
+                    # （助手那条本来就以独立事实存在 ✓ 带 self 标记 ✓ 不会被当已证实 ✓
+                    #   合进去**没有半点好处** ✓ 只会毁掉来源标记 ✓）
+                    kinds = [
+                        (not (by_id[f].get("sources") or []))
+                        or all(s in bot_only for s in by_id[f].get("sources") or [])
+                        for f in group
+                        if f in by_id
+                    ]
+                    if any(kinds) and not all(kinds):
+                        counts["keep"] += 1
+                        blocked += 1
+                        continue
                 if self_only:
                     if a["action"] == "retract":
                         # 自我来源的事实 = 助手自己的话 ✓ **允许清理** ✓
@@ -3583,8 +3598,15 @@ class Store:
                         a = dict(a)
                         a["only_self"] = True
                     else:
+                        # ⚠️ 判断"是不是在改写"要**比内容** ✗ 不能只看字段在不在 ✓
+                        # `correct` 按契约**必须带 content** ✓ 只看字段会把"纯降权"也误杀 ✗
+                        new_text = str(a.get("content") or "").strip()
+                        old_text = str(old.get("content") or "").strip()
+                        new_rels = a.get("relations")
                         rewrite = bool(
-                            a.get("content") or a.get("subject") or a.get("relations")
+                            (new_text and new_text != old_text)
+                            or (new_rels is not None and new_rels != (old.get("relations") or []))
+                            or (a.get("subject") and a.get("subject") != old.get("subject"))
                         )
                         if rewrite:
                             # 不许用她自己的话改写正文/关系/主体 ✓

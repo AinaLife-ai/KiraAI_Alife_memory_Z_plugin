@@ -400,3 +400,50 @@ class ProvenanceCase(unittest.TestCase):
                            "content": "用户养了猫", "importance": 9, "reason": "助手乱改"}])
         self.assertEqual(rows[0][0], "用户养了狗", "没来源的事实正文不许被改 ✗")
         self.assertEqual(rows[0][1], 5, "没来源的事实不许被提权 ✗")
+
+
+class MatrixCase(unittest.TestCase):
+    """v2.18.9 矩阵实测固化：自我来源能降权 ✓；混合合并必须被拦 ✗"""
+
+    def _mk(self, kind_a, kind_b):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        st = storage.Store(Path(tmp.name) / "m.db"); st.initialize()
+        sid = "qq:dm:2"
+        base = {"users": ["qq:2"], "speaker": "qq:2", "time": 1.0}
+        st.capture(sid, "ku", [dict(base, role="user", content="我住在杭州")])
+        st.capture(sid, "kb", [dict(base, role="assistant", content="主人住在上海")])
+        with st.connect() as db:
+            u = db.execute("SELECT id FROM records WHERE role='user'").fetchone()[0]
+            b = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
+        pick = {"user": [u], "bot": [b]}
+        for text, kind in (("用户住在杭州", kind_a), ("主人住在上海", kind_b)):
+            st.add_facts(sid, [{"category": "fact", "subject": "qq:2", "content": text,
+                                "reason": "", "scenario": "", "tags": [], "relations": [],
+                                "source_ids": pick[kind], "importance": 5}])
+        return st, sid
+
+    def test_self_only_fact_can_be_downgraded(self):
+        """自我来源的事实**降权必须生效** ✗（曾经因为按字段判断改写 → 被误杀 ✓）"""
+        st, sid = self._mk("bot", "bot")
+        with st.connect() as db:
+            fid = db.execute("SELECT id FROM facts ORDER BY rowid").fetchone()[0]
+        cands = st.audit_candidates(sid, limit=10, recheck_seconds=0)
+        st.audit(cands, {"actions": [{
+            "action": "correct", "target_id": fid, "source_ids": [fid],
+            "content": "用户住在杭州", "importance": 2, "reason": "过时了"}]})
+        with st.connect() as db:
+            r = db.execute("SELECT importance FROM facts WHERE id=?", (fid,)).fetchone()
+        self.assertEqual(r[0], 2, "降权应该生效 ✗")
+
+    def test_mixed_merge_is_blocked(self):
+        """混合组合并必须被拦 ✗（否则助手的说法会被"洗白"成用户背书 ✓）"""
+        st, sid = self._mk("user", "bot")
+        with st.connect() as db:
+            ids = [r[0] for r in db.execute("SELECT id FROM facts ORDER BY rowid")]
+        cands = st.audit_candidates(sid, limit=10, recheck_seconds=0)
+        st.audit(cands, {"actions": [{
+            "action": "merge", "target_id": ids[0], "source_ids": ids,
+            "content": "用户住在杭州（合并后）", "reason": "同一条"}]})
+        with st.connect() as db:
+            row = db.execute("SELECT content FROM facts WHERE id=?", (ids[0],)).fetchone()
+        self.assertEqual(row[0], "用户住在杭州", "混合合并不该落地 ✗")
