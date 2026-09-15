@@ -258,3 +258,24 @@ class ModelMisbehavesCase(unittest.TestCase):
             "content": "用户住在上海", "reason": "用户说过", "importance": 9,
         }]})
         self.assertEqual(self._importance(), 9, "用户佐证时应该允许提权 ✓")
+
+
+class MediaScopeCase(unittest.TestCase):
+    """媒体跳过只该影响"喂给模型的召回" ✓ 不该挡人在网页上浏览 ✓"""
+
+    def test_web_api_still_shows_media(self):
+        src = (ROOT / "main.py").read_text(encoding="utf-8")
+        i = src.index('path="/search"')
+        block = src[i : i + 1400]
+        self.assertTrue(
+            "skip_media=False" in block,
+            "网页端搜索必须显式 skip_media=False ✗ 否则表情/图片记录在界面上消失 ✓",
+        )
+        self.assertTrue("include_cold=True" in block)
+
+    def test_recall_paths_use_the_switch(self):
+        src = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(
+            src.count("skip_media="), 3, "被动召回 / 召回工具 / 网页端都应显式传参 ✓"
+        )
+        self.assertTrue("recall_skip_media" in src)

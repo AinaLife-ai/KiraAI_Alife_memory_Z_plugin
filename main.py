@@ -2711,6 +2711,9 @@ class AlifeMemoryPlugin(BasePlugin):
             lexical=q.prompt if not vector else "",
             # The admin UI browses everything, including cold archives.
             include_cold=True,
+            # v2.18.9：网页端是**人在看** ✓ 表情/图片记录照常显示 ✓
+            # （`recall_skip_media` 只管"喂给模型的召回" ✗ 别把浏览也一起挡了 ✓）
+            skip_media=False,
         )
         ids = {u for r in result["items"] for u in r["users"]} | {
             r["sid"] for r in result["items"]

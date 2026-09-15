@@ -3538,12 +3538,19 @@ class Store:
             }
             bot_only = set()
             if source_ids:
-                rows = db.execute(
-                    "SELECT id,role FROM records WHERE id IN (%s)"
-                    % ",".join("?" * len(source_ids)),
-                    tuple(source_ids),
-                ).fetchall()
-                bot_only = {r[0] for r in rows if str(r[1] or "") == "assistant"}
+                # ⚠️ 分批查：老 SQLite 的变量上限是 999 ✗ 一批里来源可能上千 ✓
+                # 超限会直接 OperationalError → 审计任务整体失败 ✗（防御性分批 ✓）
+                ordered = list(source_ids)
+                for start in range(0, len(ordered), 500):
+                    chunk = ordered[start : start + 500]
+                    rows = db.execute(
+                        "SELECT id,role FROM records WHERE id IN (%s)"
+                        % ",".join("?" * len(chunk)),
+                        tuple(chunk),
+                    ).fetchall()
+                    bot_only |= {
+                        r[0] for r in rows if str(r[1] or "") == "assistant"
+                    }
             for old in candidates:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
