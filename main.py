@@ -41,7 +41,7 @@ from .contracts import (
 from . import identity
 from .engine import Engine, compression_plan
 from .storage import Conflict, Store
-from .migration import SOURCES, newest_legacy_mtime
+from .migration import SOURCES, newest_legacy_mtime, source_roots
 from .retrieval import (
     CATEGORY_RANK,
     archives_flat,
@@ -288,10 +288,15 @@ class AlifeMemoryPlugin(BasePlugin):
         async with self.migration_lock:
             if not self.settings.enabled or not self.settings.auto_migrate:
                 return
-            root = Path(get_data_path()) / "memory"
+            data_root = Path(get_data_path())
+            # 各来源数据根不同：simple_memory / KiraOS 在共享的 data/memory ✓，
+            # 海马体（已归档）写在自己的插件目录 data/plugin_data/<id>/memory ✓
+            roots = source_roots(data_root / "memory", data_root / "plugin_data")
             # 源文件没变化、也没有冲突插件在跑：不必每次启动都重扫一遍。
             if not self.conflicts():
-                newest = await asyncio.to_thread(newest_legacy_mtime, root)
+                newest = await asyncio.to_thread(
+                    lambda: max(newest_legacy_mtime(p) for p in roots.values())
+                )
                 migrated_at = await self.store.call("legacy_migrated_at")
                 if newest <= migrated_at:
                     self.migration_blocked = False
@@ -307,10 +312,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 for pid in SOURCES:
                     snap = await self.store.call(
                         "scan_legacy",
-                        root,
+                        roots[pid],
                         pid,
                         self.settings.migration_max_chars,
                         adapters,
+                        self.settings.migration_decay_half_life_days,
                     )
                     await self.store.call("import_legacy", snap)
                     if snap["errors"]:
@@ -327,10 +333,11 @@ class AlifeMemoryPlugin(BasePlugin):
                     for pid in SOURCES:
                         snap = await self.store.call(
                             "scan_legacy",
-                            root,
+                            roots[pid],
                             pid,
                             self.settings.migration_max_chars,
                             adapters,
+                            self.settings.migration_decay_half_life_days,
                         )
                         await self.store.call("import_legacy", snap)
                         if snap["errors"]:

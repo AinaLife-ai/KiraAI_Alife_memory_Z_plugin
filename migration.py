@@ -7,6 +7,7 @@ calls, source rewrites, inferred compression depth, or invented entity IDs.
 from __future__ import annotations
 import hashlib
 import json
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -24,7 +25,59 @@ from .storage import search_body_of
 
 SIMPLE = "kira_plugin_simple_memory"
 KIRAOS = "kira_plugin_kiraos"
-SOURCES = (SIMPLE, KIRAOS)
+# 海马体记忆（LyaQanYi，已归档并入 KiraOS）。它的 TOML 树与 KIRAOS **完全同构** ✓
+# 实测：拿仿真海马体数据直接喂 KIRAOS 分支 → 3 文件 / 9 条 / 0 错误，逐条映射正确 ✓
+HIPPOCAMPUS = "kira_plugin_hippocampus_memory"
+SOURCES = (SIMPLE, KIRAOS, HIPPOCAMPUS)
+
+
+def source_roots(data_root, plugin_data_root):
+    """每个来源的数据根。
+
+    - simple_memory / KiraOS 都写在共享的 ``data/memory`` ✓
+    - 海马体写在自己的插件数据目录 ``data/plugin_data/<id>/memory`` ✓（main.py:110）
+    布局（``global/{facts,self,skills}`` + ``entities/<类型>_<编码ID>/{facts,reflections,skills}``
+    + ``profile.json``）三者一致 ✓ 所以解析分支可以复用 ✓
+    """
+    data_root = Path(data_root)
+    return {
+        SIMPLE: data_root,
+        KIRAOS: data_root,
+        HIPPOCAMPUS: Path(plugin_data_root) / HIPPOCAMPUS / "memory",
+    }
+
+
+def aged_importance(value, when, *, now=None, half_life_days=365):
+    """导入时按**事实年龄**折算一次 importance（海马体原本有持续衰减，我们没有）。
+
+    - ``half_life_days <= 0`` → 不折算，原样返回 ✓（配置项可关）
+    - 每过一个半衰期，importance 减半（向下取整，最低 1）✓
+    - 时间取不到（None/0）→ 不折算 ✓ 绝不让导入失败
+    """
+    try:
+        base = int(value)
+    except (TypeError, ValueError):
+        return 1
+    if half_life_days is None or half_life_days <= 0:
+        return max(1, min(10, base))
+    try:
+        stamp = float(when or 0)
+    except (TypeError, ValueError):
+        stamp = 0.0
+    if stamp <= 0:
+        return max(1, min(10, base))
+    if stamp > 1e11:          # 毫秒时间戳兜底 ✓（我们的库用秒 ✓ 别的来源可能不同）
+        stamp = stamp / 1000.0
+    now = time.time() if now is None else float(now)
+    if not math.isfinite(stamp) or not math.isfinite(now):
+        return max(1, min(10, base))
+    if now > 1e11:            # now 也可能是毫秒（调用方不同）→ 一并归一
+        now = now / 1000.0
+    age_days = max(0.0, (now - stamp) / 86400.0)
+    # 封顶 100 年：单位混用时差额可能离谱 → 会让 2**x 直接 OverflowError ✗
+    age_days = min(age_days, 36500.0)
+    folded = base / (2.0 ** (age_days / float(half_life_days)))
+    return max(1, min(10, round(folded)))
 
 
 class Rejected(ValueError):
@@ -185,7 +238,7 @@ def newest_legacy_mtime(root) -> float:
     return newest
 
 
-def snapshot(root: Path, plugin_id: str, limit: int, resolver=None):
+def snapshot(root: Path, plugin_id: str, limit: int, resolver=None, *, decay_days=365):
     """Read only named memory sources; each rejected item has an auditable reason.
 
     ``resolver`` maps synthetic buckets onto live identifiers for new imports.
@@ -193,6 +246,10 @@ def snapshot(root: Path, plugin_id: str, limit: int, resolver=None):
     digest stays identical either way so an upgrade never re-imports data.
     """
     root = root.resolve()
+    # 年龄折算**只对海马体生效** ✓（用户决策 2026-09-15）
+    # 初衷是"补上海马体自己的衰减" ✓ KIRAOS / simple_memory 用户并没有要这个 ✗
+    # → 其它来源传 0：aged_importance 原样返回（只做 1..10 归一）✓
+    decay_days = decay_days if plugin_id == HIPPOCAMPUS else 0
     paths = (
         [root / "core.txt"]
         if plugin_id == SIMPLE
@@ -335,7 +392,11 @@ def snapshot(root: Path, plugin_id: str, limit: int, resolver=None):
                         tags=[*tags, "legacy_import"],
                         relations=relations,
                         source_ids=["pending"],
-                        importance=_importance(metadata.get("importance")),
+                        importance=aged_importance(
+                            _importance(metadata.get("importance")),
+                            ts,
+                            half_life_days=decay_days,
+                        ),
                     ).model_dump()
                     item.update(
                         sid=sid,

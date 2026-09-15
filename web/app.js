@@ -15,7 +15,8 @@ const fields = {
   compress_input_chars: "每批压缩输入预算（字符）",
   auto_migrate: "自动安全迁移旧记忆",
   mutual_exclusion: "迁移成功后互斥旧插件",
-  migration_max_chars: "KiraOS 迁移字符上限",
+  migration_max_chars: "旧记忆迁移字符上限",
+  migration_decay_half_life_days: "导入时的记忆年龄折算（天）",
   enabled: "启用记忆系统",
   bootstrap_seed: "旧历史播种",
   inject_recent_raw: "注入最近原文",
@@ -197,6 +198,7 @@ function renderMigration(m) {
   const names = {
     kira_plugin_simple_memory: "默认记忆",
     kira_plugin_kiraos: "KiraOS",
+    kira_plugin_hippocampus_memory: "海马体记忆",
   };
   const reasons = {
     too_long: "超过字符上限",
