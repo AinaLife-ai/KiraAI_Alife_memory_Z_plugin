@@ -583,7 +583,8 @@ def test_sidebar_polish():
     foot = css.split(".aside-foot {")[1].split("}")[0]
     assert "padding: 1px 12px 0" in foot, "底块内边距要收到最小"
     aside = css.split("aside {")[1].split("}")[0]
-    assert "padding: 30px 18px 10px" in aside, "aside 底部内边距要收到 10px（把状态块往下推）"
+    assert "padding: 30px 18px 3px" in aside, "aside 底部留白一步到位 3px"
+    assert aside.count("padding:") == 1, "aside 里只许有一条 padding ✗（两份并存时后写的会覆盖前面，改了像没改）"
     assert "font-size: 10px" in foot, "版本号那行字号要缩小"
 
     motto = css.split(".motto {")[1].split("}")[0]
