@@ -271,6 +271,8 @@
               <h2>整理工作台</h2>
               <span class="tag">无需等待模型返回</span
               ><span class="tag" id="searchIndex" title="词面检索索引（FTS5）：ready=已启用，building=后台回填中，unavailable=本机 SQLite 不支持、走全表检索">索引 —</span>
+              <span class="tag" id="capTag" title="L0 容量：库体积 / 记录条数 / FTS 索引条数 / 逐年增长（判断何时该分库）">L0 容量 —</span>
+              <span class="tag" id="recallTag" title="召回用量：工具被调用次数与返回字符数（判断是否该精简返回）">召回 —</span>
             </div>
             <div class="row">
               <select id="jobSession" aria-label="任务会话"></select

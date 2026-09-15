@@ -14,7 +14,7 @@ import random
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager, closing
+from contextlib import contextmanager, nullcontext as _nullcontext, closing
 from pathlib import Path
 from .contracts import dump, relation_issue
 from .output_validation import validate_audit
@@ -714,32 +714,46 @@ class Store:
     #   方案：records_YYYY.db，往年库只读 + 当年库读写，检索时 ATTACH 跨库查询
     #   开关：archive_shard_from_year（0 = 关闭，默认）。现在只保留 id/时间戳稳定这一前提 ✓
 
-    def capacity_stats(self):
+    def capacity_stats(self, conn=None):
         """容量仪表：每层条数 / 库大小 / 索引条数 / 逐年增长（P0）。
 
         供 /status 与界面显示，用来判断何时该分库（见 README 的触发线）。
         防御式：取不到连接或某项查不到就跳过，绝不影响插件运行 ✓
+
+        ⚠️ 连接必须走 self.connect()（本 store 只提供这个上下文管理器）。
+        曾经写成 getattr(self, "conn"/"_conn"/"db") —— 那三个属性根本不存在 ✗
+        → 每次都在开头 return {} → /status.capacity 恒为空 →
+        首页「L0 容量」永远显示「—」（用户实测报告 ✓）
         """
-        conn = getattr(self, "conn", None) or getattr(self, "_conn", None) or getattr(self, "db", None)
-        if conn is None or not hasattr(conn, "execute"):
-            return {}
         out = {"levels": {}, "years": {}, "db_bytes": 0, "fts_rows": 0}
-        for key, sql in (
-            ("levels", "SELECT level, count(*) FROM records GROUP BY level"),
-            ("years", "SELECT substr(datetime(created, 'unixepoch'), 1, 4), count(*) FROM records GROUP BY 1"),
-        ):
-            try:
-                out[key] = {str(k): v for k, v in conn.execute(sql)}
-            except Exception:
-                pass
         try:
-            out["db_bytes"] = conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute("PRAGMA page_size").fetchone()[0]
+            ctx = self.connect() if conn is None else _nullcontext(conn)
+            with ctx as db:
+                for key, sql in (
+                    ("levels", "SELECT level, count(*) FROM records GROUP BY level"),
+                    (
+                        "years",
+                        "SELECT substr(datetime(created, 'unixepoch'), 1, 4), count(*) "
+                        "FROM records GROUP BY 1",
+                    ),
+                ):
+                    try:
+                        out[key] = {str(k): v for k, v in db.execute(sql)}
+                    except Exception:
+                        pass
+                try:
+                    out["db_bytes"] = (
+                        db.execute("PRAGMA page_count").fetchone()[0]
+                        * db.execute("PRAGMA page_size").fetchone()[0]
+                    )
+                except Exception:
+                    pass
+                try:
+                    out["fts_rows"] = db.execute("SELECT count(*) FROM records_fts").fetchone()[0]
+                except Exception:
+                    pass
         except Exception:
-            pass
-        try:
-            out["fts_rows"] = conn.execute("SELECT count(*) FROM records_fts").fetchone()[0]
-        except Exception:
-            pass
+            return {}
         return out
 
     def expand_query(self, keyword, limit=4):
