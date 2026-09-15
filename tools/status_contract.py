@@ -69,7 +69,14 @@ def main() -> int:
     print("前端读取字段:", total_reads, "个")
 
     st = (ROOT / "storage.py").read_text(encoding="utf-8")
-    conn_bug = 'getattr(self, "conn", None) or getattr(self, "_conn"' in st
+    # 只扫 capacity_stats 的**代码**（剥掉注释 ✓ 免得注释里提到旧写法就误报 ✗）
+    m = re.search(r"    def capacity_stats\(self[^\n]*\):(.*?)\n    def ", st, re.S)
+    body = m.group(1) if m else ""
+    body = re.sub(r'""".*?"""', "", body, flags=re.S)   # 去掉 docstring（里面常提到旧写法 ✗）
+    code = "\n".join(
+        ln for ln in body.splitlines() if not ln.strip().startswith("#")
+    )
+    conn_bug = any("getattr(self, %s" % a in code for a in ('"conn"', '"_conn"', '"db"'))
     if conn_bug:
         print('\n✗ capacity_stats 用 self.conn/_conn/db 取连接 ✗ 但本项目只有 self.connect() 上下文管理器')
         print('  → 永远拿到 None → 永远 return {} → 界面永远「L0 容量 —」')
