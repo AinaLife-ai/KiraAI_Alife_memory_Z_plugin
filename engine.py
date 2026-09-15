@@ -62,6 +62,8 @@ AUDIT_INSTRUCTION = (
     # v2.18.9 回声防线：**以用户为准** ✓
     "evidence[].bot=1=助手自己的发言 ✗ 不算独立证据：可判 keep 或修正明显自述/口误的条目 ✓"
     "但不许据此提 importance（填 only_self=true ✓）"
+    # v2.18.9：内容改了，标签也要能跟着改 ✗（不给就沿用原标签的并集 ✓）
+    "改写内容后若原标签不再贴切，一并给 tags；没把握就不给。"
 )
 
 # 降级拼接事实的重做策略（v2.13.0）
@@ -1212,6 +1214,8 @@ class Engine:
                         verdict["content"],
                         verdict["reason"],
                         new_sid,
+                        # v2.18.9：模型给了新标签就用它 ✓ 没给则由存储侧取并集 ✓
+                        verdict.get("tags"),
                     )
                     if fallback:
                         # 这次是"模型不可用 → 按时间拼接"：留个待重做标记，

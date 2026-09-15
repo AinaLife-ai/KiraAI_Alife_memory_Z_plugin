@@ -142,6 +142,8 @@ class FactMergeGroup(Strict):
     action: Literal["merge", "relabel", "drop"] = "merge"
     category: str = Field(default="", max_length=40)
     content: str = Field(default="", max_length=16000)
+    # v2.18.9：合并后**标签不再贴切时一并更新** ✓ 不给就沿用组内并集 ✓
+    tags: list[str] | None = None
     reason: Short
 
     @model_validator(mode="after")
@@ -203,6 +205,9 @@ class AuditAction(Strict):
     importance: int | None = Field(default=None, ge=1, le=10)
     # 主体记错了就填这里（用条目里的 id）✗ 修正归属 —— 只对 correct 有意义，留空=不动主体
     subject: Short | None = None
+    # v2.18.9：改写内容后**标签不再贴切时一并更新** ✓ 不给就沿用组内并集 ✓
+    # （此前内容能改、标签改不了 → 标签会一直停在旧的 ✗）
+    tags: list[Text] | None = None
     # v2.18.9 回声防线：证据只有助手自己（evidence[].bot=1）时填 true ✓
     # 应用侧会**拒绝据此提升 importance** ✗（不许自我强化）
     only_self: bool = False
