@@ -33,6 +33,7 @@ async def test_audit_invalid_record_id_retries_before_store_write(tmp_path):
     store = s.Store(tmp_path / "db")
     store.initialize()
     rid = store.memorize("a:dm:u", "喜欢猫", ["a:u"], 1.0, 1.0)
+    user_src = _user_record(store, "a:dm:u", "我喜欢猫", ["a:u"], 2.0)
     with store.connect() as db:
         fid = store._add_fact(
             db,
@@ -45,7 +46,7 @@ async def test_audit_invalid_record_id_retries_before_store_write(tmp_path):
                 scenario="",
                 tags=[],
                 relations=[],
-                source_ids=[rid],
+                source_ids=[rid, user_src],
             ),
         )
     calls = []
@@ -185,6 +186,7 @@ async def test_audit_bounds_complete_evidence_and_keeps_review_reason(tmp_path):
     store.initialize()
     for i in range(3):
         rid = store.memorize("a:dm:u", "完整证据" * 800, ["a:u"], float(i), float(i))
+        user_src = _user_record(store, "a:dm:u", "事实%d" % i, ["a:u"], float(i) + 0.5)
         with store.connect() as db:
             store._add_fact(
                 db,
@@ -197,12 +199,18 @@ async def test_audit_bounds_complete_evidence_and_keeps_review_reason(tmp_path):
                     scenario="",
                     tags=[],
                     relations=[],
-                    source_ids=[rid],
+                    source_ids=[rid, user_src],
                 ),
             )
 
     async def model(_, purpose, instruction, schema, payload):
-        assert len(payload["facts"]) == 1 and len(payload["evidence"]) == 1
+        assert len(payload["facts"]) == 1
+        # v2.18.9 回声防线：审计证据必须**带上来源标记** ✗
+        # 助手自己的那条要标 bot ✓ 用户的那条要标 sp ✓
+        # （曾经这里重建字典把两个都丢了 ✗ 提示词写着 bot 而载荷没有 → 模型无法遵守 ✓）
+        assert len(payload["evidence"]) == 2
+        assert any(e.get("bot") == 1 for e in payload["evidence"]), "助手来源证据必须标 bot ✗"
+        assert any(e.get("sp") for e in payload["evidence"]), "用户来源证据必须标 sp ✗"
         assert payload["evidence"][0]["content"] == "完整证据" * 800
         fid = payload["facts"][0]["id"]
         return c.dump(
@@ -301,3 +309,19 @@ def test_compress_instruction_lists_categories_and_relation_shape():
     assert "relations:[{subject,predicate,object}]" in instruction or (
         "relations 必须是数组" in instruction and "predicate/object" in instruction
     )
+
+
+def _user_record(store, sid, content, users, t):
+    """造一条**用户**记录。
+
+    v2.18.9 回声防线：审计要改写正文，必须拿得出**用户**的佐证 ✗
+    只引用助手自己说过的记录会被服务端拦下 ✓（那正是"用她自己的话改写记忆"）
+    """
+    store.capture(sid, "u%d" % int(t * 100), [{
+        "role": "user", "content": content, "users": list(users),
+        "speaker": list(users)[0], "time": float(t),
+    }])
+    with store.connect() as db:
+        return db.execute(
+            "SELECT id FROM records WHERE role='user' ORDER BY created DESC LIMIT 1"
+        ).fetchone()[0]

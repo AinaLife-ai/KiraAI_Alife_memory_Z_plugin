@@ -153,6 +153,7 @@ def test_weak_legacy_relation_quarantined_and_audit_can_repair(tmp_path):
     store = s.Store(tmp_path / "memory.db")
     store.initialize()
     source = store.memorize("test:dm:u", "小明明确说阿澄是朋友", ["test:u"], 1.0, 1.0)
+    user_src = _user_record(store, "test:dm:u", "阿澄是我朋友", ["test:u"], 2.0)
     bad = {"subject": "Bot", "predicate": "认为", "object": "阿澄"}
     with pytest.raises(ValueError):
         c.Relation.model_validate(bad)
@@ -164,7 +165,7 @@ def test_weak_legacy_relation_quarantined_and_audit_can_repair(tmp_path):
         "scenario": "",
         "tags": [],
         "relations": [bad],
-        "source_ids": [source],
+        "source_ids": [source, user_src],
     }
     with store.connect() as db:
         id = store._add_fact(db, "test:dm:u", fact)
@@ -477,3 +478,19 @@ def test_fts_path_matches_full_scan(tmp_path):
     hits = store.search("qq:gm:A", lexical="乌龙茶", scope="global",
                         users=["u:1"], limit=10, exclude_sid="")
     assert any(i["id"] == "bypass" for i in hits["items"]), "未索引的行被漏掉了"
+
+
+def _user_record(store, sid, content, users, t):
+    """造一条**用户**记录。
+
+    v2.18.9 回声防线：审计要改写正文，必须拿得出**用户**的佐证 ✗
+    只引用助手自己说过的记录会被服务端拦下 ✓（那正是"用她自己的话改写记忆"）
+    """
+    store.capture(sid, "u%d" % int(t * 100), [{
+        "role": "user", "content": content, "users": list(users),
+        "speaker": list(users)[0], "time": float(t),
+    }])
+    with store.connect() as db:
+        return db.execute(
+            "SELECT id FROM records WHERE role='user' ORDER BY created DESC LIMIT 1"
+        ).fetchone()[0]

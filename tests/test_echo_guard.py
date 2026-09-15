@@ -279,3 +279,67 @@ class MediaScopeCase(unittest.TestCase):
             src.count("skip_media="), 3, "被动召回 / 召回工具 / 网页端都应显式传参 ✓"
         )
         self.assertTrue("recall_skip_media" in src)
+
+
+class ContentRewriteBlockedCase(unittest.TestCase):
+    """来源**全是助手自己**时：不许改写正文/关系/主体，也不许软删 ✗ 只许 keep 与降权 ✓"""
+
+    def _make(self, with_user=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = storage.Store(Path(tmp.name) / "m.db")
+        store.initialize()
+        sid = "qq:dm:9"
+        store.capture(sid, "k", [
+            {"role": "assistant", "content": "主人住在上海", "speaker": "qq:9",
+             "users": ["qq:9"], "time": 1.0},
+        ])
+        with store.connect() as db:
+            bot = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
+        srcs = [bot]
+        if with_user:
+            store.capture(sid, "k2", [
+                {"role": "user", "content": "我住在杭州", "speaker": "qq:9",
+                 "users": ["qq:9"], "time": 2.0},
+            ])
+            with store.connect() as db:
+                user = db.execute(
+                    "SELECT id FROM records WHERE role='user'"
+                ).fetchone()[0]
+            srcs.append(user)
+        store.add_facts(sid, [
+            {"category": "fact", "subject": "qq:9", "content": "用户住在上海",
+             "reason": "", "scenario": "", "tags": [], "relations": [],
+             "source_ids": srcs, "importance": 5},
+        ])
+        return store, sid
+
+    def _candidates(self, store, sid):
+        with store.connect() as db:
+            fid = db.execute("SELECT id FROM facts").fetchone()[0]
+        return fid, store.audit_candidates(sid, limit=10, recheck_seconds=0)
+
+    def _rewrite(self, store, cands, fid, **kw):
+        out = {"actions": [dict({"action": "correct", "target_id": fid,
+                                 "source_ids": [fid], "content": "用户住在上海，已确认",
+                                 "reason": "证据"}, **kw)]}
+        store.audit(cands, out)
+    def test_content_rewrite_is_blocked_when_only_bot_spoke(self):
+        store, sid = self._make()
+        fid, cands = self._candidates(store, sid)
+        self._rewrite(store, cands, fid)
+        with store.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT content FROM facts").fetchone()[0], "用户住在上海",
+                "来源只有助手自己 ✗ 正文不许被改写 ✓",
+            )
+
+    def test_user_backed_rewrite_still_works(self):
+        store, sid = self._make(with_user=True)
+        fid, cands = self._candidates(store, sid)
+        self._rewrite(store, cands, fid)
+        with store.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT content FROM facts").fetchone()[0], "用户住在上海，已确认",
+                "有用户佐证时应照常可改 ✓（别把功能一起拦掉 ✗）",
+            )

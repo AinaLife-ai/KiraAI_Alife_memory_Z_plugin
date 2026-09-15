@@ -3526,6 +3526,7 @@ class Store:
         by_id = {r["id"]: r for r in candidates}
         validate_audit(candidates, output)
         counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
+        blocked = 0   # v2.18.9：因"来源全是助手自己"而被拦下的改写次数 ✓
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             # v2.18.9 回声防线（**服务端自己判定** ✗ 不依赖模型自觉 ✓）：
@@ -3558,6 +3559,22 @@ class Store:
             for a in output["actions"]:
                 old = by_id[a["target_id"]]
                 group = {a["target_id"], *a["source_ids"]}
+                # v2.18.9 回声防线：这条事实的来源**是不是全是助手自己说的** ✗
+                # 服务端自己判定 ✓（模型自报的 only_self 只作参考 ✓ 不指望它）
+                _sources = old.get("sources") or []
+                if _sources and all(s in bot_only for s in _sources):
+                    rewrite = bool(
+                        a.get("content") or a.get("subject") or a.get("relations")
+                    )
+                    if a["action"] in ("retract", "merge") or rewrite:
+                        # 只允许 ① keep ② 下调 importance ✗
+                        # 禁止：改写正文/关系/标签、改主体、软删 —— 那都是"用她自己的话改写记忆" ✓
+                        counts["keep"] += 1
+                        blocked += 1
+                        continue
+                    # 只是提权 → 打上 only_self，交给下面的钳制 ✓（模型没自报也拦住 ✓）
+                    a = dict(a)
+                    a["only_self"] = True
                 counts[a["action"]] += 1
                 if a["action"] == "merge":
                     counts["merged_facts"] += len(group) - 1
@@ -3678,6 +3695,10 @@ class Store:
                             }
                         )
             self.add_job_items(job_id, items)
+        if blocked:
+            # 让"被兜底拦下多少次"在审计报告里可见 ✓（不然会以为模型很乖 ✓）
+            counts["only_self_blocked"] = blocked
+            logger.info("[回声防线] 拦下 %d 次仅凭助手自身发言的改写 ✓", blocked)
         return counts
 
     def set_vector(self, record_id, model, revision, vector):
