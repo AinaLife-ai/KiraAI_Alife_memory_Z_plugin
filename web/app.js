@@ -425,44 +425,33 @@ async function openJob(id) {
 }
 $("#closeJob").onclick = () => $("#jobDialog").close();
 
-let capacityEl = null;   // L0 容量标签（动态插在 #searchIndex 旁）
-let usageEl = null;      // v2.18 第6项：召回用量标签
+/* v2.18.7：容量 / 召回用量的标签**写在 index.html 里**（#capTag / #recallTag）✓
+   不再运行时 createElement 插入 ✗ —— 那种做法一旦那块 DOM 重渲染就丢 ✓ */
 
 async function poll() {
   try {
     const next = await api("/status");
-    // v2.18 第6项：召回用量（工具调用次数 / 返回字符数）
-    if (next.recall_usage && !usageEl) {
-      usageEl = document.createElement("span");
-      usageEl.className = "tag";
-      usageEl.title = "召回用量：工具被调用多少次、返回了多少字符（用来判断是否该精简返回）";
-      const badge = $("#searchIndex");
-      if (badge && badge.parentNode) badge.parentNode.insertBefore(usageEl, badge.nextSibling);
-    }
-    if (usageEl && next.recall_usage) {
-      const u = next.recall_usage;
-      const kb = ((u.total_chars || 0) / 1024).toFixed(1);
-      usageEl.textContent = "召回 " + (u.total_calls || 0) + " 次 | " + kb + "k 字符";
-    }
-    if (next.capacity) {
-      if (!capacityEl) {
-        capacityEl = document.createElement("span");
-        capacityEl.className = "tag";
-        capacityEl.title = "L0 容量：每层条数 / 库大小 / 索引条数 / 逐年增长（判断何时该分库）";
-        const badge = $("#searchIndex");
-        if (badge && badge.parentNode) badge.parentNode.insertBefore(capacityEl, badge.nextSibling);
-      }
-      const cap = next.capacity;
-      const levels = cap.levels || {};
-      const years = cap.years || {};
-      const total = Object.values(levels).reduce((sum, n) => sum + n, 0);
-      const parts = [];
-      if (cap.db_bytes) parts.push("库 " + (cap.db_bytes / 1048576).toFixed(1) + " MB");
-      if (total) parts.push("记录 " + total);
-      if (cap.fts_rows) parts.push("索引 " + cap.fts_rows);
-      const ys = Object.keys(years).sort().slice(-2);
-      if (ys.length) parts.push(ys.map((y) => y + " " + years[y]).join(" · "));
-      capacityEl.textContent = parts.length ? "L0 " + parts.join(" | ") : "L0 容量 —";
+    // v2.18.7：L0 容量 / 召回用量 —— 元素**写在 index.html 里** ✓ 这里只更新文字 ✓
+    // 原来用 createElement 插到 #searchIndex 旁 ✗ 是运行时插入 ✓ 一旦该区域被重渲染就丢 ✓
+    // 更关键：capacity_stats 拿连接的方式在本项目里不存在 ✗ → 恒返回 {} → 永远「L0 容量 —」✓
+    const cap = next.capacity || {};
+    const levels = cap.levels || {};
+    const years = cap.years || {};
+    const total = Object.values(levels).reduce((sum, n) => sum + (n || 0), 0);
+    const capParts = [];
+    if (cap.db_bytes) capParts.push("库 " + (cap.db_bytes / 1048576).toFixed(1) + " MB");
+    if (total) capParts.push("记录 " + total);
+    if (cap.fts_rows) capParts.push("索引 " + cap.fts_rows);
+    const ys = Object.keys(years).sort().slice(-2);
+    if (ys.length) capParts.push(ys.map((y) => y.slice(2) + "年 " + years[y]).join(" · "));
+    const capEl = $("#capTag");
+    if (capEl) capEl.textContent = capParts.length ? "L0 " + capParts.join(" | ") : "L0 容量 —";
+    const u = next.recall_usage || {};
+    const recallEl = $("#recallTag");
+    if (recallEl) {
+      recallEl.textContent = u.total_calls
+        ? "召回 " + u.total_calls + " 次 | " + ((u.total_chars || 0) / 1024).toFixed(1) + "k 字符"
+        : "召回 —";
     }
     const conn = next.enabled
       ? autoRefresh
