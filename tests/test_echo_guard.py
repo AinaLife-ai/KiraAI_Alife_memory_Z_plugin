@@ -187,7 +187,11 @@ class PromptCase(unittest.TestCase):
         self.assertTrue("evidence[].bot=1" in eng, "审计提示词必须解释 evidence[].bot ✗")
         self.assertTrue('item["bot"] = 1' in main, "相关记录也必须打 bot（三处一致 ✓）")
         self.assertTrue('["self"] = 1' in ret, "事实行必须能标 self ✗")
-        self.assertTrue("自己曾经说过的" in ret, "图例必须解释 self ✗")
+        # v2.18.9：**按"给谁看"分口吻** ✓
+        # 后台三处（压缩/审计/合并）→ 客观第三人称"助手" ✓（它们不扮演人设 ✓ 要分清谁说的）
+        # 注入/召回（给扮演人设的主模型看）→ 第一人称"自己" ✓（那本来就是它自己说过的话）
+        self.assertTrue("自己曾经说过的" in ret, "图例（给主模型看）要用第一人称 ✗")
+        self.assertTrue("助手自己说的" in eng, "压缩/审计提示词要保持客观第三人称 ✗")
 
 
 if __name__ == "__main__":
