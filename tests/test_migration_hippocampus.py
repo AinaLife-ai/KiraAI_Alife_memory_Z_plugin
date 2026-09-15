@@ -77,6 +77,19 @@ class HippocampusTest(unittest.TestCase):
         self.assertEqual(fact["category"], "self")
         self.assertIn("legacy_import", fact["tags"])
 
+    def test_decay_applies_only_to_hippocampus(self):
+        """年龄折算**只对海马体**生效 ✓ 其它来源的老记忆必须保持原值 ✓
+
+        用户决策：我们是为了"补上海马体自己的衰减" ✓
+        KIRAOS / default 用户并没有要这个 ✗ → 他们的历史 importance 不许被改动 ✓
+        """
+        # 同一份数据、同一个文件，只是换个来源 id 再扫一遍
+        other = m.snapshot(self.root, m.KIRAOS, 120, decay_days=365)
+        fact = [
+            i for i in other["items"] if i.get("content") == "用户讨厌写 CSS"
+        ][0]["fact"]
+        self.assertEqual(fact["importance"], 6, "非海马体来源被折算了 ✗")
+
     def test_profile_json_expands(self):
         """profile.json → traits/aliases/facts/preferences/relationships 全展开 ✓"""
         cats = {}

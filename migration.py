@@ -246,6 +246,10 @@ def snapshot(root: Path, plugin_id: str, limit: int, resolver=None, *, decay_day
     digest stays identical either way so an upgrade never re-imports data.
     """
     root = root.resolve()
+    # 年龄折算**只对海马体生效** ✓（用户决策 2026-09-15）
+    # 初衷是"补上海马体自己的衰减" ✓ KIRAOS / simple_memory 用户并没有要这个 ✗
+    # → 其它来源传 0：aged_importance 原样返回（只做 1..10 归一）✓
+    decay_days = decay_days if plugin_id == HIPPOCAMPUS else 0
     paths = (
         [root / "core.txt"]
         if plugin_id == SIMPLE

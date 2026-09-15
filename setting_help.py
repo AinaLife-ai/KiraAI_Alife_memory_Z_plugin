@@ -81,7 +81,7 @@ HELP = {
     "auto_migrate": "自动只读接续默认记忆、KiraOS 与海马体记忆，重复检查会去重。原文件保留，随时能切回旧插件。",
     "mutual_exclusion": "迁移成功后停用旧记忆插件，避免重复注入；重新启用旧插件时本插件让位。会停用整个KiraOS。",
     "migration_max_chars": "旧内容（默认记忆 / KiraOS / 海马体）超过这个字符数就整条跳过，不截断。默认120；调整后可重新检查迁移。",
-    "migration_decay_half_life_days": "海马体原本会随时间调低 importance，我们没有这个机制；导入时按事实年龄折算一次：每过一个半衰期 importance 减半（最低1）。0=不折算。",
+    "migration_decay_half_life_days": "仅对海马体来源生效：它原本会随时间调低 importance，我们没有这个机制；导入时按事实年龄折算一次：每过一个半衰期 importance 减半（最低1）。0=不折算。",
     "compress_input_chars": "压缩和审计共用的输入软上限。默认48000；超出时拆批，至少保留2条压缩记录或1条审计事实的完整证据，极长单条可能超过此值。不会截掉原文。",
     "boot_enabled": "打开面板时播放载入动画；关闭后直接进入界面。",
     "boot_replay_seconds": "面板重新显示时，隐藏超过这个秒数才重播载入动画。0=只在打开页面时播放一次。默认90秒。",

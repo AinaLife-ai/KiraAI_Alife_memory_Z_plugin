@@ -568,7 +568,7 @@
         "type": "integer",
         "name": "导入时的记忆年龄折算（天）",
         "default": 365,
-        "description": "海马体原本会随时间调低 importance，我们没有这个机制。导入时按事实年龄折算一次：每过一个半衰期 importance 减半（最低1）。0=不折算，原样保留。",
+        "description": "**仅对海马体来源生效**：海马体原本会随时间调低 importance，我们没有这个机制。导入时按事实年龄折算一次：每过一个半衰期 importance 减半（最低1）。0=不折算，原样保留。",
         "minimum": 0,
         "maximum": 3650
       },
