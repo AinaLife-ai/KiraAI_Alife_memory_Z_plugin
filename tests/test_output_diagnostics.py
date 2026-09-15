@@ -23,7 +23,7 @@ async def test_compression_retry_reports_field_without_leaking_output(tmp_path):
         assert "私人内容不得进入诊断" not in payload["output_feedback"]
         return '{"summary":"压缩完成", "facts":[]}'
 
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=1)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=1)
     await e.Engine(store, lambda: cfg, model, None, None).compress("legacy:unscoped")
     assert len(calls) == 2
 

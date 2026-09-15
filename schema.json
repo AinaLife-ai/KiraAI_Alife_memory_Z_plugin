@@ -49,6 +49,24 @@
           "flat"
         ]
       },
+      "compress_batch_mode": {
+        "type": "string",
+        "name": "压缩分批方式",
+        "default": "rounds",
+        "description": "压缩分批方式：rounds=按整轮（默认，一轮=用户发言到助手回复，绝不切半轮，抽取更准）/ records=按条数（受上限保护，但最后一轮仍会收尾完整）。",
+        "options": [
+          "rounds",
+          "records"
+        ]
+      },
+      "compress_rounds": {
+        "type": "integer",
+        "name": "每批压缩轮数",
+        "default": 12,
+        "description": "rounds 模式下每次压缩几轮（默认 12，约等于原来的 50 条）。攒够这么多**完整轮**才动手，绝不切半轮。",
+        "minimum": 1,
+        "maximum": 200
+      },
       "expand_query": {
         "type": "switch",
         "name": "窄查询自动扩词召回",

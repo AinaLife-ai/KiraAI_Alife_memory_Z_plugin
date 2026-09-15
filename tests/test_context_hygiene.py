@@ -188,7 +188,7 @@ def test_search_hides_archived_until_explicit(tmp_path):
                 }
             ],
         )
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=0)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=0)
 
     async def model(*args):
         return json.dumps(
@@ -243,7 +243,7 @@ def test_archived_fades_to_cold_after_days(tmp_path):
                 }
             ],
         )
-    cfg = c.Settings(threshold=4, batch_size=2, model_retries=0)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, model_retries=0)
 
     async def model(*args):
         return json.dumps({"summary": "绿岛酒吧 合并摘要", "facts": []}, ensure_ascii=False)

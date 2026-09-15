@@ -20,7 +20,7 @@ class StoreTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = s.Store(Path(self.temp.name) / "memory.db")
         self.store.initialize()
-        self.cfg = c.Settings(threshold=4, batch_size=2, probability=1.0)
+        self.cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, probability=1.0)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -291,7 +291,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 "e",
                 [{"role": "user", "content": "original", "time": 1.0, "users": []}] * 4,
             )
-            settings = [c.Settings(threshold=4, batch_size=2)]
+            settings = [c.Settings(compress_batch_mode="records", threshold=4, batch_size=2)]
 
             async def model(*args):
                 settings[0] = settings[0].model_copy(
@@ -319,7 +319,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
 
             engine = e.Engine(
-                store, lambda: c.Settings(threshold=4, batch_size=2), model, None, None
+                store, lambda: c.Settings(compress_batch_mode="records", threshold=4, batch_size=2), model, None, None
             )
             await engine.enqueue("compress", "s")
             await engine.start()

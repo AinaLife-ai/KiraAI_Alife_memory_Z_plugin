@@ -1,6 +1,8 @@
 """Shared plain-language help for the host settings page and sidebar."""
 
 HELP = {
+    "compress_batch_mode": "压缩分批方式：rounds=按整轮（默认，一轮=用户发言到助手回复，绝不切半轮，抽取更准）/ records=按条数（受上限保护，但最后一轮仍会收尾完整）。",
+    "compress_rounds": "rounds 模式下每次压缩几轮（默认 12，约等于原来的 50 条）。攒够这么多**完整轮**才动手，绝不切半轮。",
     "fact_view": "事实在上下文里的呈现方式：grouped（默认）按主体分组、组内位置固定，最省 token；flat 是旧的扁平 JSON 格式，兼容用。",
     "expand_query": "窄查询自动扩词召回：查询词很少（1~3 个词元）时，自动沿库内已有线索扩词（实体别名 + 已核实关系的客体）。只补词、不改打分口径；不命中时与以前完全一致。",
     "enabled": "总开关。关闭后暂停记录、召回和后台整理，已有记忆保留。",

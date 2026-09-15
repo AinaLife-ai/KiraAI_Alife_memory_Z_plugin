@@ -86,7 +86,7 @@ def test_audit_with_job_id_records_items(tmp_path):
 
 def test_compress_with_job_id_records_archive_and_sources(tmp_path):
     st = store(tmp_path)
-    cfg = c.Settings(threshold=4, batch_size=2, probability=1.0)
+    cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, probability=1.0)
     st.capture(
         "qq:gm:1",
         "turn",
