@@ -62,8 +62,8 @@
       "compress_rounds": {
         "type": "integer",
         "name": "每批压缩轮数",
-        "default": 10,
-        "description": "rounds 模式下每次压缩几轮（默认 10）。攒够这么多**完整轮**才动手，绝不切半轮。",
+        "default": 12,
+        "description": "rounds 模式下每次压缩几轮（默认 12，约等于原来的 50 条）。攒够这么多**完整轮**才动手，绝不切半轮。",
         "minimum": 1,
         "maximum": 200
       },

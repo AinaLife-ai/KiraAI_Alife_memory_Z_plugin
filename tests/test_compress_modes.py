@@ -47,10 +47,10 @@ class RoundsModeCase(unittest.TestCase):
             threshold=50, batch_size=40, max_level=5,
         )
 
-    def test_default_is_rounds_with_ten(self):
+    def test_default_is_rounds_with_twelve(self):
         d = contracts.Settings()
         self.assertEqual(d.compress_batch_mode, "rounds", "默认必须按轮 ✓")
-        self.assertEqual(d.compress_rounds, 10, "默认 10 轮 ✓")
+        self.assertEqual(d.compress_rounds, 12, "默认 12 轮 ✓（约等于原来的 50 条）")
 
     def test_takes_exactly_n_complete_rounds(self):
         rows = conversation(12)                       # 12 轮 × 4 条
@@ -100,3 +100,18 @@ class SafetyCapCase(unittest.TestCase):
         rows = [row(i, "user") for i in range(20)]    # 20 条全用户 ✗ 一轮永不结束
         subset, _ = engine.compression_plan(rows, cfg)
         self.assertLessEqual(len(subset), 2 * 3, "整批总长必须 ≤ 3×count（安全上限）✓")
+
+class TrimToRoundCase(unittest.TestCase):
+    """重试收缩也必须**停在轮尾** ✗（此前是生硬折半 → 切半轮 ✓）"""
+
+    def test_shrink_lands_on_round_end(self):
+        rows = conversation(12)                    # 每轮 4 条 ✓
+        out = engine.trim_to_round(rows, 15)       # 目标 15 条（**不是**整轮 ✓ 必须补到轮尾）
+        self.assertGreaterEqual(len(out), 15)
+        self.assertEqual(len(out) % 4, 0, "必须停在轮尾（每轮 4 条）✗")
+        self.assertLessEqual(len(out), 15 + 8, "受安全上限约束 ✓")
+
+    def test_no_reply_falls_back_to_count(self):
+        rows = [row(i, "user") for i in range(20)]   # 分不出轮 ✗
+        out = engine.trim_to_round(rows, 5)
+        self.assertEqual(len(out), 5, "没有助手回复时退回纯按条 ✓")

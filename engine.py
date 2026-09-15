@@ -427,6 +427,20 @@ def _round_end(rows, start, cap):
     return end, False
 
 
+def trim_to_round(rows, target, extra=8):
+    """把批次收到大约 target 条 ✓ 但**停在轮尾** ✗
+
+    v2.18.11：重试收缩此前是生硬折半 ✗ 会把一轮切两半 ✓（与 compression_plan 同一口径 ✓）
+    分不出轮（没有助手回复）时退回纯按条 ✓ 安全上限 extra 防一轮异常长 ✓
+    """
+    if target <= 0 or target >= len(rows):
+        return rows
+    if not any(r.get("role") == "assistant" for r in rows):
+        return rows[:target]
+    end, _ = _round_end(rows, target - 1, max(1, target) + extra)
+    return rows[: max(target, min(end, len(rows)))]
+
+
 def compression_plan(rows, cfg):
     # The level comes from compression depth, never importance or classification.
     # Canonical ordering repairs reversed persisted regions without forging depth.
@@ -779,9 +793,9 @@ class Engine:
                         if attempt >= 1:
                             # Repeated format failures: a smaller batch gives the
                             # model less to get wrong.
-                            candidates = candidates[: max(2, len(candidates) // 2)]
+                            candidates = trim_to_round(candidates, max(2, len(candidates) // 2))
                     else:
-                        candidates = candidates[: max(2, len(candidates) // 2)]
+                        candidates = trim_to_round(candidates, max(2, len(candidates) // 2))
                     # 批次变小后别名必须重建，否则模型看到的 id 与候选对不上。
                     aliases = {
                         "r%d" % (index + 1): row["id"]
