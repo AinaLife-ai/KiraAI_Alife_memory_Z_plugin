@@ -59,8 +59,9 @@ AUDIT_INSTRUCTION = (
     "correct 给修正后 relations（无=[]，不改=null）；importance 1-10，correct 时按证据给。"
     "subject 记错（A 的话记到 B 名下）用 correct：evidence[].sp 是原文**说话人显示名**，不符就把 subject 填成正确的**实体 id**（照 facts[].subject）；没有 sp 或看不出是谁说的就别改主体。"
     "retract 清理被证据推翻或冗余的事实：软删后不再进上下文，原文与版本可恢复；reason 写清原因。"
-    # v2.18.9 回声防线：证据的来源独立性 ✓
-    "evidence[].bot=1=助手自己的发言 ✗ 不算独立证据：证据只有助手→只判 keep 且 only_self=true，不得提 importance 或覆盖用户原话。"
+    # v2.18.9 回声防线：**以用户为准** ✓
+    "evidence[].bot=1=助手自己的发言 ✗ 不算独立证据：可判 keep，也可修正明显自述/口误的条目 ✓"
+    "但不许据此提 importance，此时填 only_self=true（服务端会拒绝提升 ✓）"
 )
 
 # 降级拼接事实的重做策略（v2.13.0）
@@ -811,7 +812,7 @@ class Engine:
         selected, evidence_by_id, used = [], {}, 0
         for fact in candidates:
             additions = {}
-            for source in list(fact["sources"]) + list(fact.get("context") or []):
+            for source in fact["sources"]:
                 if source not in evidence_by_id:
                     row = await self.store.call("get", source)
                     if row:

@@ -281,129 +281,8 @@ class MediaScopeCase(unittest.TestCase):
         self.assertTrue("recall_skip_media" in src)
 
 
-class ContentRewriteBlockedCase(unittest.TestCase):
-    """来源**全是助手自己**时：不许改写正文/关系/主体，也不许软删 ✗ 只许 keep 与降权 ✓"""
-
-    def _make(self, with_user=False):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = storage.Store(Path(tmp.name) / "m.db")
-        store.initialize()
-        sid = "qq:dm:9"
-        store.capture(sid, "k", [
-            {"role": "assistant", "content": "主人住在上海", "speaker": "qq:9",
-             "users": ["qq:9"], "time": 1.0},
-        ])
-        with store.connect() as db:
-            bot = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
-        srcs = [bot]
-        if with_user:
-            store.capture(sid, "k2", [
-                {"role": "user", "content": "我住在杭州", "speaker": "qq:9",
-                 "users": ["qq:9"], "time": 2.0},
-            ])
-            with store.connect() as db:
-                user = db.execute(
-                    "SELECT id FROM records WHERE role='user'"
-                ).fetchone()[0]
-            srcs.append(user)
-        store.add_facts(sid, [
-            {"category": "fact", "subject": "qq:9", "content": "用户住在上海",
-             "reason": "", "scenario": "", "tags": [], "relations": [],
-             "source_ids": srcs, "importance": 5},
-        ])
-        return store, sid
-
-    def _candidates(self, store, sid):
-        with store.connect() as db:
-            fid = db.execute("SELECT id FROM facts").fetchone()[0]
-        return fid, store.audit_candidates(sid, limit=10, recheck_seconds=0)
-
-    def _rewrite(self, store, cands, fid, **kw):
-        out = {"actions": [dict({"action": "correct", "target_id": fid,
-                                 "source_ids": [fid], "content": "用户住在上海，已确认",
-                                 "reason": "证据"}, **kw)]}
-        store.audit(cands, out)
-    def test_content_rewrite_is_blocked_when_only_bot_spoke(self):
-        store, sid = self._make()
-        fid, cands = self._candidates(store, sid)
-        self._rewrite(store, cands, fid)
-        with store.connect() as db:
-            self.assertEqual(
-                db.execute("SELECT content FROM facts").fetchone()[0], "用户住在上海",
-                "来源只有助手自己 ✗ 正文不许被改写 ✓",
-            )
-
-    def test_user_backed_rewrite_still_works(self):
-        store, sid = self._make(with_user=True)
-        fid, cands = self._candidates(store, sid)
-        self._rewrite(store, cands, fid)
-        with store.connect() as db:
-            self.assertEqual(
-                db.execute("SELECT content FROM facts").fetchone()[0], "用户住在上海，已确认",
-                "有用户佐证时应照常可改 ✓（别把功能一起拦掉 ✗）",
-            )
-
-
-class ProvenanceCase(unittest.TestCase):
-    """按**来源**决定审计能做什么（v2.18.9 修正后）✓"""
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = storage.Store(Path(tmp.name) / "m.db")
-        store.initialize()
-        sid = "qq:dm:8"
-
-        def cap(role, text, t):
-            store.capture(sid, "k%d" % int(t * 10), [{
-                "role": role, "content": text, "users": ["qq:8"],
-                "speaker": "qq:8", "time": float(t)}])
-            with store.connect() as db:
-                return db.execute(
-                    "SELECT id FROM records WHERE role=? ORDER BY created DESC LIMIT 1",
-                    (role,)).fetchone()[0]
-
-        self.u = cap("user", "我住在杭州", 1.0)
-        self.b = cap("assistant", "主人住在上海", 2.0)
-        self.sid = sid
-        self.store = store
-        return store, sid
-
-    def _fact(self, srcs, content="用户住在杭州"):
-        self.store.add_facts(self.sid, [{
-            "category": "fact", "subject": "qq:8", "content": content,
-            "reason": "", "scenario": "", "tags": [], "relations": [],
-            "source_ids": list(srcs), "importance": 5}])
-        with self.store.connect() as db:
-            return db.execute("SELECT id FROM facts ORDER BY rowid DESC LIMIT 1").fetchone()[0]
-
-    def _run(self, actions):
-        cands = self.store.audit_candidates(self.sid, limit=20, recheck_seconds=0)
-        self.store.audit(cands, {"actions": actions})
-        with self.store.connect() as db:
-            return db.execute(
-                "SELECT content,importance,deleted FROM facts ORDER BY rowid"
-            ).fetchall()
-
-    def test_retract_allowed_for_self_only(self):
-        """自我来源的事实**允许软删** ✓（清理她自己的垃圾 ✗ 软删可恢复 ✓）"""
-        fid = self._fact([self.b], "主人住在上海")
-        rows = self._run([{"action": "retract", "target_id": fid,
-                           "source_ids": [fid], "reason": "助手自己的说法"}])
-        self.assertEqual(rows[0][2], 1, "自我来源的事实应当能被清理 ✗")
-
-    def test_no_source_fact_is_protected_too(self):
-        """**没有来源**的事实也要受保护 ✓（曾经漏掉它 ✗ 助手一句话就能改写 ✓）"""
-        fid = self._fact([], "用户养了狗")
-        rows = self._run([{"action": "correct", "target_id": fid, "source_ids": [fid],
-                           "content": "用户养了猫", "importance": 9, "reason": "助手乱改"}])
-        self.assertEqual(rows[0][0], "用户养了狗", "没来源的事实正文不许被改 ✗")
-        self.assertEqual(rows[0][1], 5, "没来源的事实不许被提权 ✗")
-
-
 class MatrixCase(unittest.TestCase):
-    """v2.18.9 矩阵实测固化：自我来源能降权 ✓；混合合并必须被拦 ✗"""
+    """v2.18.9 矩阵实测固化：自我来源能降权 ✓ 也能被改写/合并 ✓（按用户决定放开）"""
 
     def _mk(self, kind_a, kind_b):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -435,23 +314,32 @@ class MatrixCase(unittest.TestCase):
             r = db.execute("SELECT importance FROM facts WHERE id=?", (fid,)).fetchone()
         self.assertEqual(r[0], 2, "降权应该生效 ✗")
 
-    def test_mixed_merge_is_blocked(self):
-        """混合组合并必须被拦 ✗（否则助手的说法会被"洗白"成用户背书 ✓）"""
+    def test_mixed_merge_is_allowed(self):
+        """混合合并**允许** ✓（v2.18.9 按用户决定恢复旧行为 ✓）
+
+        安全性由提示词兜住：合并证据带 bot 标记 ✓ 且提示词要求"用户原话优先" ✓
+        """
         st, sid = self._mk("user", "bot")
-        with st.connect() as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM facts ORDER BY rowid")]
         cands = st.audit_candidates(sid, limit=10, recheck_seconds=0)
-        st.audit(cands, {"actions": [{
-            "action": "merge", "target_id": ids[0], "source_ids": ids,
-            "content": "用户住在杭州（合并后）", "reason": "同一条"}]})
+        ids = [c["id"] for c in cands]
         with st.connect() as db:
-            row = db.execute("SELECT content FROM facts WHERE id=?", (ids[0],)).fetchone()
-        self.assertEqual(row[0], "用户住在杭州", "混合合并不该落地 ✗")
+            first = db.execute("SELECT id FROM facts ORDER BY rowid").fetchone()[0]
+        st.audit(cands, {"actions": [{
+            "action": "merge", "target_id": first, "source_ids": ids,
+            "content": "用户住在杭州（合并后）", "reason": "同主体同分类"}]})
+        with st.connect() as db:
+            got = db.execute("SELECT content FROM facts WHERE id=?", (first,)).fetchone()[0]
+        self.assertEqual(got, "用户住在杭州（合并后）", "混合合并应该允许 ✓")
 
 class ReportCountsCase(unittest.TestCase):
     """审计报告必须**如实记账** ✗（否则会误以为"模型很乖" ✓）"""
 
-    def test_blocked_and_clamped_are_counted(self):
+    def test_clamped_promotion_is_counted(self):
+        """提权被压回要**记账** ✗（否则会误以为模型很乖 ✓）
+
+        v2.18.9 最终版：服务端**只留**这一条硬规则 ✓
+        改写正文/合并/软删都已交还给模型 ✓ 所以只剩 clamped 一个计数 ✓
+        """
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         store = storage.Store(Path(tmp.name) / "m.db"); store.initialize()
         sid = "qq:dm:3"
@@ -464,60 +352,54 @@ class ReportCountsCase(unittest.TestCase):
                                "tags": [], "relations": [], "source_ids": [bot]}])
         cands = store.audit_candidates(sid, limit=5, recheck_seconds=0)
         fid = cands[0]["id"]
-        # ① 改写正文 → 拦下 ✓（两个动作不能同时给同一条 ✗ 校验会拒 ✓ 所以分两轮）
-        c1 = store.audit(cands, {"actions": [
-            {"action": "correct", "target_id": fid, "source_ids": [fid],
-             "content": "用户住在北京", "reason": "助手认为"}]})
-        self.assertEqual(c1.get("only_self_blocked"), 1, "改写被拦要记账 ✗")
-        # ② 纯提权 → 压回原值 ✓ 也要记账 ✓
-        c2 = store.audit(store.audit_candidates(sid, limit=5, recheck_seconds=0),
-                         {"actions": [
+        # 模型想提权（而且**没有**自报 only_self ✗）→ 服务端自己判定并压回 ✓ 且记账 ✓
+        c = store.audit(cands, {"actions": [
             {"action": "correct", "target_id": fid, "source_ids": [fid],
              "content": "用户住在上海", "importance": 9, "reason": "助手认为"}]})
-        self.assertEqual(c2.get("only_self_clamped"), 1, "提权被压回要记账 ✗")
+        self.assertEqual(c.get("only_self_clamped"), 1, "提权被压回要记账 ✗")
         with store.connect() as db:
             self.assertEqual(db.execute("SELECT importance FROM facts").fetchone()[0], 5)
 
 
-class EvidenceContextCase(unittest.TestCase):
-    """审计**看得到用户那一侧**时，就该放手让它改 ✗
 
-    用户提出的核心：把"只有助手"的事实冻结住是本末倒置 ✓
-    真正的解法是让审计**不能只看助手** —— 带上这条事实周围的原始对话 ✓
+
+class SelfOnlyIsEditableCase(unittest.TestCase):
+    """v2.18.9 最终版：自我来源的事实**可以改** ✓
+
+    用户判断："不让改没有意义" ✓
+    服务端只剩"不许提权"一条 ✗ 其余交给提示词（以用户为准 ✓）+ 模型 ✓
     """
 
-    def _build(self, with_user):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = storage.Store(Path(tmp.name) / "m.db")
-        store.initialize()
-        sid = "qq:dm:8"
-        base = {"users": ["qq:8"], "speaker": "qq:8", "time": 1.0}
-        if with_user:
-            # 用户**就在旁边说了话** ✓ → 审计能核对 ✓
-            store.capture(sid, "ku", [dict(base, role="user", content="我住在杭州")])
-        store.capture(sid, "kb", [dict(base, role="assistant", content="主人住在上海")])
+    def _fact(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        store = storage.Store(Path(tmp.name) / "m.db"); store.initialize()
+        sid = "qq:dm:4"
+        store.capture(sid, "k", [{"role": "assistant", "content": "主人住在上海",
+                                  "users": ["qq:4"], "speaker": "qq:4", "time": 1.0}])
         with store.connect() as db:
             bot = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
-        store.add_facts(sid, [{
-            "category": "fact", "subject": "qq:8", "content": "用户住在上海",
-            "reason": "", "scenario": "", "tags": [], "relations": [],
-            "source_ids": [bot],
-        }])
+        store.add_facts(sid, [{"category": "fact", "subject": "qq:4",
+                               "content": "用户住在上海", "reason": "", "scenario": "",
+                               "tags": [], "relations": [], "source_ids": [bot]}])
         return store, sid
-    def _rewrite(self, store, sid):
+
+    def test_content_rewrite_allowed(self):
+        store, sid = self._fact()
         cands = store.audit_candidates(sid, limit=5, recheck_seconds=0)
         fid = cands[0]["id"]
         store.audit(cands, {"actions": [
             {"action": "correct", "target_id": fid, "source_ids": [fid],
-             "content": "用户住在杭州", "reason": "与用户原话一致"}]})
+             "content": "用户住在杭州", "reason": "用户原话是杭州"}]})
         with store.connect() as db:
-            return db.execute("SELECT content FROM facts").fetchone()[0]
-    def test_user_context_unlocks_rewrite(self):
-        """用户就在旁边说过话 ✓ → 审计能核对 → **允许改写** ✓（本末倒置的冻结解除 ✓）"""
-        store, sid = self._build(with_user=True)
-        self.assertEqual(self._rewrite(store, sid), "用户住在杭州")   # 改动生效 ✓
-    def test_no_user_context_still_freezes(self):
-        """周围**没有任何用户发言** ✗ → 审计只能看见助手自己的话 → 才收窄 ✓"""
-        store, sid = self._build(with_user=False)
-        self.assertEqual(self._rewrite(store, sid), "用户住在上海")   # 改不动 ✓
+            self.assertEqual(db.execute("SELECT content FROM facts").fetchone()[0],
+                             "用户住在杭州")
+
+    def test_retract_allowed(self):
+        store, sid = self._fact()
+        cands = store.audit_candidates(sid, limit=5, recheck_seconds=0)
+        fid = cands[0]["id"]
+        store.audit(cands, {"actions": [
+            {"action": "retract", "target_id": fid, "source_ids": [fid],
+             "reason": "助手自述，用户从未确认"}]})
+        with store.connect() as db:
+            self.assertEqual(db.execute("SELECT deleted FROM facts").fetchone()[0], 1)

@@ -2752,51 +2752,23 @@ class Store:
                 )
             ]
 
-    def audit_candidates(self, sid, limit=20, recheck_seconds=0, window=6):
-        """Facts eligible for audit: never audited, or stale beyond the cooldown.
-
-        v2.18.9 回声防线：每条候选额外带上 **context（周围原始对话）** ✗
-        —— 只拿这条事实自己的来源当证据时 ✗ 若它出自助手之口，
-        审计就**只能看见她自己的话** ✓ 于是"自己证实自己" ✓
-        带上周围的对话后 ✓ 审计能看到**用户当时到底说了什么** ✓ 才能真正核对 ✓
-        """
+    def audit_candidates(self, sid, limit=20, recheck_seconds=0):
+        """Facts eligible for audit: never audited, or stale beyond the cooldown."""
         where = ["deleted=0", "merge_pending=0", "sid=?"]
         args = [sid]
         if recheck_seconds > 0:
             where.append("(audited=0 OR audited < ?)")
             args.append(time.time() - recheck_seconds)
         with self.connect() as db:
-            out = []
-            for r in db.execute(
-                "SELECT * FROM facts WHERE "
-                + " AND ".join(where)
-                + " ORDER BY audited,id LIMIT ?",
-                [*args, limit],
-            ):
-                fact = self.row(r)
-                fact["context"] = self._context_around(db, sid, fact, window)
-                out.append(fact)
-            return out
-
-    def _context_around(self, db, sid, fact, window):
-        """这条事实的**来源**在会话里前后的原始记录 id（不含它自己）✓"""
-        sources = [s for s in (fact.get("sources") or []) if s]
-        if not sources or window <= 0:
-            return []
-        marks = ",".join("?" * len(sources))
-        bounds = db.execute(
-            "SELECT MIN(position),MAX(position) FROM records WHERE id IN (%s)" % marks,
-            tuple(sources),
-        ).fetchone()
-        if not bounds or bounds[0] is None:
-            return []
-        rows = db.execute(
-            "SELECT id FROM records WHERE sid=? AND deleted=0 AND position>=? "
-            "AND position<=? ORDER BY position LIMIT ?",
-            (sid, max(0, bounds[0] - window), bounds[1] + window, window * 2 + 4),
-        ).fetchall()
-        keep = set(sources)
-        return [r[0] for r in rows if r[0] not in keep]
+            return [
+                self.row(r)
+                for r in db.execute(
+                    "SELECT * FROM facts WHERE "
+                    + " AND ".join(where)
+                    + " ORDER BY audited,id LIMIT ?",
+                    [*args, limit],
+                )
+            ]
 
     def covering_fact(self, sid, content, threshold=0.4):
         """该内容是否已被某条事实覆盖（零模型）。
@@ -3554,7 +3526,6 @@ class Store:
         by_id = {r["id"]: r for r in candidates}
         validate_audit(candidates, output)
         counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
-        blocked = 0   # v2.18.9：因"来源全是助手自己"而被拦下的改写次数 ✓
         clamped = 0   # v2.18.9：自我来源想提权、被压回原值的次数 ✓
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -3565,16 +3536,11 @@ class Store:
                 sid for old in candidates for sid in (old.get("sources") or [])
             }
             # v2.18.9：周围上下文也算证据 ✓ 用来判断"审计是不是看得到用户那一侧" ✓
-            context_ids = {
-                sid for old in candidates for sid in (old.get("context") or [])
-            }
             bot_only = set()
-            user_ids = set()
-            probe = source_ids | context_ids
-            if probe:
+            if source_ids:
                 # ⚠️ 分批查：老 SQLite 的变量上限是 999 ✗ 一批里来源可能上千 ✓
                 # 超限会直接 OperationalError → 审计任务整体失败 ✗（防御性分批 ✓）
-                ordered = list(probe)
+                ordered = list(source_ids)
                 for start in range(0, len(ordered), 500):
                     chunk = ordered[start : start + 500]
                     rows = db.execute(
@@ -3582,20 +3548,9 @@ class Store:
                         % ",".join("?" * len(chunk)),
                         tuple(chunk),
                     ).fetchall()
-                    for r in rows:
-                        if str(r[1] or "") == "assistant":
-                            bot_only.add(r[0])
-                        elif str(r[1] or "") == "user":
-                            user_ids.add(r[0])
-            # 哪些事实**看得到用户当时说过的话** ✓ → 审计能真正核对 ✓ → 可以放手让它改 ✗
-            trusted_by_evidence = {
-                old["id"]
-                for old in candidates
-                if any(
-                    i in user_ids
-                    for i in (old.get("sources") or []) + (old.get("context") or [])
-                )
-            }
+                    bot_only |= {
+                        r[0] for r in rows if str(r[1] or "") == "assistant"
+                    }
             for old in candidates:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
@@ -3605,66 +3560,17 @@ class Store:
             for a in output["actions"]:
                 old = by_id[a["target_id"]]
                 group = {a["target_id"], *a["source_ids"]}
-                # v2.18.9 回声防线：这条事实**站不站得住** ✗
-                # ① 有用户来源 → 站得住 ✓ ② 只有助手/没来源 → 站不住（自我来源）✓
-                # ⚠️ 没有来源的也要算自我来源 ✗（曾经漏掉它 → 助手一句话就能把它删了 ✓）
-                _sources = old.get("sources") or []
-                self_only = not _sources or all(s in bot_only for s in _sources)
-                if a["action"] == "merge":
-                    # v2.18.9：**混合组一律不许合并** ✗
-                    # 把助手的话并进用户的事实 = 把"她自己的说法"洗白成"用户背书" ✓
-                    # （助手那条本来就以独立事实存在 ✓ 带 self 标记 ✓ 不会被当已证实 ✓
-                    #   合进去**没有半点好处** ✓ 只会毁掉来源标记 ✓）
-                    kinds = [
-                        (not (by_id[f].get("sources") or []))
-                        or all(s in bot_only for s in by_id[f].get("sources") or [])
-                        for f in group
-                        if f in by_id
-                    ]
-                    if any(kinds) and not all(kinds):
-                        counts["keep"] += 1
-                        blocked += 1
-                        continue
-                if self_only and old["id"] not in trusted_by_evidence:
-                    # 只有在**审计确实看不到用户那一侧**时才收窄 ✗
-                    # 看得到用户说过什么（sources 或 context 里有用户记录 ✓）→ 放手让它改 ✓
-                    # —— 那才是治本 ✓ 冻结一条错的事实才是本末倒置 ✗
-                    if a["action"] == "retract":
-                        # 自我来源的事实 = 助手自己的话 ✓ **允许清理** ✓
-                        # （软删可恢复 ✓ 也不会丢掉任何"用户说过的东西" ✓）
-                        pass
-                    elif a["action"] == "merge":
-                        # 只允许**同类合并**（都是自我来源）✗ 不许把助手的话并进用户的事实 ✓
-                        if not all(
-                            (not (by_id[f].get("sources") or []))
-                            or all(s in bot_only for s in by_id[f].get("sources") or [])
-                            for f in group
-                            if f in by_id
-                        ):
-                            counts["keep"] += 1
-                            blocked += 1
-                            continue
-                        a = dict(a)
-                        a["only_self"] = True
-                    else:
-                        # ⚠️ 判断"是不是在改写"要**比内容** ✗ 不能只看字段在不在 ✓
-                        # `correct` 按契约**必须带 content** ✓ 只看字段会把"纯降权"也误杀 ✗
-                        new_text = str(a.get("content") or "").strip()
-                        old_text = str(old.get("content") or "").strip()
-                        new_rels = a.get("relations")
-                        rewrite = bool(
-                            (new_text and new_text != old_text)
-                            or (new_rels is not None and new_rels != (old.get("relations") or []))
-                            or (a.get("subject") and a.get("subject") != old.get("subject"))
-                        )
-                        if rewrite:
-                            # 不许用她自己的话改写正文/关系/主体 ✓
-                            counts["keep"] += 1
-                            blocked += 1
-                            continue
-                        # 只是提权 → 打 only_self，交给下面的钳制 ✓（模型没自报也拦住 ✓）
-                        a = dict(a)
-                        a["only_self"] = True
+                # v2.18.9 回声防线 —— **服务端只留这一条** ✗
+                # 一条事实的来源**全是助手自己**（或压根没有来源 ✓）时：
+                # 不许靠"她自己说过"来**提升重要度** ✗（那是自我强化的燃料 ✓）
+                # 其余一切（改正文 ✓ 合并 ✓ 软删 ✓）**完全交还给模型判断** ✓
+                # —— "不让改"没有意义 ✓ 提示词已经讲清"以用户为准" ✓
+                #    （而且原文与版本都留着 ✓ 被改错了也能恢复 ✓）
+                sources = old.get("sources") or []
+                self_only = not sources or all(s in bot_only for s in sources)
+                if self_only:
+                    a = dict(a)
+                    a["only_self"] = True
                 counts[a["action"]] += 1
                 if a["action"] == "merge":
                     counts["merged_facts"] += len(group) - 1
@@ -3789,10 +3695,6 @@ class Store:
         if clamped:
             # 提权被压回也要记账 ✓ 否则报告会少报"她想给自己加权重"的次数 ✗
             counts["only_self_clamped"] = clamped
-        if blocked:
-            # 让"被兜底拦下多少次"在审计报告里可见 ✓（不然会以为模型很乖 ✓）
-            counts["only_self_blocked"] = blocked
-            logger.info("[回声防线] 拦下 %d 次仅凭助手自身发言的改写 ✓", blocked)
         return counts
 
     def set_vector(self, record_id, model, revision, vector):
