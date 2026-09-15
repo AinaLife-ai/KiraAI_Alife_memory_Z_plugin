@@ -82,3 +82,46 @@ def test_search_active_only_flips_only_when_untouched():
         "alife_meta": {"config_version": m.CURRENT_VERSION},
     }
     assert m.migrate(settled) == ([], settled)
+
+
+def test_prompt_wording_is_upgraded_but_custom_kept():
+    """v2.18.9：存量用户**默认文案**要能升上来 ✗ 用户自己改过的绝对不碰 ✓
+
+    `config_migrate` 的设计就是"只改写仍等于旧默认的值" ✓
+    但光有机制不够 ✗ 我这次改了 `fact_merge_prompt` 却**忘了加迁移条目** ✓
+    → 存着旧文案的存量用户永远拿不到"来源强度优先于时间"这条规则 ✗
+    """
+    import importlib, sys, types
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pkg = types.ModuleType("alife_cfgt_test")
+    pkg.__path__ = [str(root)]
+    sys.modules.setdefault("alife_cfgt_test", pkg)
+    mod = importlib.import_module("alife_cfgt_test.config_migrate")
+    contracts = importlib.import_module("alife_cfgt_test.contracts")
+
+    # ① 存着旧默认文案 → 升级到当前默认 ✓
+    changed, out = mod.migrate(
+        {
+            "alife": {"fact_merge_prompt": mod._OLD_FACT_MERGE_PROMPT},
+            "alife_meta": {"config_version": mod.CURRENT_VERSION - 1},
+        }
+    )
+    assert "fact_merge_prompt" in changed
+    assert out["alife"]["fact_merge_prompt"] == contracts.FACT_MERGE_PROMPT
+
+    # ② 用户自己改过的措辞 → 一个字都不动 ✓
+    mine = "我自己写的合并提示词"
+    changed2, out2 = mod.migrate(
+        {
+            "alife": {"fact_merge_prompt": mine},
+            "alife_meta": {"config_version": mod.CURRENT_VERSION - 1},
+        }
+    )
+    assert changed2 == []
+    assert out2["alife"]["fact_merge_prompt"] == mine
+
+    # ③ 已经是最新版 → 幂等 ✓
+    changed3, _ = mod.migrate({"alife": {}, "alife_meta": {"config_version": mod.CURRENT_VERSION}})
+    assert changed3 == []
