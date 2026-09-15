@@ -138,8 +138,7 @@ small,
 }
 aside {
   overflow: hidden;   /* v2.18.1：让内部区域自己滚，别把导航裁掉 */
-  padding: 30px 18px 10px;   /* v2.18.5：底部 30→10px，把状态块整体往下推、留白收掉（用户要求） */
-  padding: 30px 18px;
+  padding: 30px 18px 3px;   /* v2.18.6：底部留白一步到位 30→3px（此前两条 padding 并存，后写的覆盖了它 ✗） */
   border-right: 1px solid var(--line);
   background: var(--panel);
   display: flex;
