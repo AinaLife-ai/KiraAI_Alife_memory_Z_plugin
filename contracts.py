@@ -232,26 +232,7 @@ class RecordMerge(Strict):
         return self
 
 
-FACT_MERGE_PROMPT = (
-    "输入是若干组相似事实（groups[]）：同组同主体，类别可能相同也可能不同；"
-    "组内 facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n"
-    "为每一组输出一条结果，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n"
-    "- merge：确认是同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、"
-    "条件、状态补进去；冲突以时间较晚者为准；不同对象要分别写明，不得丢弃独有信息。"
-    "content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n"
-    # v2.18.9 回声防线：来源强度优先于时间 ✗
-    "**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是"
-    "**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；"
-    "没有证据就按原事实里的说法保留，不要凭“更晚”擅自改结论。\n"
-    "- relabel：确实是同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n"
-    "- drop：其中若干条是纯冗余或错误记录 → 保留 target_id，其余进 source_ids 被删除（可恢复）。\n"
-    "跨类别时（组内 category 不一致）必须给 category，写明统一后的类别；"
-    "合并前会先把整组统一到该类别。\n"
-    "硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n"
-    '只输出 JSON：{"groups":[{"target_id":"…","source_ids":["…"],"action":"merge|relabel|drop",'
-    '"category":"…","content":"…","reason":"…"}]}\n'
-    "target_id 取要保留的那条 id；source_ids 至少一条，逐字复制。"
-)
+FACT_MERGE_PROMPT = '输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{"groups":[{"target_id":"…","source_ids":["…"],"action":"merge|relabel|drop","category":"…","content":"…","reason":"…"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。'
 
 RECORD_MERGE_PROMPT = (
     "records 按时间从新到旧排列，records[0] 是最新的那条。\n"
