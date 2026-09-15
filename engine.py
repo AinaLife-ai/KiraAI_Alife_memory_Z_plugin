@@ -873,6 +873,11 @@ class Engine:
                     {
                         "content": model_text(row.get("content", ""), keep),
                         "t": full_time(row.get("start")),
+                        # v2.18.9：**证据必须带上说话人与 bot 标记** ✗
+                        # 之前这里重建了字典 ✗ 把 additions 里的 sp/bot 全丢了 ✓
+                        # （提示词写着"evidence[].bot=1"，载荷却没有 → 模型无法遵守 ✓）
+                        **({"sp": row["sp"]} if row.get("sp") else {}),
+                        **({"bot": 1} if row.get("bot") else {}),
                     }
                     for row in evidence
                 ],

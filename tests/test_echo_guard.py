@@ -192,3 +192,69 @@ class PromptCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ModelMisbehavesCase(unittest.TestCase):
+    """**模型不配合**也必须拦住 ✓（端到端实验发现的真问题 ✓）
+
+    实验：一条事实的来源**只有助手那句话** ✓ 模型按旧习惯提权到 9 ✗
+    而且**没有**填 only_self ✗ —— 如果只在"模型自觉"时才钳制，这条就会漏 ✓
+    → 所以应用侧必须**自己查来源角色** ✓ 不能信模型 ✓
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = storage.Store(Path(self.tmp.name) / "m.db")
+        self.store.initialize()
+        self.sid = "qq:dm:7"
+        self.store.capture(self.sid, "k1", [
+            {"role": "user", "content": "我今天搬完家了", "users": ["qq:7"],
+             "speaker": "周武", "time": 1789459000.0},
+            {"role": "assistant", "content": "记住了，主人住在上海", "users": ["qq:7"],
+             "time": 1789459010.0},
+        ])
+        with self.store.connect() as db:
+            self.bot_record = db.execute(
+                "SELECT id FROM records WHERE role='assistant'"
+            ).fetchone()[0]
+        self.store.add_facts(self.sid, [{
+            "category": "fact", "subject": "qq:7", "content": "用户住在上海",
+            "reason": "助手提到", "scenario": "", "tags": [], "relations": [],
+            "source_ids": [self.bot_record], "importance": 5,
+        }])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _candidates(self):
+        return self.store.audit_candidates(self.sid, limit=10, recheck_seconds=0)
+
+    def _importance(self):
+        with self.store.connect() as db:
+            return db.execute("SELECT importance FROM facts").fetchone()[0]
+
+    def test_model_raising_without_flag_is_still_blocked(self):
+        cands = self._candidates()
+        self.assertTrue(cands, "夹具没造出候选")
+        cands[0]["sources"] = [self.bot_record]      # 唯一来源＝助手自己 ✗
+        self.store.audit(cands, {"actions": [{
+            "action": "correct", "target_id": cands[0]["id"],
+            "source_ids": [cands[0]["id"]],
+            "content": "用户住在上海，已确认", "reason": "证据显示",
+            "importance": 9,                          # ← 模型乱提 ✗ 且没填 only_self ✗
+        }]})
+        self.assertEqual(self._importance(), 5, "模型不配合时被提权了 ✗")
+
+    def test_user_backed_still_can_raise(self):
+        """有**用户**佐证时照旧可提 ✓（别把功能也拦掉了 ✓）"""
+        with self.store.connect() as db:
+            user_rec = db.execute(
+                "SELECT id FROM records WHERE role='user' LIMIT 1"
+            ).fetchone()[0]
+        cands = self._candidates()
+        cands[0]["sources"] = [user_rec]              # 来源是用户 ✓
+        self.store.audit(cands, {"actions": [{
+            "action": "correct", "target_id": cands[0]["id"],
+            "source_ids": [cands[0]["id"]],
+            "content": "用户住在上海", "reason": "用户说过", "importance": 9,
+        }]})
+        self.assertEqual(self._importance(), 9, "用户佐证时应该允许提权 ✓")

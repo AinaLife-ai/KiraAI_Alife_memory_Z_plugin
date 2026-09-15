@@ -3530,6 +3530,20 @@ class Store:
         counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # v2.18.9 回声防线（**服务端自己判定** ✗ 不依赖模型自觉 ✓）：
+            # 若一条事实的**全部来源都是助手自己的发言** → 一律不许提 importance ✓
+            # （模型可能没看懂 bot 标记、或干脆不填 only_self ✓ 那就拦不住了 ✓）
+            source_ids = {
+                sid for old in candidates for sid in (old.get("sources") or [])
+            }
+            bot_only = set()
+            if source_ids:
+                rows = db.execute(
+                    "SELECT id,role FROM records WHERE id IN (%s)"
+                    % ",".join("?" * len(source_ids)),
+                    tuple(source_ids),
+                ).fetchall()
+                bot_only = {r[0] for r in rows if str(r[1] or "") == "assistant"}
             for old in candidates:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
@@ -3548,8 +3562,13 @@ class Store:
                 )
                 if a.get("importance") is not None:
                     new_imp = a["importance"]
-                    if a.get("only_self"):
-                        # v2.18.9 回声防线：证据只有助手自己 → **只许降不许升** ✗
+                    # 模型自报 or **服务端判定**（后者才是真正的防线 ✓）
+                    sources = old.get("sources") or []
+                    server_self_only = bool(sources) and all(
+                        s in bot_only for s in sources
+                    )
+                    if a.get("only_self") or server_self_only:
+                        # v2.18.9 回声防线：来源全是助手自己 → **只许降不许升** ✗
                         # 提升 = "我自己说过 → 越来越可信" ✓ 正是自我强化的燃料 ✓
                         # 下调是安全的（越来越不重要），仍予保留 ✓
                         old_imp = old.get("importance")
