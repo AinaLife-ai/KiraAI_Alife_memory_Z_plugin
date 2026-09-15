@@ -477,3 +477,47 @@ class ReportCountsCase(unittest.TestCase):
         self.assertEqual(c2.get("only_self_clamped"), 1, "提权被压回要记账 ✗")
         with store.connect() as db:
             self.assertEqual(db.execute("SELECT importance FROM facts").fetchone()[0], 5)
+
+
+class EvidenceContextCase(unittest.TestCase):
+    """审计**看得到用户那一侧**时，就该放手让它改 ✗
+
+    用户提出的核心：把"只有助手"的事实冻结住是本末倒置 ✓
+    真正的解法是让审计**不能只看助手** —— 带上这条事实周围的原始对话 ✓
+    """
+
+    def _build(self, with_user):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = storage.Store(Path(tmp.name) / "m.db")
+        store.initialize()
+        sid = "qq:dm:8"
+        base = {"users": ["qq:8"], "speaker": "qq:8", "time": 1.0}
+        if with_user:
+            # 用户**就在旁边说了话** ✓ → 审计能核对 ✓
+            store.capture(sid, "ku", [dict(base, role="user", content="我住在杭州")])
+        store.capture(sid, "kb", [dict(base, role="assistant", content="主人住在上海")])
+        with store.connect() as db:
+            bot = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
+        store.add_facts(sid, [{
+            "category": "fact", "subject": "qq:8", "content": "用户住在上海",
+            "reason": "", "scenario": "", "tags": [], "relations": [],
+            "source_ids": [bot],
+        }])
+        return store, sid
+    def _rewrite(self, store, sid):
+        cands = store.audit_candidates(sid, limit=5, recheck_seconds=0)
+        fid = cands[0]["id"]
+        store.audit(cands, {"actions": [
+            {"action": "correct", "target_id": fid, "source_ids": [fid],
+             "content": "用户住在杭州", "reason": "与用户原话一致"}]})
+        with store.connect() as db:
+            return db.execute("SELECT content FROM facts").fetchone()[0]
+    def test_user_context_unlocks_rewrite(self):
+        """用户就在旁边说过话 ✓ → 审计能核对 → **允许改写** ✓（本末倒置的冻结解除 ✓）"""
+        store, sid = self._build(with_user=True)
+        self.assertEqual(self._rewrite(store, sid), "用户住在杭州")   # 改动生效 ✓
+    def test_no_user_context_still_freezes(self):
+        """周围**没有任何用户发言** ✗ → 审计只能看见助手自己的话 → 才收窄 ✓"""
+        store, sid = self._build(with_user=False)
+        self.assertEqual(self._rewrite(store, sid), "用户住在上海")   # 改不动 ✓

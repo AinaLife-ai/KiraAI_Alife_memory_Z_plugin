@@ -2752,23 +2752,51 @@ class Store:
                 )
             ]
 
-    def audit_candidates(self, sid, limit=20, recheck_seconds=0):
-        """Facts eligible for audit: never audited, or stale beyond the cooldown."""
+    def audit_candidates(self, sid, limit=20, recheck_seconds=0, window=6):
+        """Facts eligible for audit: never audited, or stale beyond the cooldown.
+
+        v2.18.9 回声防线：每条候选额外带上 **context（周围原始对话）** ✗
+        —— 只拿这条事实自己的来源当证据时 ✗ 若它出自助手之口，
+        审计就**只能看见她自己的话** ✓ 于是"自己证实自己" ✓
+        带上周围的对话后 ✓ 审计能看到**用户当时到底说了什么** ✓ 才能真正核对 ✓
+        """
         where = ["deleted=0", "merge_pending=0", "sid=?"]
         args = [sid]
         if recheck_seconds > 0:
             where.append("(audited=0 OR audited < ?)")
             args.append(time.time() - recheck_seconds)
         with self.connect() as db:
-            return [
-                self.row(r)
-                for r in db.execute(
-                    "SELECT * FROM facts WHERE "
-                    + " AND ".join(where)
-                    + " ORDER BY audited,id LIMIT ?",
-                    [*args, limit],
-                )
-            ]
+            out = []
+            for r in db.execute(
+                "SELECT * FROM facts WHERE "
+                + " AND ".join(where)
+                + " ORDER BY audited,id LIMIT ?",
+                [*args, limit],
+            ):
+                fact = self.row(r)
+                fact["context"] = self._context_around(db, sid, fact, window)
+                out.append(fact)
+            return out
+
+    def _context_around(self, db, sid, fact, window):
+        """这条事实的**来源**在会话里前后的原始记录 id（不含它自己）✓"""
+        sources = [s for s in (fact.get("sources") or []) if s]
+        if not sources or window <= 0:
+            return []
+        marks = ",".join("?" * len(sources))
+        bounds = db.execute(
+            "SELECT MIN(position),MAX(position) FROM records WHERE id IN (%s)" % marks,
+            tuple(sources),
+        ).fetchone()
+        if not bounds or bounds[0] is None:
+            return []
+        rows = db.execute(
+            "SELECT id FROM records WHERE sid=? AND deleted=0 AND position>=? "
+            "AND position<=? ORDER BY position LIMIT ?",
+            (sid, max(0, bounds[0] - window), bounds[1] + window, window * 2 + 4),
+        ).fetchall()
+        keep = set(sources)
+        return [r[0] for r in rows if r[0] not in keep]
 
     def covering_fact(self, sid, content, threshold=0.4):
         """该内容是否已被某条事实覆盖（零模型）。
@@ -3536,11 +3564,17 @@ class Store:
             source_ids = {
                 sid for old in candidates for sid in (old.get("sources") or [])
             }
+            # v2.18.9：周围上下文也算证据 ✓ 用来判断"审计是不是看得到用户那一侧" ✓
+            context_ids = {
+                sid for old in candidates for sid in (old.get("context") or [])
+            }
             bot_only = set()
-            if source_ids:
+            user_ids = set()
+            probe = source_ids | context_ids
+            if probe:
                 # ⚠️ 分批查：老 SQLite 的变量上限是 999 ✗ 一批里来源可能上千 ✓
                 # 超限会直接 OperationalError → 审计任务整体失败 ✗（防御性分批 ✓）
-                ordered = list(source_ids)
+                ordered = list(probe)
                 for start in range(0, len(ordered), 500):
                     chunk = ordered[start : start + 500]
                     rows = db.execute(
@@ -3548,9 +3582,20 @@ class Store:
                         % ",".join("?" * len(chunk)),
                         tuple(chunk),
                     ).fetchall()
-                    bot_only |= {
-                        r[0] for r in rows if str(r[1] or "") == "assistant"
-                    }
+                    for r in rows:
+                        if str(r[1] or "") == "assistant":
+                            bot_only.add(r[0])
+                        elif str(r[1] or "") == "user":
+                            user_ids.add(r[0])
+            # 哪些事实**看得到用户当时说过的话** ✓ → 审计能真正核对 ✓ → 可以放手让它改 ✗
+            trusted_by_evidence = {
+                old["id"]
+                for old in candidates
+                if any(
+                    i in user_ids
+                    for i in (old.get("sources") or []) + (old.get("context") or [])
+                )
+            }
             for old in candidates:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
@@ -3580,7 +3625,10 @@ class Store:
                         counts["keep"] += 1
                         blocked += 1
                         continue
-                if self_only:
+                if self_only and old["id"] not in trusted_by_evidence:
+                    # 只有在**审计确实看不到用户那一侧**时才收窄 ✗
+                    # 看得到用户说过什么（sources 或 context 里有用户记录 ✓）→ 放手让它改 ✓
+                    # —— 那才是治本 ✓ 冻结一条错的事实才是本末倒置 ✗
                     if a["action"] == "retract":
                         # 自我来源的事实 = 助手自己的话 ✓ **允许清理** ✓
                         # （软删可恢复 ✓ 也不会丢掉任何"用户说过的东西" ✓）

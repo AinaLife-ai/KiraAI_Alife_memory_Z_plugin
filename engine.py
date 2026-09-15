@@ -811,7 +811,7 @@ class Engine:
         selected, evidence_by_id, used = [], {}, 0
         for fact in candidates:
             additions = {}
-            for source in fact["sources"]:
+            for source in list(fact["sources"]) + list(fact.get("context") or []):
                 if source not in evidence_by_id:
                     row = await self.store.call("get", source)
                     if row:

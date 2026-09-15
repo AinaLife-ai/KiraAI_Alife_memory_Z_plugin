@@ -205,10 +205,9 @@ async def test_audit_bounds_complete_evidence_and_keeps_review_reason(tmp_path):
 
     async def model(_, purpose, instruction, schema, payload):
         assert len(payload["facts"]) == 1
-        # v2.18.9 回声防线：审计证据必须**带上来源标记** ✗
-        # 助手自己的那条要标 bot ✓ 用户的那条要标 sp ✓
-        # （曾经这里重建字典把两个都丢了 ✗ 提示词写着 bot 而载荷没有 → 模型无法遵守 ✓）
-        assert len(payload["evidence"]) == 2
+        # v2.18.9 回声防线：审计证据必须**带上来源标记** ✗ 并且**包含周围对话** ✓
+        # （只给助手自己的话时，审计只能"自己证实自己" ✓ 那正是回声的根 ✓）
+        assert len(payload["evidence"]) > 2, "证据必须含**周围对话** ✗（否则审计看不到用户那一侧 ✓）"
         assert any(e.get("bot") == 1 for e in payload["evidence"]), "助手来源证据必须标 bot ✗"
         assert any(e.get("sp") for e in payload["evidence"]), "用户来源证据必须标 sp ✗"
         assert payload["evidence"][0]["content"] == "完整证据" * 800
