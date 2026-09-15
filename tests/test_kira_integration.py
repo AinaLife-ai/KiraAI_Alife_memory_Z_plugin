@@ -1787,3 +1787,42 @@ def test_memory_rules_per_view_are_complete_and_bounded():
         assert token in flat, "扁平规则块缺：" + token
     for name, block in (("grouped", grouped), ("flat", flat)):
         assert len(block) < 900, name + " 规则块每轮全价发送，涨回去就是白花钱 ✗"
+
+
+def test_every_source_is_mutually_exclusive():
+    """互斥必须覆盖**全部**来源（含海马体）✓
+
+    要求：`conflicts()` 必须是 SOURCES 驱动的 ✗ 不许写死两个 ✓
+    行为：装了且启用 → 我们停用；装了但停用 → 不拦；关掉互斥开关 → 不拦。
+    """
+    import types as _types
+
+    class Mgr:
+        def __init__(self, installed, enabled):
+            self._i, self._e = set(installed), set(enabled)
+
+        def has_plugin(self, pid):
+            return pid in self._i
+
+        def is_plugin_enabled(self, pid):
+            return pid in self._e
+
+    class Fake:
+        def __init__(self, installed, enabled, mutual=True):
+            self.ctx = _types.SimpleNamespace(plugin_mgr=Mgr(installed, enabled))
+            self.settings = module.Settings(mutual_exclusion=mutual)
+            self.migration_blocked = False
+
+    Fake.conflicts = module.AlifeMemoryPlugin.conflicts
+    Fake.runtime_settings = module.AlifeMemoryPlugin.runtime_settings
+
+    assert "kira_plugin_hippocampus_memory" in module.SOURCES, "海马体必须在来源表里 ✓"
+    for pid in module.SOURCES:
+        on = Fake([pid], [pid])
+        assert module.AlifeMemoryPlugin.conflicts(on) == [pid], pid
+        assert module.AlifeMemoryPlugin.runtime_settings(on).enabled is False, pid
+        off = Fake([pid], [])
+        assert module.AlifeMemoryPlugin.conflicts(off) == [], pid
+        assert module.AlifeMemoryPlugin.runtime_settings(off).enabled is True, pid
+        free = Fake([pid], [pid], mutual=False)
+        assert module.AlifeMemoryPlugin.runtime_settings(free).enabled is True, pid
