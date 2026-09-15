@@ -3559,22 +3559,41 @@ class Store:
             for a in output["actions"]:
                 old = by_id[a["target_id"]]
                 group = {a["target_id"], *a["source_ids"]}
-                # v2.18.9 回声防线：这条事实的来源**是不是全是助手自己说的** ✗
-                # 服务端自己判定 ✓（模型自报的 only_self 只作参考 ✓ 不指望它）
+                # v2.18.9 回声防线：这条事实**站不站得住** ✗
+                # ① 有用户来源 → 站得住 ✓ ② 只有助手/没来源 → 站不住（自我来源）✓
+                # ⚠️ 没有来源的也要算自我来源 ✗（曾经漏掉它 → 助手一句话就能把它删了 ✓）
                 _sources = old.get("sources") or []
-                if _sources and all(s in bot_only for s in _sources):
-                    rewrite = bool(
-                        a.get("content") or a.get("subject") or a.get("relations")
-                    )
-                    if a["action"] in ("retract", "merge") or rewrite:
-                        # 只允许 ① keep ② 下调 importance ✗
-                        # 禁止：改写正文/关系/标签、改主体、软删 —— 那都是"用她自己的话改写记忆" ✓
-                        counts["keep"] += 1
-                        blocked += 1
-                        continue
-                    # 只是提权 → 打上 only_self，交给下面的钳制 ✓（模型没自报也拦住 ✓）
-                    a = dict(a)
-                    a["only_self"] = True
+                self_only = not _sources or all(s in bot_only for s in _sources)
+                if self_only:
+                    if a["action"] == "retract":
+                        # 自我来源的事实 = 助手自己的话 ✓ **允许清理** ✓
+                        # （软删可恢复 ✓ 也不会丢掉任何"用户说过的东西" ✓）
+                        pass
+                    elif a["action"] == "merge":
+                        # 只允许**同类合并**（都是自我来源）✗ 不许把助手的话并进用户的事实 ✓
+                        if not all(
+                            (not (by_id[f].get("sources") or []))
+                            or all(s in bot_only for s in by_id[f].get("sources") or [])
+                            for f in group
+                            if f in by_id
+                        ):
+                            counts["keep"] += 1
+                            blocked += 1
+                            continue
+                        a = dict(a)
+                        a["only_self"] = True
+                    else:
+                        rewrite = bool(
+                            a.get("content") or a.get("subject") or a.get("relations")
+                        )
+                        if rewrite:
+                            # 不许用她自己的话改写正文/关系/主体 ✓
+                            counts["keep"] += 1
+                            blocked += 1
+                            continue
+                        # 只是提权 → 打 only_self，交给下面的钳制 ✓（模型没自报也拦住 ✓）
+                        a = dict(a)
+                        a["only_self"] = True
                 counts[a["action"]] += 1
                 if a["action"] == "merge":
                     counts["merged_facts"] += len(group) - 1

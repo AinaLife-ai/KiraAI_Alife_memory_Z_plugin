@@ -343,3 +343,60 @@ class ContentRewriteBlockedCase(unittest.TestCase):
                 db.execute("SELECT content FROM facts").fetchone()[0], "用户住在上海，已确认",
                 "有用户佐证时应照常可改 ✓（别把功能一起拦掉 ✗）",
             )
+
+
+class ProvenanceCase(unittest.TestCase):
+    """按**来源**决定审计能做什么（v2.18.9 修正后）✓"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = storage.Store(Path(tmp.name) / "m.db")
+        store.initialize()
+        sid = "qq:dm:8"
+
+        def cap(role, text, t):
+            store.capture(sid, "k%d" % int(t * 10), [{
+                "role": role, "content": text, "users": ["qq:8"],
+                "speaker": "qq:8", "time": float(t)}])
+            with store.connect() as db:
+                return db.execute(
+                    "SELECT id FROM records WHERE role=? ORDER BY created DESC LIMIT 1",
+                    (role,)).fetchone()[0]
+
+        self.u = cap("user", "我住在杭州", 1.0)
+        self.b = cap("assistant", "主人住在上海", 2.0)
+        self.sid = sid
+        self.store = store
+        return store, sid
+
+    def _fact(self, srcs, content="用户住在杭州"):
+        self.store.add_facts(self.sid, [{
+            "category": "fact", "subject": "qq:8", "content": content,
+            "reason": "", "scenario": "", "tags": [], "relations": [],
+            "source_ids": list(srcs), "importance": 5}])
+        with self.store.connect() as db:
+            return db.execute("SELECT id FROM facts ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+
+    def _run(self, actions):
+        cands = self.store.audit_candidates(self.sid, limit=20, recheck_seconds=0)
+        self.store.audit(cands, {"actions": actions})
+        with self.store.connect() as db:
+            return db.execute(
+                "SELECT content,importance,deleted FROM facts ORDER BY rowid"
+            ).fetchall()
+
+    def test_retract_allowed_for_self_only(self):
+        """自我来源的事实**允许软删** ✓（清理她自己的垃圾 ✗ 软删可恢复 ✓）"""
+        fid = self._fact([self.b], "主人住在上海")
+        rows = self._run([{"action": "retract", "target_id": fid,
+                           "source_ids": [fid], "reason": "助手自己的说法"}])
+        self.assertEqual(rows[0][2], 1, "自我来源的事实应当能被清理 ✗")
+
+    def test_no_source_fact_is_protected_too(self):
+        """**没有来源**的事实也要受保护 ✓（曾经漏掉它 ✗ 助手一句话就能改写 ✓）"""
+        fid = self._fact([], "用户养了狗")
+        rows = self._run([{"action": "correct", "target_id": fid, "source_ids": [fid],
+                           "content": "用户养了猫", "importance": 9, "reason": "助手乱改"}])
+        self.assertEqual(rows[0][0], "用户养了狗", "没来源的事实正文不许被改 ✗")
+        self.assertEqual(rows[0][1], 5, "没来源的事实不许被提权 ✗")
