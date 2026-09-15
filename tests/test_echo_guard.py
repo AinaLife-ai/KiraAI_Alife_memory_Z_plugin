@@ -6,6 +6,7 @@
 """
 
 import importlib
+import json
 import sys
 import tempfile
 import types
@@ -407,3 +408,44 @@ class SelfOnlyIsEditableCase(unittest.TestCase):
              "reason": "助手自述，用户从未确认"}]})
         with store.connect() as db:
             self.assertEqual(db.execute("SELECT deleted FROM facts").fetchone()[0], 1)
+
+class TagsFollowContentCase(unittest.TestCase):
+    """v2.18.9：内容改了，**标签也要能跟着改** ✗
+
+    用户实测发现：审计/合并改了正文，标签却留在旧的 ✓
+    根因：`AuditAction` / `FactMergeGroup` 都没有 tags 字段 → 模型没渠道改 ✓
+    """
+
+    def _store(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        st = storage.Store(Path(tmp.name) / "m.db"); st.initialize()
+        sid = "qq:dm:6"
+        st.capture(sid, "k", [{"role": "user", "content": "我住在杭州",
+                               "users": ["qq:6"], "speaker": "qq:6", "time": 1.0}])
+        with st.connect() as db:
+            u = db.execute("SELECT id FROM records WHERE role='user'").fetchone()[0]
+        st.add_facts(sid, [{"category": "fact", "subject": "qq:6", "content": "用户住在上海",
+                            "reason": "", "scenario": "", "tags": ["旧标签"],
+                            "relations": [], "source_ids": [u]}])
+        return st, sid
+
+    def _apply(self, st, sid, action):
+        cands = st.audit_candidates(sid, limit=5, recheck_seconds=0)
+        fid = cands[0]["id"]
+        a = {"action": "correct", "target_id": fid, "source_ids": [fid],
+             "content": "用户住在杭州", "reason": "与用户原话一致"}
+        a.update(action)
+        st.audit(cands, {"actions": [a]})
+        with st.connect() as db:
+            return json.loads(db.execute("SELECT tags FROM facts").fetchone()[0])
+
+    def test_model_tags_are_used(self):
+        """模型给了 tags → **就用它的** ✓"""
+        st, sid = self._store()
+        self.assertEqual(self._apply(st, sid, {"tags": ["居住地", "杭州"]}),
+                         ["居住地", "杭州"])
+
+    def test_without_tags_keeps_union(self):
+        """**没给 tags → 行为不变**（沿用原标签 ✓ 向后兼容 ✓）"""
+        st, sid = self._store()
+        self.assertEqual(self._apply(st, sid, {}), ["旧标签"])

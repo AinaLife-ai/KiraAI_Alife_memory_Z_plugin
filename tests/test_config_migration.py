@@ -101,15 +101,25 @@ def test_prompt_wording_is_upgraded_but_custom_kept():
     mod = importlib.import_module("alife_cfgt_test.config_migrate")
     contracts = importlib.import_module("alife_cfgt_test.contracts")
 
-    # ① 存着旧默认文案 → 升级到当前默认 ✓
+    # ① 存着旧默认文案（且版本也是那个年代 ✓）→ 一路上升到当前默认 ✓
     changed, out = mod.migrate(
         {
             "alife": {"fact_merge_prompt": mod._OLD_FACT_MERGE_PROMPT},
-            "alife_meta": {"config_version": mod.CURRENT_VERSION - 1},
+            "alife_meta": {"config_version": 3},
         }
     )
     assert "fact_merge_prompt" in changed
     assert out["alife"]["fact_merge_prompt"] == contracts.FACT_MERGE_PROMPT
+
+    # ①b 升过 v4 的用户（存着 v4 那版文案 ✓）→ 只跑 v5 也要升到最新 ✓
+    changed_b, out_b = mod.migrate(
+        {
+            "alife": {"fact_merge_prompt": mod._V4_FACT_MERGE_PROMPT},
+            "alife_meta": {"config_version": 4},
+        }
+    )
+    assert "fact_merge_prompt" in changed_b
+    assert out_b["alife"]["fact_merge_prompt"] == contracts.FACT_MERGE_PROMPT
 
     # ② 用户自己改过的措辞 → 一个字都不动 ✓
     mine = "我自己写的合并提示词"

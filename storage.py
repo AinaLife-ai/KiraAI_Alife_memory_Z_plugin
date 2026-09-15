@@ -3417,7 +3417,8 @@ class Store:
             )
         return True
 
-    def merge_facts(self, target_id, source_ids, content, reason, new_sid=""):
+    def merge_facts(self, target_id, source_ids, content, reason, new_sid="", tags=None):
+        tags_override = tags
         """Fold near-duplicate facts into ``target_id``; the rest are soft-deleted.
 
         The target keeps its identity (and usually its session); tags, relations
@@ -3447,6 +3448,9 @@ class Store:
                 target_sid = target["sid"]
             sources = sorted({s for k in group for s in json.loads(rows[k]["sources"])})
             tags = sorted({t for k in group for t in json.loads(rows[k]["tags"])})
+            # v2.18.9：合并后标签不贴切了就该能改 ✗ 没给就沿用并集 ✓
+            if tags_override is not None:
+                tags = sorted({str(t).strip() for t in tags_override if str(t).strip()})
             relations = {
                 dump(rel): rel for k in group for rel in json.loads(rows[k]["relations"])
             }
@@ -3613,6 +3617,11 @@ class Store:
                 if a.get("relations") is not None:
                     relations = {dump(rel): rel for rel in a["relations"]}
                 tags = sorted({tag for k in group for tag in by_id[k]["tags"]})
+                # v2.18.9：**内容改了，标签也该能跟着改** ✗
+                # 此前只能取"组内并集" → 模型改了正文，标签却永远停在旧的 ✓
+                # 模型给了用模型的 ✓ 没给就沿用并集 ✓（老格式回答照样能过 ✓）
+                if a.get("tags") is not None:
+                    tags = sorted({str(t).strip() for t in a["tags"] if str(t).strip()})
                 db.execute(
                     "UPDATE facts SET content=?,sources=?,relations=?,tags=?,fingerprint=?,revision=revision+1 WHERE id=?",
                     (
