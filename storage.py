@@ -3527,6 +3527,7 @@ class Store:
         validate_audit(candidates, output)
         counts = {"keep": 0, "correct": 0, "merge": 0, "retract": 0, "merged_facts": 0}
         blocked = 0   # v2.18.9：因"来源全是助手自己"而被拦下的改写次数 ✓
+        clamped = 0   # v2.18.9：自我来源想提权、被压回原值的次数 ✓
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             # v2.18.9 回声防线（**服务端自己判定** ✗ 不依赖模型自觉 ✓）：
@@ -3637,6 +3638,7 @@ class Store:
                         old_imp = old.get("importance")
                         if isinstance(old_imp, int) and new_imp > old_imp:
                             new_imp = old_imp
+                            clamped += 1
                     db.execute(
                         "UPDATE facts SET importance=?,revision=revision+1 WHERE id=?",
                         (new_imp, a["target_id"]),
@@ -3736,6 +3738,9 @@ class Store:
                             }
                         )
             self.add_job_items(job_id, items)
+        if clamped:
+            # 提权被压回也要记账 ✓ 否则报告会少报"她想给自己加权重"的次数 ✗
+            counts["only_self_clamped"] = clamped
         if blocked:
             # 让"被兜底拦下多少次"在审计报告里可见 ✓（不然会以为模型很乖 ✓）
             counts["only_self_blocked"] = blocked

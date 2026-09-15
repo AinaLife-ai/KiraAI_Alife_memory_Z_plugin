@@ -447,3 +447,33 @@ class MatrixCase(unittest.TestCase):
         with st.connect() as db:
             row = db.execute("SELECT content FROM facts WHERE id=?", (ids[0],)).fetchone()
         self.assertEqual(row[0], "用户住在杭州", "混合合并不该落地 ✗")
+
+class ReportCountsCase(unittest.TestCase):
+    """审计报告必须**如实记账** ✗（否则会误以为"模型很乖" ✓）"""
+
+    def test_blocked_and_clamped_are_counted(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        store = storage.Store(Path(tmp.name) / "m.db"); store.initialize()
+        sid = "qq:dm:3"
+        store.capture(sid, "k", [{"role": "assistant", "content": "主人住在上海",
+                                  "users": ["qq:3"], "speaker": "qq:3", "time": 1.0}])
+        with store.connect() as db:
+            bot = db.execute("SELECT id FROM records WHERE role='assistant'").fetchone()[0]
+        store.add_facts(sid, [{"category": "fact", "subject": "qq:3",
+                               "content": "用户住在上海", "reason": "", "scenario": "",
+                               "tags": [], "relations": [], "source_ids": [bot]}])
+        cands = store.audit_candidates(sid, limit=5, recheck_seconds=0)
+        fid = cands[0]["id"]
+        # ① 改写正文 → 拦下 ✓（两个动作不能同时给同一条 ✗ 校验会拒 ✓ 所以分两轮）
+        c1 = store.audit(cands, {"actions": [
+            {"action": "correct", "target_id": fid, "source_ids": [fid],
+             "content": "用户住在北京", "reason": "助手认为"}]})
+        self.assertEqual(c1.get("only_self_blocked"), 1, "改写被拦要记账 ✗")
+        # ② 纯提权 → 压回原值 ✓ 也要记账 ✓
+        c2 = store.audit(store.audit_candidates(sid, limit=5, recheck_seconds=0),
+                         {"actions": [
+            {"action": "correct", "target_id": fid, "source_ids": [fid],
+             "content": "用户住在上海", "importance": 9, "reason": "助手认为"}]})
+        self.assertEqual(c2.get("only_self_clamped"), 1, "提权被压回要记账 ✗")
+        with store.connect() as db:
+            self.assertEqual(db.execute("SELECT importance FROM facts").fetchone()[0], 5)
