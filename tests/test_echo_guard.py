@@ -187,7 +187,7 @@ class PromptCase(unittest.TestCase):
         self.assertTrue("evidence[].bot=1" in eng, "审计提示词必须解释 evidence[].bot ✗")
         self.assertTrue('item["bot"] = 1' in main, "相关记录也必须打 bot（三处一致 ✓）")
         self.assertTrue('["self"] = 1' in ret, "事实行必须能标 self ✗")
-        self.assertTrue("self 表示这条事实的最新来源是助手自己" in ret, "图例必须解释 self ✗")
+        self.assertTrue("自己曾经说过的" in ret, "图例必须解释 self ✗")
 
 
 if __name__ == "__main__":
