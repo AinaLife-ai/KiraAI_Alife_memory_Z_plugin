@@ -581,7 +581,9 @@ def test_sidebar_polish():
     assert "var(--accent)" in css.split(".nav::-webkit-scrollbar-thumb")[1][:120], "thumb 用主题紫"
 
     foot = css.split(".aside-foot {")[1].split("}")[0]
-    assert "padding: 3px 12px 4px" in foot, "内边距要收紧"
+    assert "padding: 1px 12px 0" in foot, "底块内边距要收到最小"
+    aside = css.split("aside {")[1].split("}")[0]
+    assert "padding: 30px 18px 10px" in aside, "aside 底部内边距要收到 10px（把状态块往下推）"
     assert "font-size: 10px" in foot, "版本号那行字号要缩小"
 
     motto = css.split(".motto {")[1].split("}")[0]
@@ -595,3 +597,26 @@ def test_sidebar_polish():
     assert "<br />" in seg, "寄语必须是两行"
     assert "让每段记忆，都有来处" in html and "让每个故事，都有归处" in html, "寄语文案"
     assert "让每一段经历" not in html, "旧寄语应已替换"
+
+
+def test_changelog_entries_inside_details():
+    """README 的更新日志必须**全部在折叠块内**（`<details>…</details>`）
+
+    真实问题：新日志被写在 `</details>` **之后** ✗ 折叠块里看不到 ✓ 用户得翻到文件末尾 ✓
+    另：manifest 的版本号必须与**最新的日志条目**一致 ✓（曾经停在 2.18.1 没跟上 ✗）
+    """
+    import re as _re
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    open_at = readme.index("<details>")
+    close_at = readme.rindex("</details>")
+    outside = readme[open_at:close_at]
+    after = readme[close_at:]
+    stray = _re.findall(r"### (v\d+\.\d+\.\d+)", after)
+    assert not stray, "这些日志条目散落在折叠块之外 ✗：" + ", ".join(stray)
+    versions = _re.findall(r"### (v(\d+)\.(\d+)\.(\d+))", outside)
+    assert versions, "折叠块里应有日志条目"
+    latest = versions[0][0].lstrip("v")
+    manifest = (ROOT / "manifest.json").read_text(encoding="utf-8")
+    mv = _re.search(r'"version"\s*:\s*"([^"]+)"', manifest).group(1)
+    assert mv == latest, "manifest 版本(%s) 必须等于最新日志条目(%s)" % (mv, latest)

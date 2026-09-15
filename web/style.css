@@ -138,6 +138,7 @@ small,
 }
 aside {
   overflow: hidden;   /* v2.18.1：让内部区域自己滚，别把导航裁掉 */
+  padding: 30px 18px 10px;   /* v2.18.5：底部 30→10px，把状态块整体往下推、留白收掉（用户要求） */
   padding: 30px 18px;
   border-right: 1px solid var(--line);
   background: var(--panel);
@@ -213,10 +214,10 @@ aside {
 }
 .aside-foot {
   margin-top: auto;
-  /* v2.18.4：字号缩小 + 内边距收紧（用户要求：寄语保持两行，只把字缩小一些） */
-  padding: 3px 12px 4px;
+  /* v2.18.5：整体下移（aside 底部内边距 30→10px）+ 再收窄（用户要求：下方留白太多） */
+  padding: 1px 12px 0;
   font-size: 10px;
-  line-height: 1.3;
+  line-height: 1.28;
   color: var(--muted);
   border-top: 1px solid var(--line);
 }
