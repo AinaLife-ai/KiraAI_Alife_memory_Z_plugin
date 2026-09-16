@@ -1824,6 +1824,9 @@ class AlifeMemoryPlugin(BasePlugin):
         # 剥掉协议外壳后没内容的（空 <msg/>、渲染不出来的消息）也不占 L0 席位：
         # 它们没有信息量，却会被计入压缩阈值、进压缩输入。
         incoming = []
+        # v2.18.14：名字表**按批取一次**（store 侧还有 60 秒缓存 ✓）
+        # 别在循环里查 ✗ 那样每条消息一次库查询会把这一批拖慢几百毫秒 ✓
+        media_names = await self.store.call("known_names")
         for message in event.messages:
             if is_notice_message(message):
                 continue
@@ -1840,7 +1843,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 # 这条是谁说的（实体 id）：群聊里模型必须能分清谁说了哪句
                 "speaker": speaker_of(message),
             }
-            if media_only(content):
+            if media_only(content, media_names):
                 entry["category"] = "media"
             incoming.append(entry)
         if incoming:

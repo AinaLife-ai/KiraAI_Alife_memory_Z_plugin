@@ -13,6 +13,9 @@ sys.modules.setdefault("alife_media_test", pkg)
 retrieval = importlib.import_module("alife_media_test.retrieval")
 storage = importlib.import_module("alife_media_test.storage")
 
+# 已知成员名（v2.18.14：@ 的定性靠它 ✓ 不再猜长度 ✓）
+NAMES = {"小明", "某位朋友", "阿澄", "一个非常非常长的昵称用来测试超长名字的情况"}
+
 # 用户日志里出现的真实形态（正是"被召回了"的那几条 ✗）
 NOISY = [
     "[图片 这是一张动漫风格的插画，描绘了一位白发少女…]",
@@ -21,24 +24,44 @@ NOISY = [
     "[Reply ID: -71，[Sticker 这张图片是]",
     "↩7 [图片 一只橘猫]",
     "[表情6]",
+    # 只有 at 壳、没有别的文字 ✓（用户明确要求：也不召回 ✓）
+    "@123456",
+    "@12345678901",
+    "@某位朋友",          # ← 已知成员名 ✓
+    "@小明",
+    "@一个非常非常长的昵称用来测试超长名字的情况",   # ← 超长昵称 ✓ 是成员 → 仍是 at ✓
+    "[CQ:at,qq=123]",
+    '<at id="1"/>',
 ]
 # 有真实文字的（必须照常召回 ✓）
 REAL = [
     "[Reply -208950819] He11o? 金牛你断网啦",
     "晚上吃什么",
+    # v2.18.14 的关键修复：**at 粘连的短句绝不能被整条吃掉** ✗
+    "@他就好了",
+    "@小明你好",
+    "@某位路人甲",        # 不是已知成员 → 当正文 ✓
+    "@123456 你好",
+    "@小明 你好",
+    "你好 @小明",
+    "@小明你好，今天怎么样",
+    "[Reply 123] @小明 你好",
+    "at他就好了",         # 纯文字里的 at（没有 @）✓ 不关我的事 ✓
+    "at他就好了，你也是",
 ]
 
 
 class DetectCase(unittest.TestCase):
     def test_log_shapes_are_media(self):
-        """日志里那几种（含套了 [Reply …] 壳的）都必须判为媒体 ✗"""
+        """日志里那几种（含套了 [Reply …] 壳的、只有 at 壳的）都必须判为媒体 ✗"""
         for text in NOISY:
-            self.assertTrue(retrieval.media_only(text), text)
+            self.assertTrue(retrieval.media_only(text, NAMES), text)
 
     def test_real_text_is_kept(self):
-        """有真实文字的一条都不许误伤 ✓"""
+        """有真实文字的一条都不许误伤 ✓（含 at 粘连的短句 ✗ 实测误伤过 ✓）"""
         for text in REAL:
-            self.assertFalse(retrieval.media_only(text), text)
+            self.assertFalse(retrieval.media_only(text, NAMES), text)
+
 
 class LegacyFilterCase(unittest.TestCase):
     """存量记录：升级前存进去的贴纸/图片描述也必须被挡住 ✗

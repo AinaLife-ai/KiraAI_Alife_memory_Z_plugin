@@ -2409,8 +2409,7 @@ class Store:
                 (fact["id"],),
             )
 
-    @staticmethod
-    def _drop_media_only(items):
+    def _drop_media_only(self, items):
         """v2.18.12：把"只有引用壳/媒体、没有实质文字"的记录也滤掉 ✓
 
         `category="media"` 只管**新写入**的记录 ✗ 这里兜住两件事：
@@ -2419,7 +2418,27 @@ class Store:
         """
         from .retrieval import media_only
 
-        return [r for r in items if not media_only(str(r.get("content") or ""))]
+        names = self.known_names()
+        return [
+            r for r in items if not media_only(str(r.get("content") or ""), names)
+        ]
+
+    def known_names(self, ttl=60):
+        """已知成员名（**缓存 60 秒** ✗ 不加缓存的话每次检索都要查库 ✓ 那才是真拖慢 ✓）
+
+        v2.18.14：`@X` 里 X 是不是"已知的 at"靠它判 ✓
+        缓存过期最多让**新成员**的 at 被当成正文 ✓（安全方向 ✓ 无害 ✓）
+        """
+        now = time.time()
+        cache = getattr(self, "_names_cache", None)
+        if cache and now - cache[0] < ttl:
+            return cache[1]
+        with self.connect() as db:
+            names = {
+                str(r[0]) for r in db.execute("SELECT name FROM entities WHERE name<>''")
+            }
+        self._names_cache = (now, names)
+        return names
 
     def search(
         self,
