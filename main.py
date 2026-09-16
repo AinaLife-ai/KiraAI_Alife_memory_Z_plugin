@@ -853,11 +853,17 @@ class AlifeMemoryPlugin(BasePlugin):
         if state.get("signature") != signature:
             state["next"] = True
             state["signature"] = signature
-        state["cooldown"] = {
-            rid: left - 1 for rid, left in state["cooldown"].items() if left - 1 > 0
-        }
+        # v2.18.16：只有**真正的用户轮**才推进 ✓ 同一轮内的工具步不算 ✗
+        turn = getattr(self, "_rotation_turn", None)
+        new_turn = state.get("turn") != turn
+        if new_turn:
+            state["turn"] = turn
+            state["cooldown"] = {
+                rid: left - 1 for rid, left in state["cooldown"].items() if left - 1 > 0
+            }
         if not state["next"]:
-            state["rounds"] += 1
+            if new_turn:
+                state["rounds"] += 1
             return list(state["rows"])  # 继续留：同一批再摆一轮
         seen = self.seen_window.get(seen_key)
         banned = set(seen.get("ids") or [])
@@ -923,6 +929,10 @@ class AlifeMemoryPlugin(BasePlugin):
         for kind, state in (holder.get("slots") or {}).items():
             if state.get("next") or not state.get("ids"):
                 continue
+            # v2.18.16：同一个用户轮里**只计一次** ✓
+            # （工具步也各回一次 ✓ 不过滤的话 used 会被虚增 ✗ 影响"常用才留下"的判断 ✓）
+            if state.get("hit_turn") is not None and state.get("hit_turn") == state.get("turn"):
+                continue
             hits = [
                 rid
                 for rid, text in (state.get("texts") or {}).items()
@@ -930,6 +940,7 @@ class AlifeMemoryPlugin(BasePlugin):
             ]
             if hits:
                 await self.store.call("mark_rotation", [], hits)
+                state["hit_turn"] = state.get("turn")
                 for rid in hits:
                     holder["used"][rid] = int(holder["used"].get(rid, 0)) + 1
                 state["next"] = True  # 用到了 → 下轮换批
@@ -1334,6 +1345,22 @@ class AlifeMemoryPlugin(BasePlugin):
             return ""
         return ""
 
+    def rotation_turn_key(self, req):
+        """本轮属于**哪个用户轮** ✓ —— 工具步 / 重试必须算**同一轮** ✗
+
+        压缩侧的「轮」= 用户发言 → 助手回复 ✓（`_round_end` ✓）
+        但轮换的推进此前写在 `on_request` 里 ✗ → **每个 agent 步都推进一轮** ✗
+        实测：一次带 5 个工具步的用户轮，被轮换记成 5~6 轮 ✗
+        ⇒ `rotate_cooldown_rounds`(默认10) 实际只相当于 ~2 个真实回合 ✗ 记忆提前回归 ✓
+
+        判据 = **用户消息条数 + 末条用户消息指纹** ✓（只靠内容的话 ✗ 用户连发两句一样的会被漏 ✓）
+        只有它变了才算新一轮 ✓
+        """
+        messages = list(getattr(req, "messages", None) or [])
+        users = [m for m in messages if getattr(m, "role", "") == "user"]
+        last = str(getattr(users[-1], "content", "")) if users else ""
+        return (len(users), hash(last))
+
     def bootstrap_allowed(self):
         """是否允许把宿主旧历史播种进本会话。"""
         mode = self.settings.bootstrap_seed
@@ -1373,6 +1400,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 "canonicalize_identity", self.adapter_names()
             )
         sid = event.sid
+        self._rotation_turn = self.rotation_turn_key(req)   # v2.18.16：工具步算同一轮 ✓
         await self.observe_event_names(event)
         rows = await self.store.call("active", sid)
         # Seed pre-install history once; never erase the core's own history on disk.
