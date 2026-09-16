@@ -1002,10 +1002,15 @@ _MEDIA_BLOCK = re.compile(
 #  · 没有 content 的"纯引用壳"（`[Reply ID: -71，[Sticker …]` / `[Reply -208950819]`）
 #    是真·噪声 ✗（既看不到原消息 ✓ 又占字符 ✗）⇒ 转 `[Reply]` ✓
 # 一个正则覆盖**两种**引用壳 ✓ 免得"带 content 的那支"漏下孤立的 `]` ✗（实测踩过 ✓）
-_REPLY_SHELL = re.compile(
-    r"\[Reply(?:\s+ID)?[:\s,，]*\s*-?\d+\s*(?:content:\s*([^\]]*))?[,，]?\s*\]",
+# **两段式** ✓ 顺序不能反 ✗（反过来"带 content"那支会被普通壳整段吃掉 ✓ 原文就丢了 ✗）
+# ① 带 content 的（能显示引用的原消息 ✓ 那是有用信息 ✓）→ 保壳+原文 ✓
+_REPLY_WITH_CONTENT = re.compile(
+    r"\[Reply(?:\s+ID)?[:\s,，]*\s*-?\d+\s*content:\s*([^\[\]]*?)\s*\]",
     re.I,
 )
+# ② 容忍**一层嵌套** ✓ —— 真实形态：`[Reply ID: -71，[Sticker 一张动漫风格的插画]]`
+#    （用户日志实测 ✓）里层已经先被转成 `[Image]` ✓ 所以这层要能吃下 `[…]` ✓
+_REPLY_SHELL = re.compile(r"\[Reply(?:[^\[\]]|\[[^\[\]]*\])*\]", re.I)
 _MEDIA_INLINE = re.compile(r"\[(?:" + _MEDIA_WORDS + r")[^\]]*\]", re.I)
 
 
@@ -1014,13 +1019,13 @@ def recall_text(text, limit=0):
 
     ⚠️ 压缩侧**不要**用它 ✗ —— 那边必须保留描述 ✓（见 `model_text` ✓）
     """
-    def _keep_inner(m):
-        inner = (m.group(1) or "").strip()
-        # 带 content 的（能显示原消息 ✓）→ 保留原文 ✓；只有 id 的（看不到原消息 ✗）→ 只有占位 ✓
-        return " [Reply] " + inner + " " if inner else " [Reply] "
-
-    out = _REPLY_SHELL.sub(_keep_inner, str(text or ""))
-    out = _MEDIA_INLINE.sub(" [Image] ", out)        # 媒体描述 → 占位 ✓
+    out = str(text or "")
+    # ⚠️ 顺序很重要 ✗：必须先媒体、再带 content 的引用壳、最后收其余的壳 ✓
+    out = _MEDIA_INLINE.sub(" [Image] ", out)                    # ① 里层媒体 → 占位 ✓
+    out = _REPLY_WITH_CONTENT.sub(                               # ② 能显示原消息的 → 保留 ✓
+        lambda m: " [Reply] " + m.group(1).strip() + " ", out
+    )
+    out = _REPLY_SHELL.sub(" [Reply] ", out)                     # ③ 只有 id 的 → 纯占位 ✓
     out = re.sub(r"\s+", " ", out).strip()
     if limit and len(out) > limit:
         return out[:limit].rstrip() + "…"
