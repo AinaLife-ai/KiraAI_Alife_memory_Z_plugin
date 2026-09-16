@@ -1925,6 +1925,10 @@ class AlifeMemoryPlugin(BasePlugin):
                         "content": content,
                         # The raw tool_calls JSON stays in content, never in the summary.
                         "summary": summary or "（无文字回复）",
+                        # v2.18.19：**工具步落标** ✓
+                        # ① 召回侧全链路过滤（bot 主被动 + 查档案都搜不到 ✓ 前端默认也不显示 ✓）
+                        # ② 但**压缩侧不排除** ✓（转短占位 ✓）—— 否则"重要的会被压成事实"就不成立 ✓
+                        **({"category": "tool"} if response.tool_calls else {}),
                         "time": time.time(),
                         "users": users,
                     }

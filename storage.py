@@ -2409,18 +2409,26 @@ class Store:
                 (fact["id"],),
             )
 
-    def _drop_media_only(self, items):
+    def _drop_media_only(self, items, include_tools=False):
         """v2.18.12：把"只有引用壳/媒体、没有实质文字"的记录也滤掉 ✓
 
         `category="media"` 只管**新写入**的记录 ✗ 这里兜住两件事：
         ① **存量**记录（升级前就存进去的贴纸/图片描述 ✓ 日志实测过 ✓）
         ② 套着 `[Reply …]` / `↩N` 壳的媒体 ✓（旧判定漏掉的正是这种 ✓）
+
+        v2.18.19 追加：**工具步**默认也滤掉 ✓
+        工具步对**主模型**是过程噪声 ✗（bot 主被动召回 + 查档案都搜不到 ✓）
+        但**压缩侧不排除** ✓（转 `[工具调用]` 占位 ✓）⇒ 所以只在这条**召回**路上过滤 ✓
+        前端的"显示工具步"开关会以 `include_tools=True` 调进来 ✓
         """
-        from .retrieval import media_only
+        from .retrieval import is_tool_step, media_only
 
         names = self.known_names()
         return [
-            r for r in items if not media_only(str(r.get("content") or ""), names)
+            r
+            for r in items
+            if (include_tools or not is_tool_step(r))
+            and not media_only(str(r.get("content") or ""), names)
         ]
 
     def known_names(self, ttl=60):
@@ -2444,6 +2452,7 @@ class Store:
         self,
         sid="",
         keyword="",
+        include_tools=False,
         level=None,
         start=None,
         end=None,
@@ -2645,7 +2654,7 @@ class Store:
             items = [self.row(r) for r in rows]
             if skip_media:
                 # 兜住存量与"套了引用壳的媒体" ✓（开关关掉则照常返回 ✓）
-                items = self._drop_media_only(items)
+                items = self._drop_media_only(items, include_tools)
             return {"total": total, "items": items}
 
     def _fused_rows(

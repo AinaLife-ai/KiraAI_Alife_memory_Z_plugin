@@ -996,6 +996,20 @@ _MEDIA_BLOCK = re.compile(
 )
 
 
+def is_tool_step(row):
+    """是不是"工具步"记录 ✓（capture 时打了 `category='tool'` ✓）
+
+    v2.18.19：工具步对**主模型**是过程噪声 ✗ ⇒ 召回侧全链路过滤 ✓
+    但对**压缩模型**是上下文 ✗ ⇒ 压缩侧保留（转短占位 ✓）
+    """
+    return str((row or {}).get("category") or "") == "tool"
+
+
+def tool_placeholder():
+    """工具步喂给压缩模型时的短占位 ✓（不带 tool_calls JSON ✓ 省 token ✓）"""
+    return "[工具调用]"
+
+
 def media_only(content, names=()):
     """是不是"只有引用壳/at 壳/媒体块、没有实质文字"的消息 ✓（默认不进召回 ✓ 数据保留 ✓）
 

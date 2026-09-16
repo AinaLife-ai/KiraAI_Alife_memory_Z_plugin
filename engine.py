@@ -10,6 +10,8 @@ from .retrieval import (
     bare_id,
     full_time,
     model_text,
+    is_tool_step,
+    tool_placeholder,
 
     short_time,
     squeeze,
@@ -206,7 +208,15 @@ def compress_records(candidates, aliases, names=None, keep=()):
     names = names or {}
     records = []
     for index, row in enumerate(candidates):
-        record = {"id": "r%d" % (index + 1), "s": model_text(row["summary"], keep)}
+        # v2.18.19：工具步只给短占位 ✓（省 token ✓ 又不丢"这一步发生过" ✓）
+        record = {
+            "id": "r%d" % (index + 1),
+            "s": (
+                tool_placeholder()
+                if is_tool_step(row)
+                else model_text(row["summary"], keep)
+            ),
+        }
         if row["role"] == "assistant":
             record["bot"] = 1
         if row["users"]:
