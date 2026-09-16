@@ -963,3 +963,25 @@ GROUPED_EXAMPLE_LINE = (
     + " —— 组键是主体短码，组内每行按 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?] 读；"
     "names 里查短码对应的账号与名字。\n"
 )
+
+
+# v2.18.12：媒体判定的**正确口径** = 「剥掉引用壳与媒体块之后，还剩不剩实质文字」
+# 旧口径要求"整条只有 [表情]/[图片] 标记" ✗ → 外面套一层 [Reply …] / ↩N
+# 或换成英文 [Sticker …] 就漏过去了 ✓（日志实测：贴纸描述被当成正文召回 ✓）
+_ENVELOPE = re.compile(
+    r"\[Reply[^\]]*\]|\[Reply[^\]]*$"          # 引用壳（可能不闭合 ✓）
+    r"|\[CQ:at[^\]]*\]|\[at[^\]]*\]|<at[^>]*>"  # at 壳的几种常见写法 ✓
+    r"|↩\S+|@\S+",                                # 项目既有的标记口径（见 _MARKER ✓）
+    re.I,
+)
+_MEDIA_BLOCK = re.compile(
+    r"\[(?:表情|图片|贴纸|语音|视频|文件|Sticker|sticker|face|image|video|voice)[^\]]*\]",
+    re.I,
+)
+
+
+def media_only(content):
+    """是不是"只有媒体/引用壳、没有实质文字"的消息 ✓（默认不进召回 ✓ 数据仍保留 ✓）"""
+    text = _ENVELOPE.sub(" ", content or "")
+    text = _MEDIA_BLOCK.sub(" ", text)
+    return not text.strip()
