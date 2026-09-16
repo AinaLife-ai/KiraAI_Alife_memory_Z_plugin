@@ -1704,39 +1704,48 @@ class AlifeMemoryPlugin(BasePlugin):
             [r["id"] for r in priority]
             + [r["sid"] for r in priority if r["sid"] != sid]
         )
-        chosen = {}
+        # v2.18.19：**表头化 + 去码** ✓（用户决策 ✓）
+        # 原来每项是一个 dict ✗ 重复的键名 + 重复的会话 id 吃掉约 55% 的字符 ✗
+        # 现在：表头只出现一次 ✓ 每行 `序号|角色|时间|说话人|内容` ✓ **不发任何短码** ✗
+        # 想核对原话 / 精确到分钟 → `expand=[序号]` ✓（只对最近一次清单有效 ✓ 过期即拒绝 ✓）
+        # 角色标记：A=助手 U=用户，尾附 `*`=永久记忆，`@xxx`=来自别的会话 ✓
+        lines, pick_ids = [], []
         for row in priority:
-            packed = {
-                "a": archive_shorts.get(row["id"], row["id"]),
-                "t": short_time(row["end"] or row["start"]),
-                "s": self.model_text(row["summary"], keep_names),
-            }
-            if row["speaker"]:
-                packed["sp"] = self.model_text(row["speaker"], keep_names)
-            if row["role"] == "assistant":
-                packed["bot"] = 1
+            marks = "A" if row["role"] == "assistant" else "U"
             if row["permanent"]:
-                packed["mem"] = 1
+                marks += "*"
             if row["sid"] and row["sid"] != sid:
-                packed["from"] = archive_shorts.get(row["sid"], row["sid"])
-            rendered = dump(packed)
-            if len(rendered) <= budget:
-                chosen[row["id"]] = packed
-                budget -= len(rendered)
+                marks += "@" + str(archive_shorts.get(row["sid"], row["sid"]))
+            line = "%d|%s|%s|%s|%s" % (
+                len(lines) + 1,
+                marks,
+                short_time(row["end"] or row["start"]),
+                self.model_text(row["speaker"] or "", keep_names) or "-",
+                self.model_text(row["summary"], keep_names),
+            )
+            if len(line) <= budget:
+                lines.append(line)
+                pick_ids.append(row["id"])
+                budget -= len(line)
             else:
                 omitted.append(row["id"])
-        selected = [chosen[r["id"]] for r in rows if r["id"] in chosen]
-        # v2.18.19：记下**这一次的清单顺序** ✓（序号 → 真实 id ✓ 只留最新一份 ✓）
+        speakers = []
+        for row in priority:
+            name = self.model_text(row["speaker"] or "", keep_names)
+            if name and name not in speakers:
+                speakers.append(name)
+        selected = {
+            "legend": "会话=%s｜说话人=%s｜时间=本机" % (sid, "、".join(speakers) or "?"),
+            "rows": lines,
+        }
+        if omitted:
+            # 明确的**调用字样** ✓（用户要求：不要用"说 more"这种自然语言提示 ✗）
+            selected["more_hint"] = (
+                "还有 %d 条 · 继续请调用 SearchMemoryArchive(next_batch=true)" % len(omitted)
+            )
+        # 记下这一次的清单顺序 ✓（序号 → 真实 id ✓ 只留最新一份 ✓）
         # ⚠️ 每次召回都重建 ✗ 不保留旧清单 ✓ —— 免得模型引用上一份的序号而改错记忆 ✓
-        self._recall_ordinals[event.sid] = (
-            time.time(),
-            [r["id"] for r in rows if r["id"] in chosen],
-        )
-        if getattr(self.settings, "fact_view", FACT_VIEW_GROUPED) == FACT_VIEW_GROUPED:
-            _perm, _recent = [], []
-            for _row in selected:
-                (_perm if _row.pop("mem", None) else _recent).append(_row)
-            selected = {"permanent": _perm, "recent": _recent}
+        self._recall_ordinals[event.sid] = (time.time(), pick_ids)
         # P1：召回时顺便发现重复事实（本地判定 → 只标记 → 后台合并）
         dropped = await self.queue_recall_merges(sid, facts)
         if dropped:
