@@ -451,9 +451,31 @@ def trim_to_round(rows, target, extra=8):
     return rows[: max(target, min(end, len(rows)))]
 
 
-def compression_plan(rows, cfg):
+def compression_plan(rows, cfg, now=None, boost_allowed=False):
+    """挑出一批可以压缩的内容 ✓
+
+    v2.18.19（B）：加了**门槛覆盖**（`boost_allowed=True` 时生效 ✓）
+      · **陈旧**：最老的未压缩记录超过 `compress_stale_after_days`（默认 3 天）→ 门槛降为 1 ✓
+      · **闲置**：该会话最新记录超过 `compress_idle_after_hours`（默认 6 小时）→ 门槛降为 1 ✓
+      ⚠️ 默认**关** ✗ —— 由引擎按每会话冷却显式打开 ✓
+         这样纯函数的老语义（单测依赖 ✓）一个字不变 ✓
+    """
     # The level comes from compression depth, never importance or classification.
     # Canonical ordering repairs reversed persisted regions without forging depth.
+    # v2.18.19（B）：门槛覆盖 ✓ —— 只影响"什么时候动手"✗ 绝不切半轮 ✓
+    # 目标场景：**会话还在活跃**（所以永远不"闲置"✗）但**旧数据一直压不到** ✓
+    boost = False
+    if boost_allowed and rows:
+        _times = [t for t in ((r.get("end") or r.get("start") or 0) for r in rows) if t]
+        if _times:
+            _now = now or time.time()
+            _newest, _oldest = max(_times), min(_times)
+            _stale_days = int(getattr(cfg, "compress_stale_after_days", 3) or 0)
+            _idle_hours = int(getattr(cfg, "compress_idle_after_hours", 6) or 0)
+            if _stale_days and _oldest < _now - _stale_days * 86400:
+                boost = True          # 陈旧：有积压 ✓
+            if _idle_hours and _newest < _now - _idle_hours * 3600:
+                boost = True          # 闲置：这轮对话已经结束了 ✓
     ordered = sorted(
         (r for r in rows if not r["permanent"]),
         key=lambda r: (-r["level"], r["position"], r["id"]),
@@ -483,8 +505,16 @@ def compression_plan(rows, cfg):
                     if closed:
                         rounds.append((pos, end))
                     pos = end
-                if len(rounds) >= cfg.compress_rounds:
-                    return subset[: rounds[cfg.compress_rounds - 1][1]], level + 1
+                need = 1 if boost else cfg.compress_rounds
+                if len(rounds) >= need:
+                    return subset[: rounds[need - 1][1]], level + 1
+                if boost and not rounds:
+                    # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
+                    # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**
+                    # ⇒ 退回按条（仍受 batch_size 限制 ✓）
+                    _count = min(int(cfg.batch_size), len(subset))
+                    if _count > 0:
+                        return subset[:_count], level + 1
             elif len(subset) >= threshold:
                 # **按条**：取 count 条 ✓ 但**叶子层**的最后一轮必须收尾完整 ✗（无视条数 ✓ 只受安全上限约束 ✓）
                 # ⚠️ 两个前提：① 只在叶子层（摘要层不是"轮" ✗ 保持纯条数 ✓）
