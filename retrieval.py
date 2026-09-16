@@ -998,7 +998,9 @@ def media_only(content, names=()):
     kept = []
     for part in text.split():
         if part.startswith("@") and len(part) > 1:
-            who = part[1:]
+            # 削掉尾部标点再比对名字 ✓（`@小明！` 也是裸 at ✓；而 `@小明，你好` 削完
+            # 仍不等于成员名 ✓ → 整条保留 ✓ 真话不会被吃掉 ✓）
+            who = part[1:].rstrip("，。！？、,.!?~～:：;；\"'）)】]")
             if who.isdigit() or who in names:
                 continue          # 已知的 at 壳 ✓ 丢掉
         kept.append(part)
