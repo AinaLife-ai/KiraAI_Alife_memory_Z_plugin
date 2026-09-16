@@ -628,3 +628,26 @@ def test_changelog_entries_inside_details():
     manifest = (ROOT / "manifest.json").read_text(encoding="utf-8")
     mv = _re.search(r'"version"\s*:\s*"([^"]+)"', manifest).group(1)
     assert mv == latest, "manifest 版本(%s) 必须等于最新日志条目(%s)" % (mv, latest)
+
+
+def test_batch_mode_ui_switches_fields():
+    """压缩分批模式是**二选一** ✓ 选一种就把另一套参数收起来 ✗（别让用户对着两套发懵 ✓）
+
+    用最小 DOM 桩**真跑** `applyBatchMode` ✓（行为级 ✓ 不是看字符串在不在 ✓）
+    顺带守住：两种模式的**标签/枚举文案**在设置页必须有 ✓（不然显示原始键名 ✗）
+    """
+    import shutil, subprocess
+
+    node = shutil.which("node")
+    if not node:
+        import pytest as _pytest
+        _pytest.skip("环境里没有 node")
+    src = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    for key in ("compress_batch_mode", "compress_rounds", "threshold", "batch_size"):
+        assert '"%s"' % key in src or "%s:" % key in src, "设置页缺少字段 %s" % key
+    for word in ("compress_batch_mode:", "compress_rounds:"):
+        assert word in src, "缺少中文标签：%s（界面会显示原始键名）" % word
+    check = ROOT / "tests" / "js_batch_mode.mjs"
+    assert check.exists(), "缺少分批模式的前端检查脚本"
+    run = subprocess.run([node, str(check)], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, "分批模式互斥显示未通过：\n" + (run.stdout + run.stderr)[:700]

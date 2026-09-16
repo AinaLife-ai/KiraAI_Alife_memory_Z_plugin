@@ -22,6 +22,8 @@ const fields = {
   inject_recent_raw: "注入最近原文",
   capture_enabled: "记录对话与感知",
   auto_inject: "持续上下文与感知注入",
+  compress_batch_mode: "压缩分批模式",
+  compress_rounds: "每批压缩轮数",
   threshold: "首层压缩阈值",
   batch_size: "首层每批条数",
   probability: "自动压缩概率",
@@ -1106,6 +1108,41 @@ function vectorControls() {
     select = document.querySelector("[data-key=embedding_model]");
   if (toggle && select) select.disabled = !toggle.checked;
 }
+// v2.18.15：压缩分批模式是**二选一**的 ✓ 与其让用户对着两套参数发懵 ✗
+// 不如只显示当前模式真正生效的那几个 ✓（切换即时生效 ✓）
+const BATCH_MODE_FIELDS = {
+  rounds: ["compress_rounds"],
+  records: ["threshold", "batch_size"],
+};
+const BATCH_MODE_HINT = {
+  rounds: "按轮压缩：攒够 N 个完整轮才动手，绝不切半轮。阈值/每批条数只在「按条」模式生效。",
+  records: "按条压缩：攒够阈值条数就动手（仍会把最后那一轮收尾完整）。轮数只在「按轮」模式生效。",
+};
+function applyBatchMode() {
+  const mode = document.querySelector('[data-key="compress_batch_mode"]');
+  if (!mode) return;
+  const current = mode.value;
+  // 每个字段: 属于当前模式 → 显示；属于另一种模式 → 收起 ✓
+  Object.entries(BATCH_MODE_FIELDS).forEach(([name, keys]) => {
+    keys.forEach((key) => {
+      const el = document.querySelector('[data-field="' + key + '"]');
+      if (el) el.hidden = name !== current;
+    });
+  });
+  // 只显示当前模式真正生效的参数 ✓ 并给一句说明 ✓
+  let hint = document.querySelector("#configForm .batch-mode-hint");
+  if (current === "rounds" || current === "records") {
+    const select = mode.closest("label");
+    if (!hint && select) {
+      hint = document.createElement("p");
+      hint.className = "batch-mode-hint muted";
+      select.insertAdjacentElement("afterend", hint);
+    }
+    if (hint) hint.textContent = BATCH_MODE_HINT[current];
+  } else if (hint) {
+    hint.remove();
+  }
+}
 function renderConfig(values) {
   $("#configForm").innerHTML = Object.entries(config.schema.properties)
     .map(([key, p]) => {
@@ -1167,6 +1204,8 @@ function renderConfig(values) {
                     global: "全局 · 跨用户跨会话",
                     linked: "同参与者 · 关联会话",
                     session: "当前会话",
+                    rounds: "按轮 · 攒够完整轮才压缩",
+                    records: "按条 · 攒够阈值条数就压缩",
                   }[v] || v,
                 ) +
                 "</option>",
@@ -1206,6 +1245,7 @@ function renderConfig(values) {
       return (
         '<label class="field ' +
         (wide ? "wide" : "") +
+        '" data-field="' + esc(key) +
         '"><span>' +
         esc(config.labels?.[key] || fields[key] || key) +
         (restorable
@@ -1219,10 +1259,12 @@ function renderConfig(values) {
       );
     })
     .join("");
+  applyBatchMode();   // v2.18.15：按当前模式收起另一套参数 ✓
   $$("#configForm [data-key]").forEach(
     (e) =>
       (e.oninput = () => {
         vectorControls();
+        applyBatchMode();   // 切换模式时立刻收/放 ✓ 不用刷新 ✓
         configDirty = true;
         $("#dirty").textContent = "有未保存的修改";
         saveDraft();
