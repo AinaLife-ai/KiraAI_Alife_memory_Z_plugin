@@ -414,6 +414,28 @@ def permanent_clusters(rows, threshold, size=5, cross_threshold=0.0):
     return [group[:size] for group in groups.values() if len(group) > 1]
 
 
+# v2.18.19（B）：每会话「降门槛抽干」的冷却 ✓（引擎内存 ✓ 重启即空 ✓ 无害 ✓）
+# 目的：陈旧/闲置会话一次只抽一批 ✓ 冷却期内不再抽 ✓ 防连续抽干烧 token ✓
+# ⚠️ 这里是**模块级** ✓ 不需要 `self` ✓（引擎只有一个实例 ✓ 会话用 sid 区分 ✓）
+_BOOST_AT: dict = {}
+
+
+def _boost_ok(sid, cfg, now=None):
+    """现在允许对这个会话做一次「降门槛」吗 ✓（并顺手打上冷却时间戳 ✓）
+
+    返回 False 时 `compression_plan` 会退回**正常门槛** ✓ —— 也就是"这次先不抽" ✓
+    """
+    now = now or time.time()
+    cooldown = int(getattr(cfg, "compress_idle_cooldown_min", 30) or 0) * 60
+    last = _BOOST_AT.get(sid)
+    # ⚠️ 用 `None` 表示"从没抽过" ✗ —— 不能用 0.0 ✓
+    #    （时间戳小于冷却秒数时会被误判成"冷却中" ✗ 单测里就撞到过 ✓）
+    if cooldown and last is not None and now - last < cooldown:
+        return False
+    _BOOST_AT[sid] = now
+    return True
+
+
 def _round_end(rows, start, cap):
     """[start, end) —— 从 start 起把「同一轮」走完，并说明是否碰到**真正的轮边界** ✓
 
@@ -764,7 +786,11 @@ class Engine:
             if not cfg.enabled:
                 return steps
             rows = await self.store.call("active", sid)
-            plan = compression_plan(rows, cfg)
+            _now = time.time()
+            plan = compression_plan(
+                rows, cfg, now=_now,
+                boost_allowed=_boost_ok(sid, cfg, _now),
+            )
             if plan is None:
                 return steps
             candidates, level = plan
@@ -1943,7 +1969,8 @@ class Engine:
                 for sid in await self.store.call("sessions"):
                     if random.random() < cfg.probability:
                         rows = await self.store.call("active", sid)
-                        if compression_plan(rows, cfg):
+                        if compression_plan(rows, cfg, now=time.time(),
+                                 boost_allowed=_boost_ok(sid, cfg)):
                             await self.enqueue("compress", sid, automatic=True)
             if cfg.audit_enabled and now - self.last_audit >= cfg.audit_interval:
                 self.last_audit = now
