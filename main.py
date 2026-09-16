@@ -592,6 +592,14 @@ class AlifeMemoryPlugin(BasePlugin):
             len(values),
             cfg.fact_recall_min_score,
         )
+        # v2.18.14：这条注入路径同样要过**媒体闸** ✓
+        # 图片/表情/引用壳-only 的事实不许进提示词 ✓（事实池此前没有这道过滤 ✗）
+        names = await self.store.call("known_names")
+        values = [
+            row
+            for row in values
+            if not media_only(str(row.get("content") or row.get("summary") or ""), names)
+        ]
         return values
 
     async def model_call(self, model, purpose, instruction, schema, payload):
@@ -853,11 +861,16 @@ class AlifeMemoryPlugin(BasePlugin):
             return list(state["rows"])  # 继续留：同一批再摆一轮
         seen = self.seen_window.get(seen_key)
         banned = set(seen.get("ids") or [])
+        # v2.18.15：这里是**最后一道闸** ✓ 无论池子从哪来（档案 ✓ 事实 ✗）
+        # 图片/表情-only 的文本都不许注入 ✓
+        # （用户实测：轮换槽位漏进过 `[Image 这张图片展示的…]` ✗ 事实池此前没有这道过滤 ✓）
+        names = await self.store.call("known_names")
         candidates = [
             row
             for row in pool
             if row.get("id") and row["id"] not in banned
             and state["cooldown"].get(row["id"], 0) <= 0
+            and not media_only(text_of(row), names)
         ]
         if not candidates:  # 池子空了：这轮留空（但不改 next，下一轮还要再试）
             state.update({"rows": [], "texts": {}, "ids": [], "rounds": 0})
@@ -892,7 +905,8 @@ class AlifeMemoryPlugin(BasePlugin):
         self.seen_window.remember(seen_key, "", [row["id"] for row in chosen])
         await self.store.call("mark_rotation", [row["id"] for row in chosen], [])
         logger.info(
-            "[记忆·Z] 轮换槽位：注入 %s 条（%s）",
+            "[记忆·Z] 轮换槽位(%s)：注入 %s 条（%s）",
+            kind,
             len(chosen),
             "、".join(self.model_text(row.get("summary") or row.get("content") or "", ())[:14]
                       for row in chosen),
