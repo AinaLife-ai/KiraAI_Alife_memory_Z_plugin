@@ -70,6 +70,7 @@ from .config_migrate import migrate as migrate_config
 PLUGIN_ID = "alife_memory_z"
 
 from .retrieval import media_only   # v2.18.12：媒体判定统一放 retrieval ✓
+from .retrieval import _MEDIA_HEAD as _MEDIA_HEAD_PAT   # v2.18.18 绊线用同一份判据 ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
 _GROUPED_FACT_DOC = (
     "facts 按主体分组：键是主体短码（见 names），组内每行 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?]，"
@@ -910,6 +911,15 @@ class AlifeMemoryPlugin(BasePlugin):
         # 进 seen：下一轮它们就不再算"没给过"，也不会被当成主召回的重复项
         self.seen_window.remember(seen_key, "", [row["id"] for row in chosen])
         await self.store.call("mark_rotation", [row["id"] for row in chosen], [])
+        # v2.18.18 绊线 ✓：真出现"以媒体标记开头"的文本被注入 ✗ 就打完整文本 ✓
+        # （日志里只显示 14 字 ✗ 上次就是因为看不出结尾才排查困难 ✓）
+        for row in chosen:
+            text = self.model_text(row.get("summary") or row.get("content") or "", ())
+            if _MEDIA_HEAD_PAT.match(text or ""):
+                logger.warning(
+                    "[记忆·Z] ⚠️ 轮换槽位(%s) 漏进媒体文本（判据又被绕过了 ✗ 请报给作者）：%r",
+                    kind, (text or "")[:300],
+                )
         logger.info(
             "[记忆·Z] 轮换槽位(%s)：注入 %s 条（%s）",
             kind,

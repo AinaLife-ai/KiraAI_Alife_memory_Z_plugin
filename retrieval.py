@@ -511,7 +511,18 @@ def _scan_bracket(text, start):
 
 
 _REPLY_HEAD = re.compile(r"\[Reply ID:\s*(\d+)\s*content:\s*")
-_MEDIA_HEAD = re.compile(r"\[(Sticker|Image)\s+")
+# v2.18.18：**媒体占位符开头**就算媒体 ✓
+# ⚠️ 注意它**本来就不要求闭合的 ]** ✓ —— 用户日志里漏掉的那条
+# `[Image 这张图片展示了…`（描述被截断/省略号收尾 ✗）正是靠这一点被接住的 ✓
+# ⚠️ 词表要覆盖**宿主与插件双方**产生的形态 ✓（宿主：`[Image …]`/`[Sticker …]` ✓）
+# 且**不能**包含 `Reply` ✗ —— 引用壳后面可能跟着真话 ✓（`[Reply x] 你好呀`）
+# 词表只写一处 ✓ 两个正则都从它生成 ✗ 免得漂移 ✓
+_MEDIA_WORDS = (
+    r"Sticker|Image|图片|贴纸|表情|语音|视频|文件|图文|"
+    r"voice|video|file|photo|image|face"
+)
+_MEDIA_HEAD = re.compile(r"\[(" + _MEDIA_WORDS + r")\s+", re.I)          # 显示裁剪用（要捕获组 ✓）
+_MEDIA_HEAD_ANY = re.compile(r"^\s*\[(?:" + _MEDIA_WORDS + r")(?:\s|\])", re.I)   # 判据用（不要求空格/闭合 ✓）
 
 
 def _clip(text, limit):
@@ -993,7 +1004,12 @@ def media_only(content, names=()):
       · 否则 → 那是**正文** ✓（例如 `@他就好了` ✓ 绝不能被吃掉 ✓）
     结构化壳（[Reply]/[CQ:at]/<at>）与媒体块不依赖名字表 ✓ 空表也成立 ✓
     """
-    text = _ENVELOPE.sub(" ", content or "")
+    raw = content or ""
+    # ① 以**媒体占位符**开头的（含描述被截断、没有闭合括号的 ✗）直接判为媒体 ✓
+    #    注意**不包含**引用壳 ✓ 所以 `[Reply x] 你好呀` 不会被误杀 ✓
+    if _MEDIA_HEAD_ANY.match(raw):
+        return True
+    text = _ENVELOPE.sub(" ", raw)
     text = _MEDIA_BLOCK.sub(" ", text)
     kept = []
     for part in text.split():
