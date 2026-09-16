@@ -340,6 +340,17 @@ class Settings(Strict):
     # v2.18.9：只有表情/图片的消息默认不进召回 ✓（数据仍保留 ✓ 关掉即可召回）
     recall_skip_media: bool = True
     cold_after_days: int = Field(default=180, ge=0, le=3650)
+    # v2.18.19（B）：压缩推进的三个新旋钮 ✓
+    # ① 一批喂给压缩模型的**原文总量上限** ✗（`record_merge_max_chars` 管的是**输出** ✓ 不是输入 ✗）
+    #    实测：输入原本**没有总量上限** ✗ → 几千条迁移数据会直接 token 爆炸 ✓
+    compress_input_max_chars: int = Field(default=20000, ge=1000, le=200000)
+    # ② **陈旧**触发：最老的未压缩记录超过这么多天 → 轮数/条数门槛一律降为 1 ✓
+    #    专治存量迁移数据（会话还在活跃 ✓ 永远不空闲 ✗ 靠 ② 才排得上 ✓）
+    compress_stale_after_days: int = Field(default=3, ge=0, le=365)
+    # ③ **空闲**触发：该会话最新记录超过这么多小时 → 门槛降为 1 ✓（对话已经结束了 ✓）
+    compress_idle_after_hours: int = Field(default=6, ge=0, le=720)
+    # ④ 每会话**冷却**：两次"降门槛抽干"之间至少隔这么多分钟 ✓（防连续抽干烧 token ✓）
+    compress_idle_cooldown_min: int = Field(default=30, ge=0, le=1440)
     fact_merge_enabled: bool = True
     fact_merge_threshold: float = Field(default=0.25, ge=0.1, le=0.95)
     fact_merge_soft_chars: int = Field(default=80, ge=10, le=2000)

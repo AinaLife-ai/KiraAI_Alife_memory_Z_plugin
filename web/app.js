@@ -22,6 +22,10 @@ const fields = {
   inject_recent_raw: "注入最近原文",
   capture_enabled: "记录对话与感知",
   auto_inject: "持续上下文与感知注入",
+  compress_input_max_chars: "每批压缩的原文上限（字符）",
+  compress_stale_after_days: "陈旧记忆几天后开始消化",
+  compress_idle_after_hours: "会话闲置几小时后收尾",
+  compress_idle_cooldown_min: "收尾压缩的冷却（分钟）",
   compress_batch_mode: "压缩分批模式",
   compress_rounds: "每批压缩轮数",
   threshold: "首层压缩阈值",
@@ -667,7 +671,7 @@ async function loadArchives() {
             (r.cold
               ? "冷归档 · 仅按ID可读"
               : r.active
-                ? "活跃记忆（可召回）"
+                ? "活跃记忆"
                 : "历史存档") +
             '</small><button data-open="' +
             esc(r.id) +
