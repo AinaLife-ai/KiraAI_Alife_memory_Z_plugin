@@ -6,7 +6,6 @@ import contextlib
 import hashlib
 import json
 import random
-import re
 import time
 from pathlib import Path
 
@@ -70,9 +69,7 @@ from .config_migrate import migrate as migrate_config
 
 PLUGIN_ID = "alife_memory_z"
 
-# v2.18.9：只有表情/图片的消息（剥掉标记后没有别的字）→ 记为 media ✓
-# 数据保留 ✓ 但默认不进召回 ✗（视觉描述平均 276 字符，白占上下文）
-_MEDIA_ONLY = re.compile(r"^(?:\[(?:表情|图片)[^\]]*\]\s*)+$")
+from .retrieval import media_only   # v2.18.12：媒体判定统一放 retrieval ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
 _GROUPED_FACT_DOC = (
     "facts 按主体分组：键是主体短码（见 names），组内每行 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?]，"
@@ -1843,7 +1840,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 # 这条是谁说的（实体 id）：群聊里模型必须能分清谁说了哪句
                 "speaker": speaker_of(message),
             }
-            if _MEDIA_ONLY.fullmatch(content.strip()):
+            if media_only(content):
                 entry["category"] = "media"
             incoming.append(entry)
         if incoming:

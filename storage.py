@@ -2409,6 +2409,18 @@ class Store:
                 (fact["id"],),
             )
 
+    @staticmethod
+    def _drop_media_only(items):
+        """v2.18.12：把"只有引用壳/媒体、没有实质文字"的记录也滤掉 ✓
+
+        `category="media"` 只管**新写入**的记录 ✗ 这里兜住两件事：
+        ① **存量**记录（升级前就存进去的贴纸/图片描述 ✓ 日志实测过 ✓）
+        ② 套着 `[Reply …]` / `↩N` 壳的媒体 ✓（旧判定漏掉的正是这种 ✓）
+        """
+        from .retrieval import media_only
+
+        return [r for r in items if not media_only(str(r.get("content") or ""))]
+
     def search(
         self,
         sid="",
@@ -2549,7 +2561,8 @@ class Store:
             if vector and lexical:
                 return {
                     "total": total,
-                    "items": self._fused_rows(
+                    "items": (
+                        self._drop_media_only(self._fused_rows(
                         db,
                         where,
                         args,
@@ -2562,6 +2575,22 @@ class Store:
                         offset,
                         prefer_sid,
                         prefer_users,
+                    ))
+                        if skip_media
+                        else self._fused_rows(
+                        db,
+                        where,
+                        args,
+                        tier_sql,
+                        tier_args,
+                        vector,
+                        model,
+                        lexical,
+                        limit,
+                        offset,
+                        prefer_sid,
+                        prefer_users,
+                    )
                     ),
                 }
             if vector:
@@ -2594,7 +2623,11 @@ class Store:
                     ),
                     [*args, *tier_args, limit, offset],
                 )
-            return {"total": total, "items": [self.row(r) for r in rows]}
+            items = [self.row(r) for r in rows]
+            if skip_media:
+                # 兜住存量与"套了引用壳的媒体" ✓（开关关掉则照常返回 ✓）
+                items = self._drop_media_only(items)
+            return {"total": total, "items": items}
 
     def _fused_rows(
         self, db, where, args, tier_sql, tier_args, vector, model,
