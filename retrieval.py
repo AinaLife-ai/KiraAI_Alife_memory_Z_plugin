@@ -996,6 +996,37 @@ _MEDIA_BLOCK = re.compile(
 )
 
 
+# v2.18.19：**召回侧**的短化 ✓ —— 与发给压缩模型的 `model_text` **分开** ✗
+#  · 压缩模型要描述（那是压缩的原料 ✓ 删了就永远提取不出图片相关事实 ✗）
+#  · 主模型不要视觉细节 ✗ ⇒ 图片/贴纸一律转占位 `[Image]` ✓
+#  · 没有 content 的"纯引用壳"（`[Reply ID: -71，[Sticker …]` / `[Reply -208950819]`）
+#    是真·噪声 ✗（既看不到原消息 ✓ 又占字符 ✗）⇒ 转 `[Reply]` ✓
+# 一个正则覆盖**两种**引用壳 ✓ 免得"带 content 的那支"漏下孤立的 `]` ✗（实测踩过 ✓）
+_REPLY_SHELL = re.compile(
+    r"\[Reply(?:\s+ID)?[:\s,，]*\s*-?\d+\s*(?:content:\s*([^\]]*))?[,，]?\s*\]",
+    re.I,
+)
+_MEDIA_INLINE = re.compile(r"\[(?:" + _MEDIA_WORDS + r")[^\]]*\]", re.I)
+
+
+def recall_text(text, limit=0):
+    """把一条记忆短化成**给主模型看**的样子 ✓（壳与媒体转占位 ✓）
+
+    ⚠️ 压缩侧**不要**用它 ✗ —— 那边必须保留描述 ✓（见 `model_text` ✓）
+    """
+    def _keep_inner(m):
+        inner = (m.group(1) or "").strip()
+        # 带 content 的（能显示原消息 ✓）→ 保留原文 ✓；只有 id 的（看不到原消息 ✗）→ 只有占位 ✓
+        return " [Reply] " + inner + " " if inner else " [Reply] "
+
+    out = _REPLY_SHELL.sub(_keep_inner, str(text or ""))
+    out = _MEDIA_INLINE.sub(" [Image] ", out)        # 媒体描述 → 占位 ✓
+    out = re.sub(r"\s+", " ", out).strip()
+    if limit and len(out) > limit:
+        return out[:limit].rstrip() + "…"
+    return out
+
+
 def is_tool_step(row):
     """是不是"工具步"记录 ✓（capture 时打了 `category='tool'` ✓）
 
