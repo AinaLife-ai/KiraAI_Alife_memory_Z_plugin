@@ -71,7 +71,7 @@ const fields = {
   record_merge_reason_chars: "永久记忆合并理由（硬上限）",
   record_merge_prompt: "永久记忆合并提示词",
   profile_summary_count: "画像摘要条数",
-  search_active_only: "检索默认只搜常驻",
+  search_active_only: "检索默认只搜活跃记忆",
   cold_after_days: "归档转入冷归档天数",
 };
 let ctx = null,
@@ -541,7 +541,7 @@ async function poll() {
               Math.max(3, (100 * l.count) / max) +
               '%"></i></div><small>' +
               l.active +
-              " 常驻 / " +
+              " 活跃记忆 / " +
               l.count +
               "</small></div>",
           )
@@ -613,11 +613,27 @@ async function selectTab(name) {
   if (name === "settings" && !configDirty) await loadConfig();
   saveDraft();
 }
+// v2.18.19：给档案浏览加一个"显示工具步"开关 ✓（默认关 ✓）
+// bot 主被动召回**永远**看不到工具步 ✗ —— 这里只是让**你**能翻出来看 ✓
+function ensureToolToggle() {
+  if (document.querySelector("#includeTools")) return;
+  const anchor = document.querySelector("#includeGlobal");
+  const box = anchor && anchor.closest("label");
+  if (!box) return;
+  const wrap = document.createElement("label");
+  wrap.className = box.className;
+  wrap.innerHTML =
+    '<input type="checkbox" id="includeTools"> <span>显示工具步</span>';
+  box.insertAdjacentElement("afterend", wrap);
+  wrap.querySelector("input").addEventListener("change", () => loadArchives());
+}
 async function loadArchives() {
+  ensureToolToggle();
   const selectedSid = $("#session").value;
   const q = {
     sid: selectedSid,
     include_global: $("#includeGlobal").checked,
+    include_tools: !!(document.querySelector("#includeTools") || {}).checked,
     keyword: $("#keyword").value,
     prompt: $("#semantic").value,
     offset,
@@ -651,7 +667,7 @@ async function loadArchives() {
             (r.cold
               ? "冷归档 · 仅按ID可读"
               : r.active
-                ? "常驻上下文"
+                ? "活跃记忆（可召回）"
                 : "历史存档") +
             '</small><button data-open="' +
             esc(r.id) +
@@ -927,7 +943,7 @@ function renderRecord() {
     (e) => (e.onclick = () => guard(() => openRecord(e.dataset.child))),
   );
   $("#forget").classList.toggle("hide", !r.permanent);
-  $("#forget").textContent = r.active ? "移出常驻上下文" : "恢复到常驻上下文";
+  $("#forget").textContent = r.active ? "移出活跃记忆" : "恢复到活跃记忆";
   $("#delete").classList.remove("hide");
 }
 async function openFact(row) {

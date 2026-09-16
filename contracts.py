@@ -415,6 +415,9 @@ class Search(Strict):
     sid: str = ""
     # The admin UI browses one session at a time; global memories are opt-in there.
     include_global: bool = True
+    # v2.18.19：浏览档案时是否显示**工具步** ✗（默认不显示 ✓）
+    # bot 主被动召回**永远**看不到工具步 ✓（那边是硬过滤 ✓ 与这个开关无关 ✓）
+    include_tools: bool = False
     keyword: str = Field(default="", max_length=500)
     prompt: str = Field(default="", max_length=2000)
     level: int | None = Field(default=None, ge=0, le=100)
