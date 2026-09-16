@@ -1,9 +1,12 @@
 """v2.18.12：媒体判定的正确口径 —— 用户日志里的真实形态逐条钉死。"""
 import importlib
+import os
 import sys
 import tempfile
 import types
 import unittest
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,3 +99,71 @@ class LegacyFilterCase(unittest.TestCase):
         st = self._legacy(self._store(), REAL[1])           # 「晚上吃什么」✓
         self.assertEqual(len(st.search("qq:dm:1", limit=10)["items"]), 1,
                          "有真实文字的一条都不许误伤 ✓")
+
+
+def _main_module():
+    """加载插件主体（需要 KIRA_CORE 指向宿主持有目录 ✓ 否则跳过 ✓）"""
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("set KIRA_CORE for host integration")
+    core = Path(os.environ["KIRA_CORE"]).resolve()
+    if str(core) not in sys.path:
+        sys.path.insert(0, str(core))
+    return importlib.import_module("alife_media_test.main")
+
+
+class RotationGateTest(unittest.TestCase):
+    """轮换槽位的**最后一道闸**：图片/表情-only 的文本不许被注入 ✓
+
+    线上实测（用户日志）：轮换槽位漏进过 `[Image 这张图片展示的…]` ✗
+    档案池走 search（已过滤 ✓）但**事实池此前没有这道过滤** ✗
+    ⇒ 因此闸门放在**注入点** ✓ 无论池子从哪来都拦得住 ✓
+    """
+
+    def test_media_rows_never_enter_rotation(self):
+        import asyncio
+        import tempfile
+        import types as _types
+        from pathlib import Path as _P
+
+        main = _main_module()
+
+        tmp = tempfile.TemporaryDirectory()
+        store = storage.Store(_P(tmp.name) / "m.db")
+        store.initialize()
+
+        # ⚠️ 必须是**对象**（带 get 方法）✗ 用 dict 的话 seen_window.get(key) 只会取到键 ✓
+        # 返回 None → 下一行 seen.get("ids") 就炸 ✓（实测踩过 ✓）
+        seen = _types.SimpleNamespace(
+            get=lambda key: {},
+            remember=lambda *a, **k: None,
+        )
+        stub = _types.SimpleNamespace(
+            store=store,
+            rotation={},
+            seen_window=seen,
+            model_text=lambda text, *a: text or "",
+        )
+        # 用**真的** rotation_state ✓ 免得自己的桩漏键（漏了 seen 就 None.get ✓ 实测踩过 ✓）
+        stub.rotation_state = _types.MethodType(
+            main.AlifeMemoryPlugin.rotation_state, stub
+        )
+        cfg = _types.SimpleNamespace(
+            rotate_enabled=True, rotate_count=3, rotate_min_hits=0,
+            fact_recall_min_score=0.0, rotate_cooldown_rounds=0,
+        )
+        pool = [
+            {"id": "m1", "content": "[Image 这张图片展示的是一个3D模型编辑器]"},
+            {"id": "m2", "content": "[Sticker 动漫风格的少女]"},
+            {"id": "m3", "content": "[图片 一只橘猫]"},
+            {"id": "n1", "content": "她喜欢在晚上写代码"},
+        ]
+        text_of = lambda row: row.get("content") or row.get("summary") or ""
+        got = asyncio.run(
+            main.AlifeMemoryPlugin.rotation_extras(stub, "qq:gm:1", cfg, pool, "k1", text_of, "fact")
+        )
+        ids = {row.get("id") for row in got}
+        self.assertNotIn("m1", ids, "图片描述不许进轮换 ✓")
+        self.assertNotIn("m2", ids, "贴纸描述不许进轮换 ✓")
+        self.assertNotIn("m3", ids, "图片描述不许进轮换 ✓")
+        self.assertIn("n1", ids, "正常内容必须照常轮换 ✓")
+        tmp.cleanup()
