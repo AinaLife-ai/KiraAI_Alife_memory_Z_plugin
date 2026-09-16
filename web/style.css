@@ -1677,3 +1677,16 @@ button.primary:hover::after {
     display: none !important;
   }
 }
+
+/* v2.18.12：配置版本冲突的常驻提示条（含两条出路按钮）*/
+.conflict {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #d08a2e;
+  border-radius: 6px;
+  background: rgba(208, 138, 46, 0.08);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.conflict .actions { margin-top: 8px; display: flex; gap: 8px; }

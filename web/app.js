@@ -134,10 +134,16 @@ async function api(path, body) {
     },
   );
   if (!r.ok) {
-    if (r.status === 409)
-      throw Error(
-        "内容已被其他操作修改。当前草稿已保留，请重新打开最新版本后再保存。",
+    if (r.status === 409) {
+      // v2.18.12：文案把"发生了什么 / 你的输入还在 / 两条出路"讲清楚 ✓
+      // （旧文案说"重新打开最新版本后再保存" ✗ 照做仍会冲突 ✗ → 是错误指引 ✓）
+      const err = Error(
+        "设置已在别处被改过（另一个页面保存过，或插件重载过）。" +
+          "你这边有未保存的修改，为避免覆盖那边的改动，我没有保存 —— 你的输入没有丢。",
       );
+      err.status = 409;
+      throw err;
+    }
     const detail = await r.json().catch(() => ({}));
     throw Error(
       r.status === 422
@@ -1655,18 +1661,48 @@ $("#confirmDelete").onclick = () =>
       b.disabled = false;
     }
   });
+async function saveConfigNow() {
+  const result = await api("/config", {
+    revision: config.revision,
+    settings: readConfig(),
+  });
+  config.revision = result.revision;
+  config.settings = readConfig();
+  configDirty = false;
+  $("#conflict").classList.add("hide");
+  $("#dirty").textContent = "已保存，配置立即生效";
+  saveDraft();
+  toast("配置已生效");
+}
+
 $("#saveConfig").onclick = () =>
   guard(async () => {
-    const result = await api("/config", {
-      revision: config.revision,
-      settings: readConfig(),
-    });
-    config.revision = result.revision;
-    config.settings = readConfig();
-    configDirty = false;
-    $("#dirty").textContent = "已保存，配置立即生效";
-    saveDraft();
-    toast("配置已生效");
+    try {
+      await saveConfigNow();
+    } catch (e) {
+      // v2.18.12：版本冲突**不当错误弹窗** ✓ 改为常驻条 + 两条真正可行的出路 ✓
+      // （旧文案让人"重新打开最新版本再保存" ✗ 但刷新后草稿会带回旧版本号 →
+      //   再点保存**仍然冲突** ✗ 是一句错误指引 ✓）
+      if (e.status !== 409) throw e;
+      $("#conflict").classList.remove("hide");
+      $("#dirty").textContent = "未保存：设置已在别处被改过";
+    }
+  });
+
+// 出路一：用我的修改覆盖 —— 只借服务端**最新**的 revision ✓ 表单内容仍是你的 ✓
+$("#conflictOverwrite").onclick = () =>
+  guard(async () => {
+    const fresh = await api("/config");
+    config.revision = fresh.revision;
+    await saveConfigNow();
+  });
+
+// 出路二：丢弃我的修改，载入最新（loadConfig 会重拉、重渲染并清掉草稿 ✓）
+$("#conflictDiscard").onclick = () =>
+  guard(async () => {
+    await loadConfig();
+    $("#conflict").classList.add("hide");
+    toast("已载入最新设置");
   });
 $$("[data-job]").forEach(
   (e) =>

@@ -180,3 +180,27 @@ def test_recall_usage_is_rendered():
     assert 'const recallEl = $("#recallTag")' in js, "必须直接更新 HTML 里已有的标签 ✗"
     main_src = (WEB.parent / "main.py").read_text(encoding="utf-8")
     assert 'status["recall_usage"]' in main_src, "后端必须真的提供该字段"
+
+
+def test_config_conflict_ui():
+    """版本冲突（409）必须给出**说得清 + 走得出**的提示 ✗
+
+    旧文案让人"重新打开最新版本后再保存" ✓ 但刷新会带回旧版本号 ✗
+    → 再点保存**仍然冲突** ✓ 是一句错误指引 ✓（用户只会更懵）
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    # 不再出现那句走不通的指引 ✗
+    assert "请重新打开最新版本后再保存" not in js, "旧的错误指引必须删掉 ✗"
+    assert "err.status = 409" in js, "409 要带上状态码，供上层分辨 ✓"
+    # 三句话要说清：发生了什么 / 你的输入还在 / 两条出路 ✓
+    assert "设置已在别处被改过" in js
+    assert "你的输入没有丢" in js
+    # 常驻条与两个按钮（写在 HTML 里 ✓ 可见即可操作 ✓）
+    for el in ('id="conflict"', 'id="conflictOverwrite"', 'id="conflictDiscard"'):
+        assert el in html, el
+    assert '$("#conflictOverwrite").onclick' in js
+    assert '$("#conflictDiscard").onclick' in js
+    # 两条出路都要**真的能用** ✓
+    assert "config.revision = fresh.revision" in js, "覆盖=借最新版本号，不能直接放弃 ✓"
+    assert "await loadConfig()" in js, "丢弃=重新载入并渲染 ✓"

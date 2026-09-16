@@ -334,6 +334,15 @@
             保存后立即生效，无需重启。正在执行的旧配置压缩结果会放弃提交，等待下次整理。
           </div>
           <div class="panel"><div class="form-grid" id="configForm"></div></div>
+          <div class="conflict hide" id="conflict">
+            <b>设置已在别处被改过</b>（另一个页面保存过，或插件重载过）。
+            你这边有未保存的修改，为避免覆盖那边的改动，我没有直接保存 ——
+            <b>你的输入没有丢</b>。
+            <div class="actions">
+              <button id="conflictOverwrite">用我的修改覆盖</button
+              ><button id="conflictDiscard">丢弃我的修改，载入最新</button>
+            </div>
+          </div>
           <div class="savebar">
             <small id="dirty">配置已同步</small>
             <div class="actions">
