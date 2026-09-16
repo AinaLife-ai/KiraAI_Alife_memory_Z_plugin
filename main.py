@@ -89,7 +89,7 @@ MEMORY_RULES = (
     "needs_review 只是待核对描述。\n"
     + _GROUPED_FACT_DOC
     + "sp=存档里「这句谁说的」；names 是「账号/群号 → 名称」。\n"
-    "要精确到分钟或核对原话：把存档短码 a 当 id 交给 SearchMemoryArchive 读原文"
+    "要精确到分钟或核对原话：用 SearchMemoryArchive(expand=[序号]) 展开刚看到的那份清单"
     "（原文自带时间戳与发言人）。\n"
     "摘要不是回答模板；用户追问还有别的时用 SearchMemoryArchive(next_batch=true)，"
     "没找到就坦诚说明，不反复复述或编造。永久记忆只放「必须每轮在场」的约束与身份，"
@@ -268,6 +268,9 @@ class AlifeMemoryPlugin(BasePlugin):
         self._prewarm_seen = {}
         # 轮换槽位：每个会话一批「相关但还没召回过的」记忆（v2.15.0）
         self.rotation = {}
+        # v2.18.19：**最近一次清单**的序号表 ✓（每会话一份 ✓ 每次召回重建 ✓）
+        # 只在内存 ✓ 重启即空 ✓（过期/未知序号一律拒绝并请模型重新检索 ✓）
+        self._recall_ordinals = {}
         self._bootstrap_review_logged = False
         self.bootstrap_review = {}
 
@@ -1723,6 +1726,12 @@ class AlifeMemoryPlugin(BasePlugin):
             else:
                 omitted.append(row["id"])
         selected = [chosen[r["id"]] for r in rows if r["id"] in chosen]
+        # v2.18.19：记下**这一次的清单顺序** ✓（序号 → 真实 id ✓ 只留最新一份 ✓）
+        # ⚠️ 每次召回都重建 ✗ 不保留旧清单 ✓ —— 免得模型引用上一份的序号而改错记忆 ✓
+        self._recall_ordinals[event.sid] = (
+            time.time(),
+            [r["id"] for r in rows if r["id"] in chosen],
+        )
         if getattr(self.settings, "fact_view", FACT_VIEW_GROUPED) == FACT_VIEW_GROUPED:
             _perm, _recent = [], []
             for _row in selected:
@@ -2098,6 +2107,16 @@ class AlifeMemoryPlugin(BasePlugin):
                     "type": "boolean",
                     "description": "允许重复返回本会话已给过的记忆；默认只给新情报",
                 },
+                "expand": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "maxItems": 20,
+                    "description": (
+                        "用**序号**展开刚看到的那份清单里的第 n 条（读它的原文/子记录）✓ "
+                        "序号只对**最近一次清单**有效 ✗ 过期或超范围会被拒绝 ✓ "
+                        "想核对原话、或想精确到分钟时用它 ✓"
+                    ),
+                }
             },
             "additionalProperties": False,
         },
@@ -2118,9 +2137,41 @@ class AlifeMemoryPlugin(BasePlugin):
         allow_seen=False,
         ids=None,
         include_content=False,
+        expand=None,
     ):
+        """v2.18.19：新增 `expand` ✓ —— 用**序号**展开刚看到的那份清单里的第 n 条 ✓
+
+        用户决策：清单里**不再发任何短码** ✗ 改用 `序号` ✓
+        序号只对**最近一次清单**有效 ✓（每次召回都重建 ✓ 只留一份 ✓）
+        过期/未知 → **拒绝** ✓ 并请模型重新检索 ✓（宁可不做 ✓ 也不能改错 ✓）
+        """
         if not self.runtime_settings().enabled:
             return self.recall_result(event, {"ok": False, "error": "memory_paused"})
+        if expand:
+            # v2.18.19：序号 → 真实 id ✓（只用**最近一次清单** ✓ 过期即拒绝 ✓）
+            holder = self._recall_ordinals.get(event.sid)
+            if not holder:
+                return self.recall_result(event, {
+                    "ok": False, "error": "no_recent_list",
+                    "hint": "还没有可展开的清单，请先检索一次，再用 expand=[序号]",
+                })
+            listed_at, order = holder
+            if time.time() - listed_at > 300:
+                self._recall_ordinals.pop(event.sid, None)
+                return self.recall_result(event, {
+                    "ok": False, "error": "list_expired",
+                    "hint": "上次的清单已过期（>5 分钟），请重新检索后再展开",
+                })
+            picked = []
+            for n in expand:
+                if not isinstance(n, int) or n < 1 or n > len(order):
+                    return self.recall_result(event, {
+                        "ok": False, "error": "bad_ordinal", "given": n,
+                        "range": [1, len(order)],
+                        "hint": "序号超出最近一次清单的范围，请重新检索",
+                    })
+                picked.append(order[n - 1])
+            ids = picked
         try:
             if (
                 type(next_batch) is not bool
