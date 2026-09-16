@@ -592,6 +592,14 @@ class AlifeMemoryPlugin(BasePlugin):
             len(values),
             cfg.fact_recall_min_score,
         )
+        # v2.18.14：这条注入路径同样要过**媒体闸** ✓
+        # 图片/表情/引用壳-only 的事实不许进提示词 ✓（事实池此前没有这道过滤 ✗）
+        names = await self.store.call("known_names")
+        values = [
+            row
+            for row in values
+            if not media_only(str(row.get("content") or row.get("summary") or ""), names)
+        ]
         return values
 
     async def model_call(self, model, purpose, instruction, schema, payload):

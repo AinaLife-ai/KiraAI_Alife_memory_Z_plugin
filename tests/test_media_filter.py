@@ -148,13 +148,31 @@ class RotationGateTest(unittest.TestCase):
             main.AlifeMemoryPlugin.rotation_state, stub
         )
         cfg = _types.SimpleNamespace(
-            rotate_enabled=True, rotate_count=3, rotate_min_hits=0,
+            rotate_enabled=True, rotate_count=50, rotate_min_hits=0,
             fact_recall_min_score=0.0, rotate_cooldown_rounds=0,
         )
+        with store.connect() as db:
+            db.execute(
+                "INSERT INTO entities (id, kind, name, updated)"
+                " VALUES ('qq:7', 'user', '某位朋友', 0.0)"
+            )
         pool = [
             {"id": "m1", "content": "[Image 这张图片展示的是一个3D模型编辑器]"},
             {"id": "m2", "content": "[Sticker 动漫风格的少女]"},
             {"id": "m3", "content": "[图片 一只橘猫]"},
+            # 引用壳 ✓（用户问的 reply ✓）
+            {"id": "r1", "content": "[Reply 1478539]"},
+            {"id": "r2", "content": "↩7"},
+            {"id": "r3", "content": "[Reply ID: -71，[Sticker 描述]"},
+            # at 壳 ✓（用户问的 at ✓）
+            {"id": "a1", "content": "@123456"},
+            {"id": "a2", "content": "@某位朋友"},
+            {"id": "a3", "content": "[CQ:at,qq=123]"},
+            {"id": "a4", "content": '<at id="1"/>'},
+            # 有真话的必须留着 ✓
+            {"id": "k1", "content": "[Reply 123] 你好呀"},
+            {"id": "k2", "content": "@123456 你好"},
+            {"id": "k3", "content": "@他就好了"},
             {"id": "n1", "content": "她喜欢在晚上写代码"},
         ]
         text_of = lambda row: row.get("content") or row.get("summary") or ""
@@ -162,8 +180,15 @@ class RotationGateTest(unittest.TestCase):
             main.AlifeMemoryPlugin.rotation_extras(stub, "qq:gm:1", cfg, pool, "k1", text_of, "fact")
         )
         ids = {row.get("id") for row in got}
-        self.assertNotIn("m1", ids, "图片描述不许进轮换 ✓")
-        self.assertNotIn("m2", ids, "贴纸描述不许进轮换 ✓")
-        self.assertNotIn("m3", ids, "图片描述不许进轮换 ✓")
-        self.assertIn("n1", ids, "正常内容必须照常轮换 ✓")
+        # ① 图片/贴纸/引用壳/at 壳 —— 一条都不许进 ✓
+        for rid, why in [("m1", "图片描述"), ("m2", "贴纸描述"), ("m3", "图片描述"),
+                         ("r1", "[Reply] 引用壳"), ("r2", "↩ 引用前缀"),
+                         ("r3", "引用壳套贴纸"), ("a1", "纯数字 at"),
+                         ("a2", "已知成员名的裸 at"), ("a3", "[CQ:at] 壳"),
+                         ("a4", "<at> 壳")]:
+            self.assertNotIn(rid, ids, why + "不许进轮换 ✓")
+        # ② 有真话的必须照常进 ✓（尤其是 at 粘连的短句 ✗ 曾经被整条吃掉 ✓）
+        for rid, why in [("k1", "引用壳 + 真话"), ("k2", "at + 真话"),
+                         ("k3", "at 粘连短句"), ("n1", "普通内容")]:
+            self.assertIn(rid, ids, why + "必须照常轮换 ✓")
         tmp.cleanup()
