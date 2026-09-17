@@ -466,6 +466,11 @@ class AlifeMemoryPlugin(BasePlugin):
                     # Imported facts never pass through compression, so scan them
                     # once for duplicates now.
                     await self.engine.queue_migration_merges(started_at)
+                    # 导入进来的记录全是 L0（role=user ✗ 天然凑不出"用户+助手"的完整轮 ✓）
+                    # 而且时间很老 ✓ —— 但那些会话**以后不会再有人说话** ✗
+                    # ⇒ 自动压缩（只在对话轮里触发 ✓）永远轮不到它们 ✓
+                    # ⇒ 迁移一完成就补扫一遍 ✓（2026-09-17 用户实测 ✓）
+                    await self.queue_compress_all()
                 self.migration_note = (
                     "迁移完成，原文件完整保留。切换回旧插件前请先停用长期记忆·Z。"
                 )
@@ -559,6 +564,13 @@ class AlifeMemoryPlugin(BasePlugin):
         # 后台迁移：不阻塞插件加载；迁移期间记忆功能由 migration_blocked 暂停。
         self.migration_task = asyncio.create_task(self.migrate())
         asyncio.create_task(self.build_search_index())
+        # 安静的会话（尤其迁移进来的旧会话）没有对话轮 ✗ 触发不到自动压缩 ✓
+        # ⇒ 启动时补扫一次 ✓（2026-09-17 ✓）
+        asyncio.create_task(self.queue_compress_all())
+        # ⚠️ 不能只靠"启动时扫一遍" ✗✓ —— 那样等于"**要重启才会安排**" ✓
+        # （2026-09-17 用户："为什么要重启才安排，你不觉得这个逻辑非常怪吗" ✓ 说得对 ✓）
+        # 改成常驻周期兜底 ✓：不问骰子 ✓ 每 15 分钟保证扫一次 ✓
+        asyncio.create_task(self._compress_sweep_loop())
         self.migration_task.add_done_callback(_log_migration_failure)
         try:
             await self.refresh_bootstrap_review()
@@ -905,6 +917,68 @@ class AlifeMemoryPlugin(BasePlugin):
         for owner in sorted(owners):
             await self.engine.enqueue("tidy", owner, automatic=True)
         return sorted(owners)
+
+    async def queue_compress_all(self, limit=8):
+        """把「该压缩却一直没被压」的会话排上压缩 ✓（2026-09-17 补 ✓）
+
+        ⚠️ 自动压缩原本**只有一个触发点** ✗：``on_request`` 里
+        ``if random.random() < probability`` 的那一轮 ✓
+        ⇒ **安静的会话永远触发不到** ✗✓ —— 迁移导入进来的旧会话（早就不聊了）
+        的 L0 记录**永远不会被压缩** ✓（用户实测：存档里一堆 L0 一直不动 ✓）
+
+        所以启动时 + 迁移完成后各扫一遍 ✓：
+        先自己算一次 ``compression_plan`` ✗（**不落冷却时间戳** ✓ —— 真正的压缩由排出去
+        的 job 走 ``_compress_cascade`` ✓ 到那时才盖戳 ✓）
+        ⇒ 只把**真的有得压**的会话排出去 ✓ 不会刷一屏"本次没有需要压缩的内容" ✓
+        """
+        cfg = self.runtime_settings()
+        # ⚠️ 尊重「自动压缩概率 = 0」= **仅手动** ✗（前端帮助文案的原话 ✓）
+        # 启动扫描是 scheduler 的**确定性兜底** ✓ 不是绕过用户选择的第二条路 ✓
+        # （2026-09-17 用户问"这玩意是啥"时发现的 ✓）
+        if not cfg.probability:
+            return []
+        now = time.time()
+        pending = []
+        for sid in sorted(await self.store.call("sessions")):
+            try:
+                rows = await self.store.call("active", sid)
+                # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
+                if compression_plan(rows, cfg, now=now,
+                                    boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False)):
+                    pending.append(sid)
+            except Exception:
+                logger.exception("[记忆·Z] 扫描待压缩会话失败：%s", sid)
+        cap = max(1, int(limit))
+        for sid in pending[:cap]:
+            await self.engine.enqueue("compress", sid, automatic=True)
+        if pending:
+            logger.info(
+                "[记忆·Z] 待压缩扫描：%s 个会话有内容可压，本次排 %s 个",
+                len(pending), min(len(pending), cap),
+            )
+        return pending
+
+    async def _compress_sweep_loop(self, interval_min=15):
+        """常驻的兜底扫描 ✓（与 scheduler 互补，不是重复 ✓）
+
+        分工：
+          · **scheduler**（每 30 秒 ✓）负责"持续有机会" ✓ 但有**概率闸门** ✗
+            （「自动压缩概率」0.8 = 每次 80% ✓ 设 0 就永不自动压 ✓ 前端文档写明 ✓）
+          · **本循环**负责"**确定性**" ✓ 不看骰子 ✓ 每 15 分钟必扫一次 ✓
+            ⇒ 迁移进来的安静会话不会因为"骰子一直不中"而长期滞留 ✓
+
+        两者都用 `_boost_ok(..., stamp=False)` 做闸门 ✓ 不消耗降门槛资格 ✓
+        真正的压缩由排出去的 job 走 `_compress_cascade` ✓（一条任务追平一个会话 ✓）
+        """
+        interval = max(60, int(interval_min) * 60)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.queue_compress_all()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[记忆·Z] 周期压缩扫描失败（下一轮再试 ✓）")
 
     async def memo(self, key, factory):
         """进程内缓存：只缓存「不随消息变化」的查询，按 store revision 失效。
@@ -2105,7 +2179,7 @@ class AlifeMemoryPlugin(BasePlugin):
             rows = await self.store.call("active", sid)
             if compression_plan(
                 rows, self.settings, now=time.time(),
-                boost_allowed=_boost_ok(sid, self.settings),
+                boost_allowed=_boost_ok(sid, self.settings, stamp=False),
             ):
                 await self.engine.enqueue("compress", sid, automatic=True)
 

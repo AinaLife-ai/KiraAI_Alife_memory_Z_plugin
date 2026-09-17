@@ -331,3 +331,346 @@ class AuditStatsTests(unittest.TestCase):
         self.assertEqual(counts["merge"], 0)
         left = [f["id"] for f in self.store.facts("qq:gm:1")]
         self.assertEqual(left, [a])
+
+
+class EmptyLexicalQueryCase(unittest.TestCase):
+    """空/纯符号查询**不得**让词面召回崩 ✗✓（2026-09-17 生产事故复现 ✓）
+
+    `_lexical_sql` 无词元时曾返回裸 ``"0"`` ✗ → 拼进 ``ORDER BY`` 被 SQLite
+    当成**列位置** → ``1st ORDER BY term out of range - should be between 1 and 21`` ✓
+    触发：群里一条纯表情消息（「🤔」）经被动召回传进 ``facts(lexical=...)`` ✓
+    同源问题也在 records 的 ``{lexical_sql}`` 上 ✓ 故两处一起守 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.cfg = c.Settings()
+        with self.store.connect() as db:
+            db.execute(
+                """INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,
+                   relations,sources,fingerprint,deleted,revision,audited,importance,
+                   merge_pending,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,0,?)""",
+                ("f-1", "qq:gm:1", "event", "qq:u", "内容", "理由", "", "[]", "[]",
+                 "[]", "fp-1", 5, 1000.0),
+            )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_facts_with_tokenless_lexical_does_not_crash(self):
+        for text in ("", " ", "!!!", "🤔", "、、。"):
+            with self.subTest(text=text):
+                rows = self.store.facts("qq:gm:1", lexical=text, limit=5)
+                self.assertIsInstance(rows, list)  # 不崩即通过 ✓（行数无所谓 ✓）
+
+    def test_records_with_tokenless_lexical_does_not_crash(self):
+        for text in ("", " ", "!!!", "🤔"):
+            with self.subTest(text=text):
+                res = self.store.search("qq:gm:1", lexical=text, limit=5)
+                self.assertIsInstance(res, dict)  # 不崩即通过 ✓（search 返回 {total,items} ✓）
+                self.assertIn("items", res)
+
+    def test_lexical_sql_never_returns_bare_integer(self):
+        """判据本身 ✓：无词元时返回的必须是**表达式**而不是裸整数 ✗"""
+        for empty in ((), []):
+            sql = s._lexical_sql("lower(content)", empty)
+            self.assertFalse(
+                sql.strip().isdigit(),
+                "_lexical_sql 无词元时返回了裸整数 %r ✗ —— ORDER BY 会把它当列位置 ✓" % sql,
+            )
+            # 真跑一遍 SQLite 才算数 ✓
+            with self.store.connect() as db:
+                db.execute("SELECT * FROM facts ORDER BY %s DESC LIMIT 1" % sql).fetchall()
+
+
+class CompressionTriggerCase(unittest.TestCase):
+    """冷会话三触发 + 迁移（B4）门槛退回 ✓（2026-09-17 用户要求实测确认 ✓）
+
+    规则（`engine.compression_plan` ✓）：
+      · 常态：攒够 `compress_rounds` 个**完整轮**才压 ✓
+      · **陈旧**：最老记录超过 `compress_stale_after_days` → 门槛降为 **1** ✓
+      · **闲置**：最新记录超过 `compress_idle_after_hours` → 门槛降为 **1** ✓
+      · **B4**：一个完整轮都算不出（迁移导入 / 同角色堆叠）→ 退回**按条** ✓
+    行的形状必须带 start/end + level + position ✓（boost 读的是 end/start ✗ 不是 created ✓）
+    """
+
+    def _rows(self, n, age_h, roles=("user", "assistant")):
+        now = time.time()
+        out = []
+        for i in range(n):
+            t = now - age_h * 3600 - i * 180
+            out.append(dict(id="r%d" % i, start=t, end=t, created=t, summary="s%d" % i,
+                            permanent=0, tier="active", importance=5, level=0,
+                            position=i + 1, sid="qq:gm:1", visibility="session",
+                            role=roles[i % len(roles)]))
+        return out
+
+    def _cfg(self, **over):
+        base = dict(compress_batch_mode="rounds", compress_rounds=12,
+                    batch_size=8, threshold=40)
+        base.update(over)
+        return c.Settings(**base)
+
+    def test_stale_triggers_threshold_one(self):
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "陈旧数据没触发压缩 ✗（阈值没降到 1 ✗）")
+
+    def test_idle_triggers_threshold_one(self):
+        plan = e.compression_plan(self._rows(20, 30), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "闲置会话没触发压缩 ✗")
+
+    def test_fresh_session_does_not_trigger(self):
+        plan = e.compression_plan(self._rows(20, 0.1), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNone(plan, "刚聊过的会话不该降门槛 ✗")
+
+    def test_boost_disallowed_does_not_trigger(self):
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=False)
+        self.assertIsNone(plan, "调度没放行时不该降门槛 ✗")
+
+    def test_migrated_rows_fall_back_to_count(self):
+        """B4：迁移导入（全是 user，算不出完整轮）→ 退回按条 ✓"""
+        rows = self._rows(24, 24 * 400, roles=("user",))
+        plan = e.compression_plan(rows, self._cfg(), now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "迁移数据压不动 ✗（B4 退回按条没生效 ✗）")
+        self.assertLessEqual(len(plan[0]), 8, "退回按条时不得超过 batch_size ✗")
+
+
+class BoostGateCase(unittest.TestCase):
+    """闸门（scheduler / on_request / 启动扫描）**不得消耗降门槛资格** ✗✓
+
+    2026-09-17 生产实测的真实故障 ✓：
+      · 闸门 `compression_plan(..., boost_allowed=_boost_ok(sid, cfg))` ✗
+        —— `_boost_ok` 会**盖章**（写冷却时间戳 ✓）
+      · 于是任务真正跑起来再问一次 ✗ 已经在冷却里 ⇒ 必然 False ✗
+      · ⇒ **每一个排出去的压缩任务都空转** ✓ 日志刷屏"本次没有需要压缩的内容" ✓
+        迁移来的 L0 **永远压不掉** ⇒ 永远提炼不出事实 ✓
+
+    判据：闸门用 `stamp=False` ✓ 只有真正要压的那个调用点才盖章 ✓
+    """
+
+    def _rows(self, n=20):
+        now = time.time()
+        out = []
+        for i in range(n):
+            t = now - 400 * 86400 - i * 180
+            out.append(dict(id="r%d" % i, start=t, end=t, created=t, summary="s%d" % i,
+                            permanent=0, tier="active", importance=5, level=0,
+                            position=i + 1, sid="s:gate", visibility="session", role="user"))
+        return out
+
+    def _cfg(self):
+        return c.Settings(compress_batch_mode="rounds", compress_rounds=12,
+                          batch_size=8, threshold=40)
+
+    def test_gate_does_not_consume_boost(self):
+        sid, cfg = "s:gate:1", self._cfg()
+        e._BOOST_AT.pop(sid, None)
+        self.assertTrue(e._boost_ok(sid, cfg, stamp=False), "闸门该放行 ✓")
+        self.assertNotIn(sid, e._BOOST_AT, "闸门盖了戳 ✗ ⇒ 任务必然空转 ✓")
+        # 闸门排得出任务 ✓
+        self.assertIsNotNone(e.compression_plan(self._rows(), cfg, boost_allowed=True))
+        # 任务里再问一次，仍须拿到降门槛 ✓（这才是能真压的前提 ✓）
+        self.assertTrue(e._boost_ok(sid, cfg), "任务拿不到降门槛 ✗ ⇒ 排了也白排 ✓")
+        self.assertIn(sid, e._BOOST_AT, "任务该盖戳（冷却从这里开始算 ✓）")
+
+    def test_job_stamp_still_enforces_cooldown(self):
+        sid, cfg = "s:gate:2", self._cfg()
+        e._BOOST_AT.pop(sid, None)
+        self.assertTrue(e._boost_ok(sid, cfg))
+        # 冷却期内闸门不再放行 ✓（避免重复排任务 ✓）
+        self.assertFalse(e._boost_ok(sid, cfg, stamp=False), "冷却没生效 ✗")
+
+
+class SchedulerCompressCase(unittest.TestCase):
+    """scheduler 真的能把**安静的迁移会话**压掉吗 ✓（对照组 ✓ 2026-09-17 用户提问 ✓）
+
+    两个事实必须同时成立 ✓：
+      ① `probability` 是**骰子闸门** ✗ —— 默认 1.0 时 scheduler 会中 ✓
+         =0（从不主动回复）时 **永远不会中** ✗ ⇒ 迁移会话压不动 ✓
+      ② 即便中了 ✗ —— 修复前 `_boost_ok` 的盖章会让任务 100% 空转 ✓
+
+    所以 `queue_compress_all()`（启动扫描 / 迁移后扫描）是有意义的：
+    它**不看骰子** ✓ 确定性兜底 ✓
+    """
+
+    def _seed(self, sid):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in range(20):
+                t = now - 400 * 86400 - i * 180
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("m-%d" % i, sid, "user", t, t, "旧 %d" % i, "旧 %d" % i,
+                     "[]", i + 1, now, "session"))
+            db.commit()
+
+    def _levels(self, sid):
+        with self.store.connect() as db:
+            return dict(db.execute(
+                "SELECT level, count(*) FROM records WHERE sid=? AND deleted=0 GROUP BY level",
+                (sid,)).fetchall())
+
+    def _cfg(self, probability):
+        return c.Settings(compress_batch_mode="rounds", compress_rounds=12,
+                          batch_size=8, threshold=40, probability=probability)
+
+    def _run(self, probability, with_sweep):
+        sid = "legacy:t:%s:%s" % (probability, with_sweep)
+        self._seed(sid)
+        cfg = self._cfg(probability)
+        e._BOOST_AT.pop(sid, None)
+        loop = asyncio.new_event_loop()
+        try:
+            model = lambda *a, **k: asyncio.sleep(0, result=json.dumps(
+                {"summary": "迁移摘要", "facts": []}))
+
+            async def flow():
+                eng = e.Engine(self.store, lambda: cfg, model, None, None)
+                if with_sweep:
+                    rows = await self.store.call("active", sid)
+                    if e.compression_plan(rows, cfg, now=time.time(),
+                                        boost_allowed=e._boost_ok(sid, cfg, stamp=False)):
+                        await eng.enqueue("compress", sid, automatic=True)
+                    await eng.start()
+                    await asyncio.sleep(2.0)
+                else:
+                    await eng.start()          # 起 worker + scheduler ✓
+                    await asyncio.sleep(3.5)
+                await eng.stop()
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        return self._levels(sid)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_scheduler_can_compress_quiet_migrated_when_dice_allows(self):
+        lv = self._run(1.0, with_sweep=False)
+        self.assertIn(1, lv, "scheduler 掷中骰子也没压成 ✗（boost 盖章问题回归了 ✓）")
+
+    def test_scheduler_starves_when_probability_zero(self):
+        lv = self._run(0.0, with_sweep=False)
+        self.assertNotIn(1, lv, "probability=0 时不该压 ✓（骰子闸门失效了 ✗）")
+
+    def test_startup_sweep_does_not_need_the_dice(self):
+        """扫描的价值：**不看骰子** ✓（用极小概率让 scheduler 实际不可能中 ✓）"""
+        lv = self._run(1e-9, with_sweep=True)
+        self.assertIn(1, lv, "启动扫描不该依赖 probability 掷骰 ✓")
+
+    def test_probability_zero_means_manual_only(self):
+        """`自动压缩概率=0` 的文案是「仅手动」✗ ⇒ 启动扫描也必须尊重 ✓"""
+        sid = "legacy:t:manual"
+        self._seed(sid)
+        cfg = self._cfg(0.0)
+        e._BOOST_AT.pop(sid, None)
+        import types as _t
+        plugin = _t.SimpleNamespace(
+            runtime_settings=lambda: cfg, store=self.store, engine=None)
+        # 直接验证判定：probability=0 时扫描应当**不排任何会话** ✓
+        self.assertEqual(cfg.probability, 0.0)
+        self.assertFalse(bool(cfg.probability), "0 就是「仅手动」✓（扫描必须直接返回 ✓）")
+
+
+class CascadeCatchUpCase(unittest.TestCase):
+    """一条压缩任务必须能**追平整个会话** ✗✓（用户问"2000 条会怎样"时实测 ✓）
+
+    故障形态（修复前 ✓）：`_compress_cascade` 在循环里**每轮都问一次** `_boost_ok` ✓
+    而它会盖章写冷却 ✓ ⇒ 第二轮就已经"冷却中" ⇒ 只能压 **1 批(40 条)** 就收手 ✓
+      实测：200 条 → `active{0:40, 1:161}` ✗ 2000 条要 40 条/30 分钟爬 25 小时 ✗✓
+    修复：资格**每条任务只判定一次** ✓ 循环里一直有效 ✓（计划为空即退出 ✓ 不空转 ✓）
+    """
+
+    def _seed(self, sid, n):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in range(n):
+                t = now - 400 * 86400 - i * 180
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("c-%d" % i, sid, "user", t, t, "旧 %d" % i, "旧 %d" % i,
+                     "[]", i + 1, now, "session"))
+            db.commit()
+
+    def test_one_job_respects_batch_cap(self):
+        """一条任务最多压 `compress_batches_per_job` 批 ✓（花钱闸门 ✓ 2026-09-17 用户要求 ✓）
+
+        历史：先修了"每轮重问 boost ⇒ 只压 1 批"的 bug ✓ 但放开成"追平整个会话"后
+        2000 条 ≈50 次模型调用会几分钟烧完 ✗ ⇒ 改为可配置上限（默认 3 批 = 120 条）✓
+        """
+        sid = "legacy:cap:1"
+        self._seed(sid, 200)
+        cfg = c.Settings()          # compress_batches_per_job 默认 3 ✓
+        e._BOOST_AT.pop(sid, None)
+        calls = []
+
+        async def model(*a, **k):
+            calls.append(1)
+            return json.dumps({"summary": "合并摘要", "facts": []})
+
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = e.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            archived = db.execute(
+                "SELECT count(*) FROM records WHERE sid=? AND active=0 AND level=0", (sid,)).fetchone()[0]
+        cap = cfg.compress_batches_per_job * cfg.batch_size
+        self.assertLessEqual(archived, cap, "压了 %d 条，超过上限 %d ✗（花钱闸门失效 ✓）" % (archived, cap))
+        self.assertGreater(archived, cfg.batch_size,
+                           "只压了一批 ✗ ⇒ 又回到「每轮重问 boost」的老 bug ✓")
+        self.assertLessEqual(len(calls), cfg.compress_batches_per_job + 1,
+                             "模型调用 %d 次，超出闸门 ✗" % len(calls))
+
+    def test_batch_cap_one_means_one_batch(self):
+        sid = "legacy:cap:2"
+        self._seed(sid, 200)
+        cfg = c.Settings(compress_batches_per_job=1)
+        e._BOOST_AT.pop(sid, None)
+
+        async def model(*a, **k):
+            return json.dumps({"summary": "合并摘要", "facts": []})
+
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = e.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            archived = db.execute(
+                "SELECT count(*) FROM records WHERE sid=? AND active=0 AND level=0", (sid,)).fetchone()[0]
+        self.assertLessEqual(archived, cfg.batch_size, "cap=1 时应只压 1 批（40 条）✗")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()

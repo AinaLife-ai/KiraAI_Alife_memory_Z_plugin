@@ -420,10 +420,16 @@ def permanent_clusters(rows, threshold, size=5, cross_threshold=0.0):
 _BOOST_AT: dict = {}
 
 
-def _boost_ok(sid, cfg, now=None):
-    """现在允许对这个会话做一次「降门槛」吗 ✓（并顺手打上冷却时间戳 ✓）
+def _boost_ok(sid, cfg, now=None, stamp=True):
+    """现在允许对这个会话做一次「降门槛」吗 ✓（`stamp=True` 时顺手打上冷却时间戳 ✓）
 
     返回 False 时 `compression_plan` 会退回**正常门槛** ✓ —— 也就是"这次先不抽" ✓
+
+    ⚠️ **闸门必须用 `stamp=False`** ✗✓ —— 排任务的闸门只是"决定要不要排" ✗
+    不该把这次资格用掉 ✗ 否则任务真正跑起来再问一次必然 False ✗
+    ⇒ **每一个排出去的压缩任务都空转** ✗✓（日志里"本次没有需要压缩的内容"刷屏 ✓
+      迁移进来的 L0 永远压不动 ⇒ **永远提炼不出事实** ✓）
+    2026-09-17 生产实测：scheduler 每 30 秒把所有会话排一遍 ✓ 全部空转 ✓
     """
     now = now or time.time()
     cooldown = int(getattr(cfg, "compress_idle_cooldown_min", 30) or 0) * 60
@@ -432,7 +438,8 @@ def _boost_ok(sid, cfg, now=None):
     #    （时间戳小于冷却秒数时会被误判成"冷却中" ✗ 单测里就撞到过 ✓）
     if cooldown and last is not None and now - last < cooldown:
         return False
-    _BOOST_AT[sid] = now
+    if stamp:
+        _BOOST_AT[sid] = now
     return True
 
 
@@ -491,7 +498,8 @@ def _fit_rows(rows, cap_chars):
         out.append(row)
         used += size
     if cut and out:
-        # v2.18.19：给压缩侧留个记号 ✓ —— 它会给这条例存档的摘要加「（续）」✓
+        # v2.18.19：给压缩侧留个记号 ✓ —— 它会给这条例存档的摘要尾部加 `…` ✓
+        # （**仓库既有约定就是省略号** ✗ 不是「（续）」✓ 见 storage.py 写入快照处 ✓）
         # 只在**真的截断**时打 ✗（正常情况一个字不加 ✓）
         # ⚠️ 用 `dict(...)` 复制 ✗ 不要原地改传入的行 ✓
         out[-1] = dict(out[-1], _partial=True)
@@ -555,7 +563,33 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
                     pos = end
                 need = 1 if boost else cfg.compress_rounds
                 if len(rounds) >= need:
-                    return _fit_rows(subset[: rounds[need - 1][1]], _cap), level + 1
+                    # ✅ 按轮模式的批量上限**只有字符预算**（_cap = compress_input_max_chars）✓
+                    # 门槛按 need 判（boost 时让步到 1 轮 ✓）✓ 取材给足**全部完整轮** ✓
+                    # 让 _fit_rows 按字符去切 ✓ 这样：
+                    #   · 不引入任何"条数"约束 ✗（原设计意图 ✓ 用户确认 ✓）
+                    #   · boost 时也不会"一轮 2 条"浪费（原来是 rounds[need-1][1] ✗）
+                    # ⚠️ 必须切到**最后一个完整轮的末尾** ✗✓ —— 不能直接传整个 subset ✓
+                    #   （subset 里可能挂着"还没回复的半轮" ✗ 它不许进批次 ✓
+                    #     单测 test_dangling_turn_is_not_counted_or_included 守着这条 ✓）
+                    _end = rounds[-1][1]
+                    _rows = subset[:_end]
+                    _fit = _fit_rows(_rows, _cap)
+                    # ★★ 绝不切半轮 ✗✓（原设计的铁律 ✓ 我 v2.18.19 的字符截断破坏了它 ✓）
+                    # `_fit_rows` 按**字符预算**截断 ⇒ 可能切在轮中间 ✗
+                    # ⇒ 这里**退回到上一个整轮边界** ✓（宁可少压一轮 ✓ 也不留半轮 ✓）
+                    # 唯一例外：**单个轮本身就超预算** ✗ ⇒ 退了就啥也不剩 ⇒ 保留并打 `…` 记号 ✓
+                    if _fit and _fit[-1].get("_partial"):
+                        _last_id = _fit[-1]["id"]
+                        _pos = next((i for i, r in enumerate(_rows) if r["id"] == _last_id), None)
+                        _backoff = 0
+                        for start, end in rounds:
+                            if _pos is not None and end <= _pos + 1:
+                                _backoff = end
+                            else:
+                                break
+                        if _backoff:
+                            _fit = _rows[:_backoff]
+                    return _fit, level + 1
                 if boost and not rounds:
                     # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
                     # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**
@@ -811,7 +845,15 @@ class Engine:
     async def _compress_cascade(self, sid, steps=None, job_id=None):
         if steps is None:
             steps = []
-        for _ in range(64):
+        # ⚠️ 「降门槛」资格**每条任务只判定一次** ✗✓ —— `_boost_ok` 会盖章写冷却 ✓
+        # 若在循环里每轮都问一次 ✗ 第二轮就已经在冷却里 ⇒ **只能压 1 批就收手** ✓
+        #   实测：200 条迁移记忆只归档 40 条（=batch_size）就停 ✓
+        #   2000 条要按 40 条/30 分钟慢慢爬 ⇒ **25 小时** ✗✓
+        # 一次判定 = 这条任务"追平这个会话"的授权 ✓ 循环里一直有效 ✓
+        # （循环本身在 `compression_plan` 返回 None 时立刻退出 ✓ 不会空转 ✓）
+        _cap = max(1, min(64, int(getattr(self.settings(), "compress_batches_per_job", 3) or 3)))
+        _boost = _boost_ok(sid, self.settings())
+        for _ in range(_cap):          # ← 花钱闸门 ✓ 一条任务最多 _cap 批 ✓
             cfg = self.settings()
             if not cfg.enabled:
                 return steps
@@ -819,7 +861,7 @@ class Engine:
             _now = time.time()
             plan = compression_plan(
                 rows, cfg, now=_now,
-                boost_allowed=_boost_ok(sid, cfg, _now),
+                boost_allowed=_boost,
             )
             if plan is None:
                 return steps
@@ -2039,7 +2081,7 @@ class Engine:
                     if random.random() < cfg.probability:
                         rows = await self.store.call("active", sid)
                         if compression_plan(rows, cfg, now=time.time(),
-                                 boost_allowed=_boost_ok(sid, cfg)):
+                                 boost_allowed=_boost_ok(sid, cfg, stamp=False)):
                             await self.enqueue("compress", sid, automatic=True)
             if cfg.audit_enabled and now - self.last_audit >= cfg.audit_interval:
                 self.last_audit = now

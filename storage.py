@@ -126,7 +126,14 @@ def _lexical_sql(column, tokens):
     for token in tokens:
         literal = "'" + str(token).replace("'", "''") + "'"
         parts.append("(instr(%s,%s)>0)*%d" % (column, literal, len(str(token))))
-    return " + ".join(parts) if parts else "0"
+    # ⚠️ 无词元时**绝不能**返回裸 "0" ✗ —— 这个表达式会被拼进 ``ORDER BY``，
+    # 而 SQLite 把 ORDER BY 里的**裸整数**当成**列位置** ✓
+    #   ORDER BY 0   → "1st ORDER BY term out of range - should be between 1 and 21"
+    #   ORDER BY (0) → 同样报错 ✗（实测加括号也不行 ✓）
+    #   ORDER BY 0+0 → ✓ 只有写成"表达式"才安全
+    # 触发场景很常见：一条纯表情/纯符号消息（如「🤔」）经词面召回传进来 ✓
+    # （2026-09-17 用户在群里实测崩过 ✓ 本行即修复 ✓）
+    return " + ".join(parts) if parts else "0+0"
 
 
 def _lexical_scorer(query):

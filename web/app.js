@@ -21,39 +21,40 @@ const fields = {
   bootstrap_seed: "旧历史播种",
   inject_recent_raw: "注入最近原文",
   capture_enabled: "记录对话与感知",
-  auto_inject: "持续上下文与感知注入",
-  fact_view: "事实展示方式",
-  expand_query: "关键词扩展查询",
-  compress_persona: "压缩时的角色设定",
-  audit_persona: "审计时的角色设定",
-  inject_mode: "记忆注入方式",
-  proactive_jitter: "主动发言抖动",
-  proactive_min_sessions: "主动发言最少会话数",
-  proactive_max_sessions: "主动发言最多会话数",
-  proactive_rotate: "主动发言轮换",
-  memorize_cover_check: "记忆覆盖检查",
-  permanent_tidy_enabled: "常驻区自动整理",
-  permanent_tidy_on_write: "写入后立即整理常驻区",
-  permanent_cap: "常驻记忆上限（条）",
-  permanent_budget_chars: "常驻区字符预算",
-  permanent_tidy_batch: "常驻整理每批条数",
-  permanent_tidy_days: "常驻整理间隔（天）",
-  fact_merge_cross_threshold: "跨会话事实合并阈值",
-  fact_merge_evidence: "合并时保留证据",
-  rotate_enabled: "轮换槽位开关",
-  rotate_count: "每次轮换注入条数",
-  rotate_keep_rounds: "一批记忆保留几轮",
-  rotate_min_hits: "至少被用上几次才留下",
-  rotate_cooldown_rounds: "轮换冷却（轮）",
-  inject_budget_ms: "注入耗时预算（毫秒）",
-  permanent_dedupe_cross_threshold: "常驻跨会话去重阈值",
-  fact_recall_min_score: "事实召回最低分",
-  recall_skip_media: "检索跳过媒体",
+  auto_inject: "持续上下文注入",
+  fact_view: "事实视图",
+  expand_query: "窄查询自动扩词召回",
+  compress_persona: "压缩带人设",
+  audit_persona: "审计带人设",
+  inject_mode: "注入形态",
+  proactive_jitter: "主动感知随机偏移（秒）",
+  proactive_min_sessions: "每轮最少会话数",
+  proactive_max_sessions: "每轮最多会话数",
+  proactive_rotate: "轮流挑选会话",
+  memorize_cover_check: "保存永久记忆前先查事实覆盖",
+  permanent_tidy_enabled: "永久记忆定期整理",
+  permanent_tidy_on_write: "记住后立即整理",
+  permanent_cap: "永久记忆条数上限",
+  permanent_budget_chars: "永久记忆字符预算",
+  permanent_tidy_batch: "每次整理条数",
+  permanent_tidy_days: "同一条整理间隔（天）",
+  fact_merge_cross_threshold: "跨类别重复阈值",
+  fact_merge_evidence: "去重判定附原文证据",
+  rotate_enabled: "轮换召回槽位",
+  rotate_count: "轮换槽位条数",
+  rotate_keep_rounds: "轮换保留轮数",
+  rotate_min_hits: "轮换命中阈值",
+  rotate_cooldown_rounds: "轮换冷却轮数",
+  inject_budget_ms: "每轮注入时间预算（毫秒）",
+  permanent_dedupe_cross_threshold: "永久记忆跨会话去重阈值",
+  fact_recall_min_score: "事实内容匹配门槛",
+  recall_skip_media: "召回跳过表情/图片-only 消息",
   compress_input_max_chars: "每批压缩的原文上限（字符）",
   compress_stale_after_days: "陈旧记忆几天后开始消化",
   compress_idle_after_hours: "会话闲置几小时后收尾",
   compress_idle_cooldown_min: "收尾压缩的冷却（分钟）",
-  compress_batch_mode: "压缩分批模式",
+  compress_batches_per_job: "单个压缩任务最多连压几批",
+  compress_batch_mode: "压缩分批方式",
   compress_rounds: "每批压缩轮数",
   threshold: "首层压缩阈值",
   batch_size: "首层每批条数",
@@ -73,12 +74,12 @@ const fields = {
   worker_count: "后台并发数",
   context_chars: "上下文字符预算",
   token_warning: "估算 Token 警告线",
-  recall_keywords: "回忆提示词（每行一个）",
+  recall_keywords: "回忆提示词",
   recall_scope: "Bot可访问范围",
-  top_k: "自动召回条数",
+  top_k: "感知事实批量（×10）",
   proactive_enabled: "定时主动感知",
   proactive_interval: "主动感知间隔（秒）",
-  proactive_sessions: "主动感知会话（每行一个）",
+  proactive_sessions: "主动感知会话",
   compress_instruction: "压缩补充要求",
   fact_merge_enabled: "写入时自动合并事实",
   fact_merge_threshold: "事实合并触发阈值",
@@ -102,7 +103,7 @@ const fields = {
   record_merge_reason_chars: "永久记忆合并理由（硬上限）",
   record_merge_prompt: "永久记忆合并提示词",
   profile_summary_count: "画像摘要条数",
-  search_active_only: "检索默认只搜活跃记忆",
+  search_active_only: "检索默认只搜常驻",
   cold_after_days: "归档转入冷归档天数",
 };
 let ctx = null,
@@ -683,6 +684,8 @@ async function loadArchives() {
             '<article class="card"><div class="row"><span class="tag">' +
             (r.permanent ? "永久记忆" : "L" + r.level) +
             "</span>" +
+            // ⚠️ 别在这里再加"状态类"标签 ✗✓ —— 卡片 footer 已经在显示它了 ✓
+            // （冷归档 · 仅按ID可读 / 活跃记忆 / 历史存档 ✓ 既有措辞 ✓ 别再发明同义词 ✗）
             (selectedSid && r.sid !== selectedSid
               ? '<span class="tag">跨会话</span>'
               : "") +
@@ -1832,12 +1835,21 @@ $$("[data-job]").forEach(
   (e) =>
     (e.onclick = () =>
       guard(async () => {
-        if (!$("#jobSession").value) throw Error("请先选择一个已有会话");
+        const job = e.dataset.job;
+        // 「整理永久记忆」「重建向量索引」是**全局**任务：后端 tidy 走
+        // `queue_tidy_all(sid)`（忽略 sid、按"所有有意久记忆的会话"排队 ✓），
+        // reindex 更是与会话无关 ✓ ⇒ 不能因为没选会话就把它们拦掉 ✗✓
+        // （按钮提示本来就写着"不受上方会话选择限制" ✓ 原来前后矛盾 ✓
+        //   于是「无视冷却」那个确认框**永远弹不出来** ✓ 2026-09-17 用户实测 ✓）
+        const needsSession = job !== "tidy" && job !== "reindex";
+        if (needsSession && !$("#jobSession").value) {
+          throw Error("请先选择一个已有会话");
+        }
         const payload = {
-          sid: $("#jobSession").value,
-          kind: e.dataset.job,
+          sid: $("#jobSession").value || "",
+          kind: job,
         };
-        if (e.dataset.job === "tidy") {
+        if (job === "tidy") {
           const mode = await askTidyMode();
           if (!mode) return;                       // 取消 ✓
           payload.force = mode === "all";           // 全部重新整理 → 无视冷却 ✓

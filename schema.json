@@ -566,6 +566,14 @@
         "minimum": 0,
         "maximum": 720
       },
+      "compress_batches_per_job": {
+        "type": "integer",
+        "name": "单个压缩任务最多连压几批",
+        "default": 3,
+        "description": "单个压缩任务最多连压几批（每批 ≤ batch_size 条）。这是花钱闸门：默认 3 ⇒ 一条任务最多压 120 条，之后交给冷却与后台调度慢慢继续；调大可以让迁移的大量旧记忆更快压完，但单次模型花费也更高。",
+        "minimum": 1,
+        "maximum": 64
+      },
       "compress_idle_cooldown_min": {
         "type": "integer",
         "name": "收尾压缩的冷却（分钟）",

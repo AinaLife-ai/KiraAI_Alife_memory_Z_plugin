@@ -350,6 +350,11 @@ class Settings(Strict):
     # ③ **空闲**触发：该会话最新记录超过这么多小时 → 门槛降为 1 ✓（对话已经结束了 ✓）
     compress_idle_after_hours: int = Field(default=6, ge=0, le=720)
     # ④ 每会话**冷却**：两次"降门槛抽干"之间至少隔这么多分钟 ✓（防连续抽干烧 token ✓）
+    # 单个压缩任务**最多连压几批**（每批 ≤ batch_size 条 ✓）
+    # ⚠️ 这是**花钱的闸门** ✗✓ —— 迁移 2000 条若一个任务全压完 ≈50 次模型调用瞬间烧掉 ✓
+    # 默认 3 ⇒ 一条任务最多 3 批（≤120 条）✓ 节奏由冷却(30分)与 scheduler 控制 ✓
+    # （2026-09-17 用户："不会出现因为有 2000 条迁移过来，用户马上钱就被用光了吧" ✓）
+    compress_batches_per_job: int = Field(default=3, ge=1, le=64)
     compress_idle_cooldown_min: int = Field(default=30, ge=0, le=1440)
     fact_merge_enabled: bool = True
     fact_merge_threshold: float = Field(default=0.25, ge=0.1, le=0.95)

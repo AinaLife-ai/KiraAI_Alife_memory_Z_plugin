@@ -116,6 +116,7 @@ class SchemaNameAlignmentCase(unittest.TestCase):
             "compress_stale_after_days": "陈旧",
             "compress_idle_after_hours": "闲置",
             "compress_idle_cooldown_min": "冷却",
+            "compress_batches_per_job": "几批",
             "fact_merge_enabled": "合并",
             "record_merge_prompt": "提示词",
             "profile_summary_count": "摘要",
