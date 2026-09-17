@@ -271,6 +271,10 @@ class AlifeMemoryPlugin(BasePlugin):
         # v2.18.19：**最近一次清单**的序号表 ✓（每会话一份 ✓ 每次召回重建 ✓）
         # 只在内存 ✓ 重启即空 ✓（过期/未知序号一律拒绝并请模型重新检索 ✓）
         self._recall_ordinals = {}
+        # v2.18.19：被动档案槽这一轮实际注入了哪些 id ✓
+        # （去码后 payload 里没有 id 了 ✗ `archives_flat` 拿不到 ✓ 所以构造时就记下 ✓）
+        # 用途：喂给 `seen_window` ✓ 防止轮换过早重复注入同一条 ✓
+        self._passive_archive_ids = {}
         self._bootstrap_review_logged = False
         self.bootstrap_review = {}
 
@@ -1746,6 +1750,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # 记下这一次的清单顺序 ✓（序号 → 真实 id ✓ 只留最新一份 ✓）
         # ⚠️ 每次召回都重建 ✗ 不保留旧清单 ✓ —— 免得模型引用上一份的序号而改错记忆 ✓
         self._recall_ordinals[event.sid] = (time.time(), pick_ids)
+        self._passive_archive_ids[sid] = list(pick_ids)
         # P1：召回时顺便发现重复事实（本地判定 → 只标记 → 后台合并）
         dropped = await self.queue_recall_merges(sid, facts)
         if dropped:
@@ -1820,12 +1825,15 @@ class AlifeMemoryPlugin(BasePlugin):
             content = dump(perception)
         # 块里省略了空字段，裁剪循环必须容忍字段不存在
         while len(content) > cfg.context_chars and perception.get("archives"):
-            removed = perception["archives"].pop()
+            # v2.18.19：`archives` 现在是 {legend, rows} ✗ **形状无关**地裁剪 ✓
+            # （A3 改形状时漏了这一处 ✗ 终审才发现 ✓ —— 以前是 list[dict] ✓）
+            _arch = perception["archives"]
+            _rows = _arch.get("rows") if isinstance(_arch, dict) else _arch
+            if not _rows:
+                perception.pop("archives", None)
+                break
+            _rows.pop()
             perception["omitted_count"] = perception.get("omitted_count", 0) + 1
-            dropped = perception.setdefault("omitted_ids", [])
-            if len(dropped) < 10:
-                real = real_of.get(removed.get("a"), removed.get("a"))
-                dropped.append(archive_shorts.get(real, real))
             content = dump(perception)
         for key in ("names", "related_archives", "omitted_ids"):
             while len(content) > cfg.context_chars and perception.get(key):
@@ -1844,7 +1852,9 @@ class AlifeMemoryPlugin(BasePlugin):
             recall_key,
             "",
             [real_of.get(r.get("a"), r.get("a"))
-             for r in archives_flat(perception.get("archives"))]
+             for r in archives_flat(perception.get("archives"))
+             if isinstance(r, dict)]
+            + list(self._passive_archive_ids.get(sid, []))
             + [
                 real_of.get(r.get("a"), r.get("a"))
                 for r in perception.get("related_archives", [])
