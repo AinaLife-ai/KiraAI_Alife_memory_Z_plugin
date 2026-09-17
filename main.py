@@ -186,9 +186,19 @@ def brief(perception):
         elif isinstance(archives, list) and archives:
             lines.extend(str(r) for r in archives)
 
-    val = perception.get("related_archives")
-    if val:
-        lines.extend(str(r) for r in (val if isinstance(val, list) else [val]))
+    # 跨会话的相关记忆 ✓（带来源 ✓ —— 提示词要求核对来源会话 ✓）
+    # v2.18.19：**不能再 str(dict)** ✗ 那会把 Python 字典原样漏进提示词 ✓（实测踩到 ✓）
+    for key in ("related_archives", "related"):
+        val = perception.get(key)
+        if not val:
+            continue
+        for item in (val if isinstance(val, list) else [val]):
+            if isinstance(item, dict):
+                txt = item.get("s") or item.get("summary") or item.get("content") or ""
+                src = item.get("from") or item.get("sid") or ""
+                lines.append("- %s%s" % (txt, ("　来自 %s" % src) if src else ""))
+            elif item:
+                lines.append("- %s" % item)
 
     new_cnt = perception.get("new_related_count")
     if new_cnt:
