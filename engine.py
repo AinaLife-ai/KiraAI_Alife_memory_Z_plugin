@@ -562,18 +562,16 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
                     pos = end
                 need = 1 if boost else cfg.compress_rounds
                 if len(rounds) >= need:
-                    # ⚠️ 取够**一整批**（按**条数**装，不能假定"一轮 2 条" ✗ —— 一轮可能是 4 条 ✓）
-                    # 原来 `rounds[need-1][1]`：boost 时 need=1 ⇒ **一次只压 1 轮(=2 条)** ✗
-                    #   审计实测：3 次模型调用只消化 6 条 ✓ 而按条路一次 40 条 ⇒ 浪费约 6 倍 ✓
-                    # 现在：门槛仍按 need 判（boost 让步 ✓）但批量按 batch_size 条装满 ✓
-                    #   至少取 need 轮 ✓（即使它本身就超过 batch_size ✓ 保持原语义 ✓）
-                    _pick = max(1, need)
-                    for _i in range(_pick, len(rounds) + 1):
-                        if rounds[_i - 1][1] <= cfg.batch_size:
-                            _pick = _i
-                        else:
-                            break
-                    return _fit_rows(subset[: rounds[_pick - 1][1]], _cap), level + 1
+                    # ✅ 按轮模式的批量上限**只有字符预算**（_cap = compress_input_max_chars）✓
+                    # 门槛按 need 判（boost 时让步到 1 轮 ✓）✓ 取材给足**全部完整轮** ✓
+                    # 让 _fit_rows 按字符去切 ✓ 这样：
+                    #   · 不引入任何"条数"约束 ✗（原设计意图 ✓ 用户确认 ✓）
+                    #   · boost 时也不会"一轮 2 条"浪费（原来是 rounds[need-1][1] ✗）
+                    # ⚠️ 必须切到**最后一个完整轮的末尾** ✗✓ —— 不能直接传整个 subset ✓
+                    #   （subset 里可能挂着"还没回复的半轮" ✗ 它不许进批次 ✓
+                    #     单测 test_dangling_turn_is_not_counted_or_included 守着这条 ✓）
+                    _end = rounds[-1][1]
+                    return _fit_rows(subset[:_end], _cap), level + 1
                 if boost and not rounds:
                     # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
                     # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**

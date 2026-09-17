@@ -52,11 +52,18 @@ class RoundsModeCase(unittest.TestCase):
         self.assertEqual(d.compress_batch_mode, "rounds", "默认必须按轮 ✓")
         self.assertEqual(d.compress_rounds, 12, "默认 12 轮 ✓（约等于原来的 50 条）")
 
-    def test_takes_exactly_n_complete_rounds(self):
+    def test_takes_all_complete_rounds_within_char_budget(self):
+        """门槛按 need 轮判 ✓ 批量**只受字符预算**约束（不看条数 ✓ 用户 2026-09-17 确认 ✓）
+
+        历史：曾短暂引入过"按 batch_size 条装满"的条数约束 ✗
+        ⇒ 用户指出按轮模式本就"与条数无关、只跟字符数有关" ✓ 已改回 ✓
+        """
         rows = conversation(12)                       # 12 轮 × 4 条
         subset, level = engine.compression_plan(rows, self.cfg)
         self.assertEqual(level, 1)
-        self.assertEqual(len(subset), 40, "10 轮 × 4 条 = 40")
+        # 12 轮里只有 11 个「已收尾」轮（最后那轮要等下一个用户发言才成界 ✓ 与原行为一致 ✓）
+        # 字符远没用完 ⇒ **11 轮全部取走** ✓（不受 batch_size 条数约束 ✓ 48 vs 44 的差别就在这）
+        self.assertEqual(len(subset), 44, "字符没用完 ⇒ 已收尾的轮全取 ✓（不看条数 ✓）")
         self.assertEqual(subset[-1]["role"], "assistant", "必须停在轮尾 ✗ 不许切半轮 ✓")
 
     def test_waits_for_the_tenth_round_to_finish(self):
@@ -67,7 +74,7 @@ class RoundsModeCase(unittest.TestCase):
         rows = conversation(10) + [row(900, "user")]  # 10 整轮 + 半句 ✗
         subset, _ = engine.compression_plan(rows, self.cfg)
         self.assertTrue(all(r["id"] != "r900" for r in subset), "半轮不许进批次 ✓")
-        self.assertEqual(len(subset), 40, "只算完整的 10 轮 = 40 条 ✓")
+        self.assertEqual(len(subset), 40, "只算完整的 10 轮 = 40 条 ✓（末尾半轮排除 ✓）")
 
 
 class RecordsModeCase(unittest.TestCase):
