@@ -836,7 +836,9 @@ class AlifeMemoryPlugin(BasePlugin):
         slot = (holder.get("slots") or {}).get(kind)
         return slot is None or bool(slot.get("next", True))
 
-    async def rotation_extras(self, sid, cfg, pool, seen_key, text_of, kind="archive"):
+    async def rotation_extras(
+        self, sid, cfg, pool, seen_key, text_of, kind="archive", turn=None
+    ):
         """轮换槽位：从「同样过门槛、但没被选中」的候选里补几条。
 
         ``kind`` 区分「档案」与「事实」：**两边的槽位状态必须分开** ✗
@@ -864,7 +866,10 @@ class AlifeMemoryPlugin(BasePlugin):
             state["next"] = True
             state["signature"] = signature
         # v2.18.16：只有**真正的用户轮**才推进 ✓ 同一轮内的工具步不算 ✗
-        turn = getattr(self, "_rotation_turn", None)
+        # v2.18.19：轮标识由**参数**传入 ✗ 不再读实例属性 ✓
+        # 实例属性在**并发请求**下会被互相覆盖 ✗（A 设完值、B 抢先覆盖 ✓ A 就读错了 ✓）
+        # ⚠️ 没有回退 ✗ —— 调用方**必须**传 `turn` ✓
+        # （宁可在测试里报错 ✓ 也不要留一条"忘了传就读错轮"的静默路径 ✓）
         new_turn = state.get("turn") != turn
         if new_turn:
             state["turn"] = turn
@@ -1419,7 +1424,9 @@ class AlifeMemoryPlugin(BasePlugin):
                 "canonicalize_identity", self.adapter_names()
             )
         sid = event.sid
-        self._rotation_turn = self.rotation_turn_key(req)   # v2.18.16：工具步算同一轮 ✓
+        # v2.18.16：工具步算同一轮 ✓
+        # v2.18.19：改成**局部变量**并一路传参 ✗（实例属性会在并发请求间互相覆盖 ✓）
+        turn_key = self.rotation_turn_key(req)
         await self.observe_event_names(event)
         rows = await self.store.call("active", sid)
         # Seed pre-install history once; never erase the core's own history on disk.
@@ -1555,6 +1562,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 recall_key,
                 lambda r: str(r.get("content") or ""),
                 "fact",
+                turn=turn_key,
             )
         related, related_rows, related_shorts = [], [], {}
         if cfg.recall_scope != "session" and query.strip() and not over_budget:
@@ -1586,6 +1594,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     recall_key,
                     lambda r: str(r.get("summary") or r.get("content") or ""),
                     "archive",
+                    turn=turn_key,
                 )
             related_shorts = await self.shortmap(
                 [r["id"] for r in related_rows]

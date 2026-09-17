@@ -87,21 +87,21 @@ class RotationTurnCase(unittest.TestCase):
             rows = [{"id": "r%d" % i, "content": "记忆 %d" % i} for i in range(6)]
             text_of = lambda row: row.get("content") or ""
             # 第 1 次调用是**建批**（`next` 初始为真 ✓）✓ 它会把本轮记下来但不加轮数 ✓
-            stub._rotation_turn = (1, 111)
+            TURN = (1, 111)
             await main.AlifeMemoryPlugin.rotation_extras(
-                stub, "s", cfg, rows, "k1", text_of, "archive")
+                stub, "s", cfg, rows, "k1", text_of, "archive", turn=TURN)
             st0 = stub.rotation["s"]["slots"]["archive"]
             rounds_base, cooldown_base = st0["rounds"], dict(st0["cooldown"])
             for _ in range(3):                         # 同一轮的另外 3 个请求（工具步 ✓）
-                stub._rotation_turn = (1, 111)
+                TURN = (1, 111)
                 await main.AlifeMemoryPlugin.rotation_extras(
-                    stub, "s", cfg, rows, "k1", text_of, "archive")
+                    stub, "s", cfg, rows, "k1", text_of, "archive", turn=TURN)
             st1 = stub.rotation["s"]["slots"]["archive"]
             same_turn = (st1["rounds"] == rounds_base and dict(st1["cooldown"]) == cooldown_base)
             # 换一个用户轮 → 这次必须推进 ✓（轮数 +1 且冷却 -1 ✓）
-            stub._rotation_turn = (2, 222)
+            TURN = (2, 222)
             await main.AlifeMemoryPlugin.rotation_extras(
-                stub, "s", cfg, rows, "k1", text_of, "archive")
+                stub, "s", cfg, rows, "k1", text_of, "archive", turn=TURN)
             st2 = stub.rotation["s"]["slots"]["archive"]
             tmp.cleanup()
             return same_turn, st2["rounds"] - rounds_base, st1["cooldown"], st2["cooldown"]
@@ -152,3 +152,48 @@ class RotationTurnCase(unittest.TestCase):
         first, total = asyncio.run(run())
         self.assertEqual(first, 1, "同一轮里重复计入 %d 次 ✗（应该只计 1 次）" % first)
         self.assertEqual(total, first, "同一轮里又计了一次 ✗")
+
+
+class TurnRaceCase(unittest.TestCase):
+    """并发安全：轮标识必须**按参数**走 ✗ 不能读实例属性 ✓
+
+    背景（终审发现 ✗）：`self._rotation_turn` 是实例属性 ✓
+    两个请求并发时 B 会覆盖 A 的值 ✗ → A 的 `rotation_extras` 读到**B 的轮** ✓
+    ⇒ 该轮轮换提前/延后推进一次（后果轻微但不该有 ✓）
+    """
+
+    def test_param_beats_stale_instance_attr(self):
+        """实例属性被别的请求改脏了 ✗ 传进来的 `turn` 必须**赢** ✓"""
+        main = _main_module()
+
+        async def run():
+            tmp = tempfile.TemporaryDirectory()
+            store = storage.Store(Path(tmp.name) / "m.db")
+            store.initialize()
+            stub = types.SimpleNamespace(
+                store=store, rotation={},
+                seen_window=types.SimpleNamespace(get=lambda k: {}, remember=lambda *a, **k: None),
+                model_text=lambda t, *a: t or "",
+            )
+            stub.rotation_state = types.MethodType(main.AlifeMemoryPlugin.rotation_state, stub)
+            cfg = types.SimpleNamespace(
+                rotate_enabled=True, rotate_count=2, rotate_min_hits=0,
+                fact_recall_min_score=0.0, rotate_cooldown_rounds=10, rotate_keep_rounds=3,
+            )
+            rows = [{"id": "r%d" % i, "content": "记忆 %d" % i} for i in range(6)]
+            text_of = lambda row: row.get("content") or ""
+            # 先建批 ✓ 让 state 有 turn ✓
+            await main.AlifeMemoryPlugin.rotation_extras(
+                stub, "s", cfg, rows, "k1", text_of, "archive", turn=(1, 111))
+            # ★ 模拟"另一个请求把实例属性改脏了" ✗
+            TURN = (9, 999)
+            # 传入 (2, 222) → 必须按**参数**判定为新一轮 ✓（而不是被脏值影响）
+            await main.AlifeMemoryPlugin.rotation_extras(
+                stub, "s", cfg, rows, "k1", text_of, "archive", turn=(2, 222))
+            st = stub.rotation["s"]["slots"]["archive"]
+            turns = st.get("turn")
+            tmp.cleanup()
+            return turns
+
+        got = asyncio.run(run())
+        self.assertEqual(got, (2, 222), "轮标识被实例属性污染了 ✗（应完全按参数走）")
