@@ -605,11 +605,15 @@ class CascadeCatchUpCase(unittest.TestCase):
                      "[]", i + 1, now, "session"))
             db.commit()
 
-    def test_one_job_catches_up_whole_session(self):
-        sid = "legacy:catchup:1"
-        n = 200
-        self._seed(sid, n)
-        cfg = c.Settings()          # 默认 batch_size=40 / rounds=12 ✓
+    def test_one_job_respects_batch_cap(self):
+        """一条任务最多压 `compress_batches_per_job` 批 ✓（花钱闸门 ✓ 2026-09-17 用户要求 ✓）
+
+        历史：先修了"每轮重问 boost ⇒ 只压 1 批"的 bug ✓ 但放开成"追平整个会话"后
+        2000 条 ≈50 次模型调用会几分钟烧完 ✗ ⇒ 改为可配置上限（默认 3 批 = 120 条）✓
+        """
+        sid = "legacy:cap:1"
+        self._seed(sid, 200)
+        cfg = c.Settings()          # compress_batches_per_job 默认 3 ✓
         e._BOOST_AT.pop(sid, None)
         calls = []
 
@@ -629,10 +633,39 @@ class CascadeCatchUpCase(unittest.TestCase):
         finally:
             loop.close()
         with self.store.connect() as db:
-            left = db.execute("SELECT count(*) FROM records WHERE sid=? AND active=1 AND level=0",
-                              (sid,)).fetchone()[0]
-        self.assertEqual(left, 0, "还剩 %d 条 L0 没归档 ✗ ⇒ 一条任务没能追平会话 ✓" % left)
-        self.assertGreater(len(calls), 1, "只调了一次模型 ✗ ⇒ 又被冷却卡住了（回归 ✓）")
+            archived = db.execute(
+                "SELECT count(*) FROM records WHERE sid=? AND active=0 AND level=0", (sid,)).fetchone()[0]
+        cap = cfg.compress_batches_per_job * cfg.batch_size
+        self.assertLessEqual(archived, cap, "压了 %d 条，超过上限 %d ✗（花钱闸门失效 ✓）" % (archived, cap))
+        self.assertGreater(archived, cfg.batch_size,
+                           "只压了一批 ✗ ⇒ 又回到「每轮重问 boost」的老 bug ✓")
+        self.assertLessEqual(len(calls), cfg.compress_batches_per_job + 1,
+                             "模型调用 %d 次，超出闸门 ✗" % len(calls))
+
+    def test_batch_cap_one_means_one_batch(self):
+        sid = "legacy:cap:2"
+        self._seed(sid, 200)
+        cfg = c.Settings(compress_batches_per_job=1)
+        e._BOOST_AT.pop(sid, None)
+
+        async def model(*a, **k):
+            return json.dumps({"summary": "合并摘要", "facts": []})
+
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = e.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            archived = db.execute(
+                "SELECT count(*) FROM records WHERE sid=? AND active=0 AND level=0", (sid,)).fetchone()[0]
+        self.assertLessEqual(archived, cfg.batch_size, "cap=1 时应只压 1 批（40 条）✗")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

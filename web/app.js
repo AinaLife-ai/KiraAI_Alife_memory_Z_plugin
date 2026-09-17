@@ -53,6 +53,7 @@ const fields = {
   compress_stale_after_days: "陈旧记忆几天后开始消化",
   compress_idle_after_hours: "会话闲置几小时后收尾",
   compress_idle_cooldown_min: "收尾压缩的冷却（分钟）",
+  compress_batches_per_job: "单个压缩任务连压几批",
   compress_batch_mode: "压缩分批模式",
   compress_rounds: "每批压缩轮数",
   threshold: "首层压缩阈值",

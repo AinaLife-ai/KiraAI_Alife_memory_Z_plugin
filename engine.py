@@ -824,8 +824,9 @@ class Engine:
         #   2000 条要按 40 条/30 分钟慢慢爬 ⇒ **25 小时** ✗✓
         # 一次判定 = 这条任务"追平这个会话"的授权 ✓ 循环里一直有效 ✓
         # （循环本身在 `compression_plan` 返回 None 时立刻退出 ✓ 不会空转 ✓）
+        _cap = max(1, min(64, int(getattr(self.settings(), "compress_batches_per_job", 3) or 3)))
         _boost = _boost_ok(sid, self.settings())
-        for _ in range(64):
+        for _ in range(_cap):          # ← 花钱闸门 ✓ 一条任务最多 _cap 批 ✓
             cfg = self.settings()
             if not cfg.enabled:
                 return steps
