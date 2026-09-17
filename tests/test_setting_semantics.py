@@ -123,3 +123,52 @@ class HelpStyleCase(unittest.TestCase):
         median = lens[len(lens) // 2]
         self.assertLess(median, self.MAX / 2,
                         "帮助文案整体变长了 ✗（中位 %d 字 ✓ 应在一句话级别 ✓）" % median)
+
+
+class HtmlStructureCase(unittest.TestCase):
+    """HTML 结构底线：**不允许重复 id** ✓（2026-09-17 用户实测事故 ✓）
+
+    v2.18.20 加「重新提取事实」按钮时，把 `删除 / 保存修改` **又抄了一份** ✗
+    ⇒ 界面上出现**两组**按钮 ✓ 第二个点了**没反应**（同 id 只绑定第一个 ✓）
+    ⇒ 这类错误不报错、只是长得不对 ✗ ⇒ 必须静态查 ✓
+    """
+
+    def test_no_duplicate_ids(self):
+        import collections
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        ids = re.findall(r'\bid="([^"]+)"', html)
+        dup = sorted(k for k, v in collections.Counter(ids).items() if v > 1)
+        self.assertEqual(dup, [], "HTML 里 id 重复 ✗（第二个按钮点了没反应 ✓）：%s" % dup)
+
+    def test_every_js_referenced_id_exists(self):
+        """JS 里 `$("#x")` 引用的 id 必须在 HTML 里存在 ✓（防"按钮消失" ✓）"""
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        # ⚠️ 三个来源都要扫 ✗✓ —— 只扫"HTML 文件里"会漏掉**JS 内联 HTML 里创建的 id**
+        #   （例：graphClear / newSid 都是 app.js 的模板字符串里 `<button id="…">` ✓）
+        #   第一版正则漏了这两处 ⇒ **误报** ✓（"检查器本身要被验证"今天第三次应验 ✓）
+        have = (set(re.findall(r'\bid="([^"]+)"', html))
+                | set(re.findall(r'\bid="([^"]+)"', js))
+                | set(re.findall(r'\.id\s*=\s*"([^"]+)"', js)))
+        want = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', js))
+        missing = sorted(want - have)
+        self.assertEqual(missing, [], "JS 引用了 HTML 里不存在的 id ✗：%s" % missing)
+
+
+class SchemaDescriptionSyncCase(unittest.TestCase):
+    """`schema.json` 的 description 必须与 `setting_help` 一致 ✓
+
+    （2026-09-17 发现：改了帮助文案却**忘了重新生成** schema ✗ ⇒ 界面起作用的
+      其实是 schema 里的描述 ✓ 不同步就会出现"代码改了、界面还是旧话"✓）
+    """
+
+    def test_schema_description_matches_help(self):
+        import json
+        sch = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["alife"]["fields"]
+        bad = []
+        for key in c.Settings.model_fields:
+            entry = sch.get(key) or {}
+            desc = entry.get("description")
+            if desc and desc != h.HELP.get(key):
+                bad.append(key)
+        self.assertEqual(bad, [], "schema 描述与 setting_help 不一致 ✗（忘记重新生成？✓）：%s" % bad)

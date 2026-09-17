@@ -213,6 +213,7 @@ def audit(root: Path | str = ROOT) -> dict[str, list[str]]:
         "binding_mismatch": _check_bindings(js),
         "route_mismatch": _check_routes(js, main_py),
         "global_jobs_gate": _global_jobs_gate(js, html, main_py),
+        "html_ids": _check_html_ids(js, html),
     }
 
 
@@ -248,6 +249,21 @@ def _global_jobs_gate(js: str, html: str, main_py: str) -> list[str]:
     return problems
 
 
+def _check_html_ids(js: str, html: str) -> list[str]:
+    """HTML 里**不允许出现重复 id** ✗✓（2026-09-17 用户实测 ✓）
+
+    事故：v2.18.20 加「重新提取事实」按钮时，把 `删除 / 保存修改` **又抄了一份** ✗
+    ⇒ 界面上出现**两组**按钮 ✓（同 id 重复 ✓ 浏览器只会绑定第一个 ✗ 第二个点了没反应 ✓）
+    ⇒ 这类错误**不报错、只是长得不对** ✓ ⇒ 必须静态查 ✓
+    """
+    import collections
+    import re as _re
+
+    ids = _re.findall(r'\bid="([^"]+)"', html)
+    dup = sorted(k for k, v in collections.Counter(ids).items() if v > 1)
+    return ["HTML 里 id 重复：%s ✗（同 id 只会绑定第一个 ⇒ 第二个按钮点了没反应 ✓）" % dup] if dup else []
+
+
 def main() -> int:
     result = audit()
     titles = {
@@ -256,6 +272,7 @@ def main() -> int:
         "binding_mismatch": "C. 绑定选择器与处理器读取的 dataset 键不一致",
         "route_mismatch": "D. 前端调用的接口与后端路由不一致",
         "global_jobs_gate": "E. 全局任务（整理永久记忆等）不得被「未选会话」拦住",
+        "html_ids": "F. HTML 不允许出现重复 id（会让按钮点了没反应）",
     }
     fatal = 0
     for key, title in titles.items():
