@@ -1267,6 +1267,22 @@ class Store:
             ]
         return snapshot(root, plugin_id, limit, Resolver(entities, adapters), decay_days=decay_days)
 
+    def backfill_tool_steps(self):
+        """把**存量**的工具步记录补上 `category='tool'` ✓（v2.18.19 ✓ 幂等 ✓）
+
+        背景：工具步的标记是 v2.18.19 才加的 ✗ ⇒ 升级前入库的工具步没标记 ✓
+        ⇒ 那些记录**过滤不到** ✗ 存量用户享受不到"bot 看不到工具步"的收益 ✓
+        识别方式：工具步的 content 里必定带 `{"tool_calls": …}`（capture 时写入 ✓）
+        返回补标的条数 ✓（0 = 无需回填 ✓）
+        """
+        with self.connect() as db:
+            cur = db.execute(
+                "UPDATE records SET category='tool'"
+                " WHERE category='' AND deleted=0"
+                " AND content LIKE '%\"tool_calls\"%'"
+            )
+            return cur.rowcount or 0
+
     def legacy_migrated_at(self):
         """上次成功迁移旧记忆的时间戳（0 表示还没成功过）。"""
         with self.connect() as db:
@@ -1977,7 +1993,18 @@ class Store:
                     level,
                     start,
                     end,
-                    output["summary"],
+                    # v2.18.19：这一批若被**字符上限截断** ✗（可能切在轮中间 ✓）
+                    # ⇒ 摘要尾部加 `…` ✓ 表示"后面还有" ✓
+                    #    用省略号而不是「（续）」✓ —— 更短 ✓ 且沿用仓库既有的截断约定 ✓
+                    #    已以 `…` 结尾就不重复加 ✗（模型自己可能写了 ✓）
+                    # ⚠️ 内联表达式 ✗ 不要另起变量 ✓（定义与使用曾在不同作用域炸过 ✓）
+                    str(output["summary"])
+                    + (
+                        "…"
+                        if any(r.get("_partial") for r in candidates)
+                        and not str(output["summary"]).rstrip().endswith("…")
+                        else ""
+                    ),
                     content,
                     dump(users),
                     min(r["position"] for r in candidates),
@@ -2409,18 +2436,26 @@ class Store:
                 (fact["id"],),
             )
 
-    def _drop_media_only(self, items):
+    def _drop_media_only(self, items, include_tools=False):
         """v2.18.12：把"只有引用壳/媒体、没有实质文字"的记录也滤掉 ✓
 
         `category="media"` 只管**新写入**的记录 ✗ 这里兜住两件事：
         ① **存量**记录（升级前就存进去的贴纸/图片描述 ✓ 日志实测过 ✓）
         ② 套着 `[Reply …]` / `↩N` 壳的媒体 ✓（旧判定漏掉的正是这种 ✓）
+
+        v2.18.19 追加：**工具步**默认也滤掉 ✓
+        工具步对**主模型**是过程噪声 ✗（bot 主被动召回 + 查档案都搜不到 ✓）
+        但**压缩侧不排除** ✓（转 `[工具调用]` 占位 ✓）⇒ 所以只在这条**召回**路上过滤 ✓
+        前端的"显示工具步"开关会以 `include_tools=True` 调进来 ✓
         """
-        from .retrieval import media_only
+        from .retrieval import is_tool_step, media_only
 
         names = self.known_names()
         return [
-            r for r in items if not media_only(str(r.get("content") or ""), names)
+            r
+            for r in items
+            if (include_tools or not is_tool_step(r))
+            and not media_only(str(r.get("content") or ""), names)
         ]
 
     def known_names(self, ttl=60):
@@ -2444,6 +2479,7 @@ class Store:
         self,
         sid="",
         keyword="",
+        include_tools=False,
         level=None,
         start=None,
         end=None,
@@ -2645,7 +2681,7 @@ class Store:
             items = [self.row(r) for r in rows]
             if skip_media:
                 # 兜住存量与"套了引用壳的媒体" ✓（开关关掉则照常返回 ✓）
-                items = self._drop_media_only(items)
+                items = self._drop_media_only(items, include_tools)
             return {"total": total, "items": items}
 
     def _fused_rows(
@@ -2848,7 +2884,7 @@ class Store:
                 best, score = row, current
         return {"fact": best, "score": round(score, 3)} if best and score >= threshold else None
 
-    def tidy_candidates(self, sid, days=14, limit=50):
+    def tidy_candidates(self, sid, days=14, limit=50, ids=None):
         """按「保留度」从低到高挑永久记忆整理候选（零模型）。
 
         保留度 = 重要度 0.35 + 访问衰减 0.25 + 创建衰减 0.1 + 访问加成 ≤0.3，
@@ -2865,6 +2901,10 @@ class Store:
                     (sid,),
                 )
             ]
+        if ids:
+            # v2.18.19：只整理**指定的这几条** ✓（前端"重新提取事实"按钮 / bot 指定 ✓）
+            keep = {str(i) for i in ids if i}
+            rows = [r for r in rows if str(r.get("id")) in keep]
         fresh = []
         for row in rows:
             if row.get("tidy_at") and row["tidy_at"] > cutoff:
@@ -3769,11 +3809,14 @@ class Store:
                 (record_id, model, revision, dump(vector)),
             )
 
-    def enqueue(self, kind, sid):
+    def enqueue(self, kind, sid, detail=""):
         with self.connect() as db:
             db.execute(
-                "INSERT OR IGNORE INTO jobs(id,kind,sid,state,created,updated) VALUES (?,?,?,'queued',?,?)",
-                (uid(), kind, sid, time.time(), time.time()),
+                # v2.18.19：`detail` 用来携带"强制整理 / 只整理某几条"这类参数 ✓
+                "INSERT OR IGNORE INTO jobs"
+                "(id,kind,sid,state,detail,created,updated)"
+                " VALUES (?,?,?,'queued',?,?,?)",
+                (uid(), kind, sid, detail, time.time(), time.time()),
             )
             return db.execute(
                 "SELECT id FROM jobs WHERE kind=? AND sid=? AND state IN ('queued','running')",

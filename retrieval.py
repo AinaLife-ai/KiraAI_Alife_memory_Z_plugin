@@ -10,6 +10,7 @@ from collections import OrderedDict
 _MEMORY_PAYLOAD_MARKERS = (
     '"archives_in_context"',
     '"children_total"',
+    '"kids"',        # v2.18.19：读原文改短键 ✗ 新旧都留以便识别历史载荷 ✓
     '"next_page"',
     '"subjects"',
     '"entities"',
@@ -151,37 +152,28 @@ def identity_info(entity_id):
 
 
 def archive_view(row, child_offset=0, child_count=20, include_content=False):
+    # v2.18.19：**短键 + 绝对时间 + 只带必要标记** ✓（用户要求与其他通道一致 ✓）
+    # · `t` 用**可读时间** ✗ 不再发 epoch 浮点（`1783254654.123` 谁都读不出 ✓）
+    # · `mem` **只在是永久记忆时**才写 ✓（不是就不写 ✗ 省掉 `"permanent":0` ✓）
     result = {
-        k: row[k]
-        for k in (
-            "id",
-            "sid",
-            "role",
-            "level",
-            "start",
-            "end",
-            "summary",
-            "users",
-            "speaker",
-            "revision",
-            "permanent",
-        )
+        "s": row.get("summary") or "",                        # 内容 ✓
+        "t": short_time(row.get("end") or row.get("start")),  # 绝对时间（跨年才带年份 ✓）
+        "sp": row.get("speaker") or "",                       # 说话人 ✓
+        "lv": row.get("level", 0),                            # 0=原文 / 1+=摘要 ✓
     }
+    if row.get("permanent"):
+        # 永久记忆 = 必须每轮在场的那种（bot 主动写的约束/身份 ✓ 不是提取出来的事实 ✓）
+        result["mem"] = 1
     children = row.get("children", [])
-    result.update(
-        children=children[child_offset : child_offset + child_count],
-        children_total=len(children),
-        child_offset=child_offset,
-        next_child_offset=child_offset + child_count
-        if child_offset + child_count < len(children)
-        else None,
-    )
-    result["parents"] = row.get("parents", [])
+    if children:
+        result["kids"] = len(children)
+        if child_offset + child_count < len(children):
+            result["next"] = child_offset + child_count
     if include_content:
         result["versions"] = row.get("versions", [])
         result["legacy_sources"] = row.get("legacy_sources", [])
-    result["content_included"] = not children or include_content
-    if result["content_included"]:
+    result["ci"] = not children or include_content
+    if result["ci"]:
         # Decode only the plugin's own complete archive/message envelope, not arbitrary prose.
         content = row["content"]
         try:
@@ -511,7 +503,18 @@ def _scan_bracket(text, start):
 
 
 _REPLY_HEAD = re.compile(r"\[Reply ID:\s*(\d+)\s*content:\s*")
-_MEDIA_HEAD = re.compile(r"\[(Sticker|Image)\s+")
+# v2.18.18：**媒体占位符开头**就算媒体 ✓
+# ⚠️ 注意它**本来就不要求闭合的 ]** ✓ —— 用户日志里漏掉的那条
+# `[Image 这张图片展示了…`（描述被截断/省略号收尾 ✗）正是靠这一点被接住的 ✓
+# ⚠️ 词表要覆盖**宿主与插件双方**产生的形态 ✓（宿主：`[Image …]`/`[Sticker …]` ✓）
+# 且**不能**包含 `Reply` ✗ —— 引用壳后面可能跟着真话 ✓（`[Reply x] 你好呀`）
+# 词表只写一处 ✓ 两个正则都从它生成 ✗ 免得漂移 ✓
+_MEDIA_WORDS = (
+    r"Sticker|Image|图片|贴纸|表情|语音|视频|文件|图文|"
+    r"voice|video|file|photo|image|face"
+)
+_MEDIA_HEAD = re.compile(r"\[(" + _MEDIA_WORDS + r")\s+", re.I)          # 显示裁剪用（要捕获组 ✓）
+_MEDIA_HEAD_ANY = re.compile(r"^\s*\[(?:" + _MEDIA_WORDS + r")(?:\s|\])", re.I)   # 判据用（不要求空格/闭合 ✓）
 
 
 def _clip(text, limit):
@@ -985,6 +988,53 @@ _MEDIA_BLOCK = re.compile(
 )
 
 
+# v2.18.19：**召回侧**的短化 ✓ —— 与发给压缩模型的 `model_text` **分开** ✗
+#  · 压缩模型要描述（那是压缩的原料 ✓ 删了就永远提取不出图片相关事实 ✗）
+#  · 主模型不要视觉细节 ✗ ⇒ 图片/贴纸一律转占位 `[Image]` ✓
+#  · 没有 content 的"纯引用壳"（`[Reply ID: -71，[Sticker …]` / `[Reply -208950819]`）
+#    是真·噪声 ✗（既看不到原消息 ✓ 又占字符 ✗）⇒ 转 `[Reply]` ✓
+# 一个正则覆盖**两种**引用壳 ✓ 免得"带 content 的那支"漏下孤立的 `]` ✗（实测踩过 ✓）
+# **两段式** ✓ 顺序不能反 ✗（反过来"带 content"那支会被普通壳整段吃掉 ✓ 原文就丢了 ✗）
+# ① 带 content 的（能显示引用的原消息 ✓ 那是有用信息 ✓）→ 保壳+原文 ✓
+_REPLY_WITH_CONTENT = re.compile(
+    r"\[Reply(?:\s+ID)?[:\s,，]*\s*-?\d+\s*content:\s*([^\[\]]*?)\s*\]",
+    re.I,
+)
+# ② 容忍**一层嵌套** ✓ —— 真实形态：`[Reply ID: -71，[Sticker 一张动漫风格的插画]]`
+#    （用户日志实测 ✓）里层已经先被转成 `[Image]` ✓ 所以这层要能吃下 `[…]` ✓
+_REPLY_SHELL = re.compile(r"\[Reply(?:[^\[\]]|\[[^\[\]]*\])*\]", re.I)
+_MEDIA_INLINE = re.compile(r"\[(?:" + _MEDIA_WORDS + r")[^\]]*\]", re.I)
+
+
+def recall_text(text, limit=0):
+    """把一条记忆短化成**给主模型看**的样子 ✓（壳与媒体转占位 ✓）
+
+    ⚠️ 压缩侧**不要**用它 ✗ —— 那边必须保留描述 ✓（见 `model_text` ✓）
+    """
+    out = str(text or "")
+    # ⚠️ 顺序很重要 ✗：必须先媒体、再带 content 的引用壳、最后收其余的壳 ✓
+    out = _MEDIA_INLINE.sub(" [Image] ", out)                    # ① 里层媒体 → 占位 ✓
+    out = _REPLY_WITH_CONTENT.sub(                               # ② 能显示原消息的 → 保留 ✓
+        lambda m: " [Reply] " + m.group(1).strip() + " ", out
+    )
+    out = _REPLY_SHELL.sub(" [Reply] ", out)                     # ③ 只有 id 的 → 纯占位 ✓
+    out = re.sub(r"\s+", " ", out).strip()
+    if limit and len(out) > limit:
+        return out[:limit].rstrip() + "…"
+    return out
+
+
+def is_tool_step(row):
+    """是不是"工具步"记录 ✓（capture 时打了 `category='tool'` ✓）
+
+    v2.18.19：工具步对**主模型**是过程噪声 ✗ ⇒ 召回侧全链路过滤 ✓
+    但对**压缩模型**是上下文 ✗ ⇒ 压缩侧保留（转短占位 ✓）
+    """
+    return str((row or {}).get("category") or "") == "tool"
+
+
+
+
 def media_only(content, names=()):
     """是不是"只有引用壳/at 壳/媒体块、没有实质文字"的消息 ✓（默认不进召回 ✓ 数据保留 ✓）
 
@@ -993,7 +1043,12 @@ def media_only(content, names=()):
       · 否则 → 那是**正文** ✓（例如 `@他就好了` ✓ 绝不能被吃掉 ✓）
     结构化壳（[Reply]/[CQ:at]/<at>）与媒体块不依赖名字表 ✓ 空表也成立 ✓
     """
-    text = _ENVELOPE.sub(" ", content or "")
+    raw = content or ""
+    # ① 以**媒体占位符**开头的（含描述被截断、没有闭合括号的 ✗）直接判为媒体 ✓
+    #    注意**不包含**引用壳 ✓ 所以 `[Reply x] 你好呀` 不会被误杀 ✓
+    if _MEDIA_HEAD_ANY.match(raw):
+        return True
+    text = _ENVELOPE.sub(" ", raw)
     text = _MEDIA_BLOCK.sub(" ", text)
     kept = []
     for part in text.split():

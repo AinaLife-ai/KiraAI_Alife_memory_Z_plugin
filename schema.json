@@ -63,7 +63,7 @@
         "type": "integer",
         "name": "每批压缩轮数",
         "default": 12,
-        "description": "rounds 模式下每次压缩几轮（默认 12，约等于原来的 50 条）。攒够这么多**完整轮**才动手，绝不切半轮。",
+        "description": "rounds 模式下每次压缩几轮（默认 12，约等于原来的 50 条）。攒够这么多完整轮才动手，绝不切半轮。只在「按轮」模式生效。",
         "minimum": 1,
         "maximum": 200
       },
@@ -77,7 +77,7 @@
         "type": "integer",
         "name": "首层压缩阈值",
         "default": 50,
-        "description": "同一会话攒到多少条原始记录才开始整理。默认50；一问一答通常是2条（带工具调用的回复会更多）。事实只在整理时提取，所以这个值越大，事实出现得越晚。",
+        "description": "同一会话攒到多少条原始记录才开始整理（只在「按条」模式生效）。默认50；一问一答通常是2条（带工具调用的回复会更多）。事实只在整理时提取，所以这个值越大，事实出现得越晚。",
         "minimum": 4,
         "maximum": 10000
       },
@@ -85,7 +85,7 @@
         "type": "integer",
         "name": "首层每批条数",
         "default": 40,
-        "description": "每次最多整理多少条，必须小于压缩阈值。默认40；模型慢可改20。整理后剩下的「阈值−每批」条原文会原样留着（默认10条）。",
+        "description": "每次最多整理多少条（只在「按条」模式生效），必须小于压缩阈值。默认40；模型慢可改20。整理后剩下的「阈值−每批」条原文会原样留着（默认10条）。",
         "minimum": 2,
         "maximum": 9999
       },
@@ -498,7 +498,7 @@
         "type": "switch",
         "name": "自动合并相似永久记忆",
         "default": true,
-        "description": "开启后，后台用审计模型检查相似的永久记忆，确属同一件事的重复或更正时自动合并（保留最新一条，其余移出常驻上下文，原文保留）。默认开启。"
+        "description": "开启后，后台用审计模型检查相似的永久记忆，确属同一件事的重复或更正时自动合并（保留最新一条，其余移出活跃记忆，原文保留）。默认开启。"
       },
       "dedupe_force_merge": {
         "type": "switch",
@@ -526,7 +526,7 @@
         "type": "switch",
         "name": "检索默认只搜常驻",
         "default": false,
-        "description": "关闭（默认）时检索会连已归档的旧记忆一起搜，被动召回更全；开启后只搜常驻上下文，归档需显式 include_archived=true。冷归档、软删与超龄淡出不受影响。"
+        "description": "关闭（默认）时检索会连已归档的旧记忆一起搜，被动召回更全；开启后只搜活跃记忆，归档需显式 include_archived=true。冷归档、软删与超龄淡出不受影响。"
       },
       "recall_skip_media": {
         "type": "switch",
@@ -541,6 +541,38 @@
         "description": "归档满这么多天后自动进入冷归档：任何检索都搜不到，只能按存档ID读取。默认180天；0=不按时间冷归档（被 Forget 或被合并取代的记忆仍会立即冷归档）。",
         "minimum": 0,
         "maximum": 3650
+      },
+      "compress_input_max_chars": {
+        "type": "integer",
+        "name": "每批压缩的原文上限（字符）",
+        "default": 20000,
+        "description": "一批压缩最多喂多少字符的原文（默认 20000）。在轮边界上截断，绝不切半轮；只有单轮本身就超限时才切并标「（续）」。防止几千条存量数据一次喂进去把 token 撑爆。",
+        "minimum": 1000,
+        "maximum": 200000
+      },
+      "compress_stale_after_days": {
+        "type": "integer",
+        "name": "陈旧记忆几天后开始消化",
+        "default": 3,
+        "description": "最老的未压缩记忆超过这么多天，就把它所在会话的门槛降为 1（默认 3 天）。用于消化存量：老数据不用等攒够轮数或条数。",
+        "minimum": 0,
+        "maximum": 365
+      },
+      "compress_idle_after_hours": {
+        "type": "integer",
+        "name": "会话闲置几小时后收尾",
+        "default": 6,
+        "description": "会话最新一条记忆超过这么多小时没动静，就视为这轮对话已结束，门槛降为 1（默认 6 小时）。",
+        "minimum": 0,
+        "maximum": 720
+      },
+      "compress_idle_cooldown_min": {
+        "type": "integer",
+        "name": "收尾压缩的冷却（分钟）",
+        "default": 30,
+        "description": "同一个会话两次「降门槛抽干」之间至少隔多少分钟（默认 30）。防止连续抽干烧 token。",
+        "minimum": 0,
+        "maximum": 1440
       },
       "fact_merge_enabled": {
         "type": "switch",

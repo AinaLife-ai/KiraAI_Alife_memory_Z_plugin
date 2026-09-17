@@ -95,9 +95,9 @@ def test_memory_rules_keeps_the_essential_tokens():
         "CorrectMemory",
         "names",
         "sp",
-        "按主体分组",
-        "组内每行",
-        "谁说的",
+        "记忆简报",
+        "主体码",
+        "存档",
     ):
         assert token in block, token
     # 尺寸守卫：改由框架套件对「真实发出去的那份」测（tests/test_kira_integration.py）✓

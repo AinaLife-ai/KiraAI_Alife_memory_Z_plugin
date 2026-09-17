@@ -69,12 +69,12 @@ def test_rules_block_describes_grouped_layout():
     """给模型每轮看的规则块必须描述分组格式，且不得残留旧字段名（v2.17.0 改格式时漏改过 ✗）。"""
     import importlib, types
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "按主体分组" in source
+    assert "记忆简报" in source or "按主体分组" in source
     _g = source[source.index("_GROUPED_FACT_DOC = (") : source.index("MEMORY_RULES = (")]
-    _f = source[source.index("_FLAT_FACT_DOC = (") : source.index("def memory_rules")]
+    # v2.18.19：注入统一为紧凑简报 ✗ `_FLAT_FACT_DOC` 已删 ✓（两种视图共用同一份说明 ✓）
     for stale in ("u=主体ID", "t2", "rec=记录日期", "src=来源存档ID"):
         assert stale not in _g, "分组说明残留旧措辞：" + stale
-        assert stale in _f, "扁平说明缺该模式词汇（回滚路径必须自洽）：" + stale
+    assert "_FLAT_FACT_DOC" not in source, "扁平文档已删 ✗ 不该再残留 ✓"
 
 
 def test_grouped_example_line_matches_real_render():

@@ -22,6 +22,37 @@ const fields = {
   inject_recent_raw: "注入最近原文",
   capture_enabled: "记录对话与感知",
   auto_inject: "持续上下文与感知注入",
+  fact_view: "事实展示方式",
+  expand_query: "关键词扩展查询",
+  compress_persona: "压缩时的角色设定",
+  audit_persona: "审计时的角色设定",
+  inject_mode: "记忆注入方式",
+  proactive_jitter: "主动发言抖动",
+  proactive_min_sessions: "主动发言最少会话数",
+  proactive_max_sessions: "主动发言最多会话数",
+  proactive_rotate: "主动发言轮换",
+  memorize_cover_check: "记忆覆盖检查",
+  permanent_tidy_enabled: "常驻区自动整理",
+  permanent_tidy_on_write: "写入后立即整理常驻区",
+  permanent_cap: "常驻记忆上限（条）",
+  permanent_budget_chars: "常驻区字符预算",
+  permanent_tidy_batch: "常驻整理每批条数",
+  permanent_tidy_days: "常驻整理间隔（天）",
+  fact_merge_cross_threshold: "跨会话事实合并阈值",
+  fact_merge_evidence: "合并时保留证据",
+  rotate_enabled: "轮换槽位开关",
+  rotate_count: "每次轮换注入条数",
+  rotate_keep_rounds: "一批记忆保留几轮",
+  rotate_min_hits: "至少被用上几次才留下",
+  rotate_cooldown_rounds: "轮换冷却（轮）",
+  inject_budget_ms: "注入耗时预算（毫秒）",
+  permanent_dedupe_cross_threshold: "常驻跨会话去重阈值",
+  fact_recall_min_score: "事实召回最低分",
+  recall_skip_media: "检索跳过媒体",
+  compress_input_max_chars: "每批压缩的原文上限（字符）",
+  compress_stale_after_days: "陈旧记忆几天后开始消化",
+  compress_idle_after_hours: "会话闲置几小时后收尾",
+  compress_idle_cooldown_min: "收尾压缩的冷却（分钟）",
   compress_batch_mode: "压缩分批模式",
   compress_rounds: "每批压缩轮数",
   threshold: "首层压缩阈值",
@@ -71,7 +102,7 @@ const fields = {
   record_merge_reason_chars: "永久记忆合并理由（硬上限）",
   record_merge_prompt: "永久记忆合并提示词",
   profile_summary_count: "画像摘要条数",
-  search_active_only: "检索默认只搜常驻",
+  search_active_only: "检索默认只搜活跃记忆",
   cold_after_days: "归档转入冷归档天数",
 };
 let ctx = null,
@@ -541,7 +572,7 @@ async function poll() {
               Math.max(3, (100 * l.count) / max) +
               '%"></i></div><small>' +
               l.active +
-              " 常驻 / " +
+              " 活跃记忆 / " +
               l.count +
               "</small></div>",
           )
@@ -613,11 +644,27 @@ async function selectTab(name) {
   if (name === "settings" && !configDirty) await loadConfig();
   saveDraft();
 }
+// v2.18.19：给档案浏览加一个"显示工具步"开关 ✓（默认关 ✓）
+// bot 主被动召回**永远**看不到工具步 ✗ —— 这里只是让**你**能翻出来看 ✓
+function ensureToolToggle() {
+  if (document.querySelector("#includeTools")) return;
+  const anchor = document.querySelector("#includeGlobal");
+  const box = anchor && anchor.closest("label");
+  if (!box) return;
+  const wrap = document.createElement("label");
+  wrap.className = box.className;
+  wrap.innerHTML =
+    '<input type="checkbox" id="includeTools"> <span>显示工具步</span>';
+  box.insertAdjacentElement("afterend", wrap);
+  wrap.querySelector("input").addEventListener("change", () => loadArchives());
+}
 async function loadArchives() {
+  ensureToolToggle();
   const selectedSid = $("#session").value;
   const q = {
     sid: selectedSid,
     include_global: $("#includeGlobal").checked,
+    include_tools: !!(document.querySelector("#includeTools") || {}).checked,
     keyword: $("#keyword").value,
     prompt: $("#semantic").value,
     offset,
@@ -651,7 +698,7 @@ async function loadArchives() {
             (r.cold
               ? "冷归档 · 仅按ID可读"
               : r.active
-                ? "常驻上下文"
+                ? "活跃记忆"
                 : "历史存档") +
             '</small><button data-open="' +
             esc(r.id) +
@@ -927,7 +974,32 @@ function renderRecord() {
     (e) => (e.onclick = () => guard(() => openRecord(e.dataset.child))),
   );
   $("#forget").classList.toggle("hide", !r.permanent);
-  $("#forget").textContent = r.active ? "移出常驻上下文" : "恢复到常驻上下文";
+  $("#forget").textContent = r.active ? "移出活跃记忆" : "恢复到活跃记忆";
+  // v2.18.19：**常驻的永久记忆**多给一个按钮 ✓ —— 无视 14 天冷却，只对这一条重跑整理 ✓
+  // 用途：用户觉得不准、或想再提取一次事实 ✓（整理动作里含 extract=用 facts 提炼 ✓）
+  // 按钮**动态创建** ✗ 不动 HTML ✓（避免改 HTML 结构 ✓ 与工具步开关同一套做法 ✓）
+  let re = $("#reextract");
+  if (!re && $("#forget")) {
+    re = document.createElement("button");
+    re.id = "reextract";
+    re.className = "quiet";
+    re.textContent = "重新提取事实";
+    $("#forget").insertAdjacentElement("afterend", re);
+  }
+  if (re) {
+    re.classList.toggle("hide", !r.permanent);
+    re.onclick = () =>
+      guard(async () => {
+        await api("/jobs", {
+          kind: "tidy",
+          sid: r.sid,
+          force: true,        // 无视冷却 ✓
+          ids: [r.id],        // 只这一条 ✓
+        });
+        toast("已开始重新提取（无视冷却）· 稍后看任务明细");
+        await poll();
+      });
+  }
   $("#delete").classList.remove("hide");
 }
 async function openFact(row) {
@@ -1729,16 +1801,49 @@ $("#conflictDiscard").onclick = () =>
     $("#conflict").classList.add("hide");
     toast("已载入最新设置");
   });
+// v2.18.19：整理永久记忆时先问一句 —— 按冷却 还是 全部重新整理 ✓
+// 用仓库既有的原生 `<dialog class="dialog">` ✓（已有样式与 ::backdrop ✓ 自带 ESC 关闭 ✓）
+function askTidyMode() {
+  return new Promise((resolve) => {
+    // 冷却天数从设置表单读 ✓（没渲染就读不到 → 回退 14 ✓）
+    const box = document.querySelector('[data-key="permanent_tidy_days"]');
+    const days = (box && box.value) || "14";
+    const d = document.createElement("dialog");
+    d.className = "dialog";
+    d.innerHTML =
+      "<h4>整理永久记忆</h4>" +
+      '<label class="field"><input type="radio" name="tidymode" value="due" checked>' +
+      "<span>只整理到期的 —— 按 " + days + " 天冷却挑还没整理的，省 token</span></label>" +
+      '<label class="field"><input type="radio" name="tidymode" value="all">' +
+      "<span>全部重新整理 —— 无视冷却，把每个会话里常驻的永久记忆都过一遍；" +
+      "更耗 token，但可以重新提取事实</span></label>" +
+      '<div class="actions"><button id="tidyCancel">取消</button>' +
+      '<button id="tidyGo">开始</button></div>';
+    document.body.appendChild(d);
+    const done = (v) => { try { d.close(); } catch (err) {} d.remove(); resolve(v); };
+    d.querySelector("#tidyCancel").onclick = () => done(null);
+    d.querySelector("#tidyGo").onclick = () =>
+      done(d.querySelector('input[name="tidymode"]:checked').value);
+    d.addEventListener("cancel", () => done(null));   // ESC ✓
+    d.showModal();
+  });
+}
 $$("[data-job]").forEach(
   (e) =>
     (e.onclick = () =>
       guard(async () => {
         if (!$("#jobSession").value) throw Error("请先选择一个已有会话");
-        await api("/jobs", {
+        const payload = {
           sid: $("#jobSession").value,
           kind: e.dataset.job,
-        });
-        toast("任务已进入后台队列");
+        };
+        if (e.dataset.job === "tidy") {
+          const mode = await askTidyMode();
+          if (!mode) return;                       // 取消 ✓
+          payload.force = mode === "all";           // 全部重新整理 → 无视冷却 ✓
+        }
+        await api("/jobs", payload);
+        toast(payload.force ? "已开始全部重新整理" : "任务已进入后台队列");
         await poll();
       })),
 );
