@@ -599,6 +599,9 @@ def failure_detail(exc):
 
 class Engine:
     def __init__(self, store, settings, model_call, embed, notice):
+        # v2.18.19：永久记忆**强制整理**的每会话防抖（10 秒）✓
+        # 与 14 天的 tidy 冷却无关 ✗ —— 那个只管后台自动 ✓ 这里防手抖连点 ✓
+        self._tidy_forced_at = {}
         self.store, self.settings = store, settings
         self.model_call, self.embed, self.notice = model_call, embed, notice
         self.tasks = []
@@ -686,10 +689,11 @@ class Engine:
         await self.store.call("requeue_running")
         self.tasks.clear()
 
-    async def enqueue(self, kind, sid, automatic=False):
+    async def enqueue(self, kind, sid, automatic=False, detail=""):
         if automatic and not await self.store.call("can_schedule", kind, sid):
             return None
-        job = await self.store.call("enqueue", kind, sid)
+        # v2.18.19：`detail` 透传给 worker ✓（例如整理永久记忆的"强制/指定条"✓）
+        job = await self.store.call("enqueue", kind, sid, detail)
         self.wake.set()
         return job
 
@@ -1474,11 +1478,26 @@ class Engine:
             )
         return done
 
-    async def tidy_permanents(self, sid, job_id=None):
-        """整理永久记忆：逐条 keep / extract / archive / split（只归档不删除）。"""
+    async def tidy_permanents(self, sid, job_id=None, force=False, ids=None):
+        """整理永久记忆：逐条 keep / extract / archive / split（只归档不删除）✓
+
+        v2.18.19：加两个参数 ✓
+          · `force=True` → **无视冷却**（`permanent_tidy_days` 默认 14 天）✓
+            用途：用户觉得不准、或想再提取一次事实 ✓（前端按钮 / 后台弹窗 / bot 传参 ✓）
+          · `ids=[...]` → **只整理这几条** ✓（前端"重新提取事实"按钮 ✓）
+        ⚠️ `force` 也受 **10 秒防抖** ✗ —— 防手抖连点与 token 爆炸 ✓
+        """
         cfg = self.settings()
         if not cfg.permanent_tidy_enabled:
             return 0
+        if force:
+            # 防抖：同一会话 10 秒内只允许强制整理一次 ✓
+            now = time.time()
+            last = self._tidy_forced_at.get(sid)
+            if last is not None and now - last < 10:
+                self.last_tidy_note = "刚整理过（10 秒防抖），稍后再试"
+                return 0
+            self._tidy_forced_at[sid] = now
         live = await self.store.call("permanent_records", sid)
         # 任务本身就是「整理一次」：容量闸门只在**自动触发**处判断
         # （注入侧/定时器超上限才排队）；被 Bot 或人手动叫起来的这一次，
@@ -1489,10 +1508,16 @@ class Engine:
         over_cap = len(live) > cfg.permanent_cap
         wanted = len(live) if over_cap else cfg.permanent_tidy_batch
         candidates = await self.store.call(
-            "tidy_candidates", sid, cfg.permanent_tidy_days, max(wanted, 1)
+            "tidy_candidates",
+            sid,
+            0 if force else cfg.permanent_tidy_days,   # force → 0 天 = 无视冷却 ✓
+            max(wanted, 1),
+            ids,
         )
         if not candidates:
             self.last_tidy_note = (
+                "指定的永久记忆不在可整理集合里，本次跳过" if ids else
+                "已强制整理过（无视 %d 天冷却），但没有任何可整理的条目" % cfg.permanent_tidy_days if force else
                 "%d 条永久记忆都在 %d 天整理间隔内，本次跳过"
                 % (len(live), cfg.permanent_tidy_days)
             )
@@ -1601,7 +1626,19 @@ class Engine:
                 continue
             started = time.monotonic()
             try:
-                applied = await self.tidy_permanents(job["sid"], job["id"])
+                _force, _ids = False, None
+                _raw = (job.get("detail") or "").strip()
+                if _raw:
+                    try:
+                        import json as _json
+                        _d = _json.loads(_raw)
+                        _force = bool(_d.get("force"))
+                        _ids = _d.get("ids") or None
+                    except Exception:
+                        self.last_tidy_note = "任务参数无法解析，已按默认（按冷却）执行"
+                applied = await self.tidy_permanents(
+                    job["sid"], job["id"], force=_force, ids=_ids
+                )
                 detail = (
                     "整理 %s 条永久记忆" % applied
                     if applied

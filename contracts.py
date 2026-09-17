@@ -429,6 +429,7 @@ class Search(Strict):
     # v2.18.19：浏览档案时是否显示**工具步** ✗（默认不显示 ✓）
     # bot 主被动召回**永远**看不到工具步 ✓（那边是硬过滤 ✓ 与这个开关无关 ✓）
     include_tools: bool = False
+
     keyword: str = Field(default="", max_length=500)
     prompt: str = Field(default="", max_length=2000)
     level: int | None = Field(default=None, ge=0, le=100)
@@ -493,6 +494,10 @@ class NewMemory(Strict):
 
 
 class Job(Strict):
+    # v2.18.19：整理永久记忆时可**无视冷却**（force ✓）或**只整理指定的几条**（ids ✓）
+    # 前端「立即重新整理」/ 后台弹窗「全部重新整理」/ 单条「重新提取事实」都用它 ✓
+    force: bool = False
+    ids: list[str] | None = None
     # tidy 也允许手动排队：Bot 用 CorrectMemory(action=tidy) 触发，
     # 工作台的这个按钮走同一条链路。
     kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite"]

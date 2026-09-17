@@ -975,6 +975,31 @@ function renderRecord() {
   );
   $("#forget").classList.toggle("hide", !r.permanent);
   $("#forget").textContent = r.active ? "移出活跃记忆" : "恢复到活跃记忆";
+  // v2.18.19：**常驻的永久记忆**多给一个按钮 ✓ —— 无视 14 天冷却，只对这一条重跑整理 ✓
+  // 用途：用户觉得不准、或想再提取一次事实 ✓（整理动作里含 extract=用 facts 提炼 ✓）
+  // 按钮**动态创建** ✗ 不动 HTML ✓（避免改 HTML 结构 ✓ 与工具步开关同一套做法 ✓）
+  let re = $("#reextract");
+  if (!re && $("#forget")) {
+    re = document.createElement("button");
+    re.id = "reextract";
+    re.className = "quiet";
+    re.textContent = "重新提取事实";
+    $("#forget").insertAdjacentElement("afterend", re);
+  }
+  if (re) {
+    re.classList.toggle("hide", !r.permanent);
+    re.onclick = () =>
+      guard(async () => {
+        await api("/jobs", {
+          kind: "tidy",
+          sid: r.sid,
+          force: true,        // 无视冷却 ✓
+          ids: [r.id],        // 只这一条 ✓
+        });
+        toast("已开始重新提取（无视冷却）· 稍后看任务明细");
+        await poll();
+      });
+  }
   $("#delete").classList.remove("hide");
 }
 async function openFact(row) {
@@ -1776,16 +1801,49 @@ $("#conflictDiscard").onclick = () =>
     $("#conflict").classList.add("hide");
     toast("已载入最新设置");
   });
+// v2.18.19：整理永久记忆时先问一句 —— 按冷却 还是 全部重新整理 ✓
+// 用仓库既有的原生 `<dialog class="dialog">` ✓（已有样式与 ::backdrop ✓ 自带 ESC 关闭 ✓）
+function askTidyMode() {
+  return new Promise((resolve) => {
+    // 冷却天数从设置表单读 ✓（没渲染就读不到 → 回退 14 ✓）
+    const box = document.querySelector('[data-key="permanent_tidy_days"]');
+    const days = (box && box.value) || "14";
+    const d = document.createElement("dialog");
+    d.className = "dialog";
+    d.innerHTML =
+      "<h4>整理永久记忆</h4>" +
+      '<label class="field"><input type="radio" name="tidymode" value="due" checked>' +
+      "<span>只整理到期的 —— 按 " + days + " 天冷却挑还没整理的，省 token</span></label>" +
+      '<label class="field"><input type="radio" name="tidymode" value="all">' +
+      "<span>全部重新整理 —— 无视冷却，把每个会话里常驻的永久记忆都过一遍；" +
+      "更耗 token，但可以重新提取事实</span></label>" +
+      '<div class="actions"><button id="tidyCancel">取消</button>' +
+      '<button id="tidyGo">开始</button></div>';
+    document.body.appendChild(d);
+    const done = (v) => { try { d.close(); } catch (err) {} d.remove(); resolve(v); };
+    d.querySelector("#tidyCancel").onclick = () => done(null);
+    d.querySelector("#tidyGo").onclick = () =>
+      done(d.querySelector('input[name="tidymode"]:checked').value);
+    d.addEventListener("cancel", () => done(null));   // ESC ✓
+    d.showModal();
+  });
+}
 $$("[data-job]").forEach(
   (e) =>
     (e.onclick = () =>
       guard(async () => {
         if (!$("#jobSession").value) throw Error("请先选择一个已有会话");
-        await api("/jobs", {
+        const payload = {
           sid: $("#jobSession").value,
           kind: e.dataset.job,
-        });
-        toast("任务已进入后台队列");
+        };
+        if (e.dataset.job === "tidy") {
+          const mode = await askTidyMode();
+          if (!mode) return;                       // 取消 ✓
+          payload.force = mode === "all";           // 全部重新整理 → 无视冷却 ✓
+        }
+        await api("/jobs", payload);
+        toast(payload.force ? "已开始全部重新整理" : "任务已进入后台队列");
         await poll();
       })),
 );

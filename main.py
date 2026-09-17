@@ -2122,6 +2122,14 @@ class AlifeMemoryPlugin(BasePlugin):
                 "count": {"type": "integer", "minimum": 1, "maximum": 30},
                 "start": {"type": "number", "description": "Unix seconds"},
                 "end": {"type": "number", "description": "Unix seconds"},
+                "force": {
+                    "type": "boolean",
+                    # v2.18.19：只写**事实** ✗ 不写"平时不要传"这类引导 ✓（她自己判断 ✓）
+                    "description": (
+                        "仅 action=tidy 时有效：true = 无视 14 天整理间隔，"
+                        "把常驻的永久记忆整个重新过一遍（会重新提取事实 ✗ 更耗 token ✓）"
+                    ),
+                },
                 "ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -2519,7 +2527,8 @@ class AlifeMemoryPlugin(BasePlugin):
             "delete：软删（进回收站，可还原）；restore：从回收站恢复。\n"
             "archive：把记录移出活跃记忆（原文保留、可按 id 读回）。\n"
             "refresh：从适配器重新拉取某实体的当前昵称。\n"
-            "tidy：请系统整理永久记忆（不传 ids = 按保留度挑候选；传 ids = 这几条重新参与整理）。"
+            "tidy：请系统整理永久记忆（不传 ids = 按保留度挑候选；"
+            "传 ids = 这几条重新参与整理；force=true = 无视 14 天整理间隔整批重来）。"
         ),
         params={
             "type": "object",
@@ -2561,6 +2570,7 @@ class AlifeMemoryPlugin(BasePlugin):
         patch=None,
         content="",
         reason="",
+        force=False,
     ):
         """记忆维护的统一入口：改字段 / 合并 / 软删 / 恢复 / 归档 / 刷新昵称 / 触发整理。"""
         cfg = self.runtime_settings()
@@ -2586,16 +2596,28 @@ class AlifeMemoryPlugin(BasePlugin):
                         owners.add(row["sid"])
             # 没指定条目时，范围跟随 access scope：
             # global（默认）→ 所有有意久记忆的会话；session → 仅当前会话
+            # v2.18.19：`force` → 无视 14 天冷却 ✓（用户明确要求"重新整理"时才用 ✓）
+            # ⚠️ 强制时必须 automatic=False ✗ 否则会被调度门（can_schedule）挡掉 ✓
+            import json as _json
+            _detail = _json.dumps(
+                {"force": bool(force), "ids": targets or []}, ensure_ascii=False
+            )
             if not owners:
                 if cfg.recall_scope == "global":
-                    owners = set(await self.queue_tidy_all(event.sid))
+                    owners = set(
+                        await self.queue_tidy_all(event.sid, force=bool(force), ids=targets or None)
+                    )
                 else:
                     owners.add(event.sid)
                     for owner in sorted(owners):
-                        await self.engine.enqueue("tidy", owner, automatic=True)
+                        await self.engine.enqueue(
+                            "tidy", owner, automatic=not force, detail=_detail
+                        )
             else:
                 for owner in sorted(owners):
-                    await self.engine.enqueue("tidy", owner, automatic=True)
+                    await self.engine.enqueue(
+                        "tidy", owner, automatic=not force, detail=_detail
+                    )
             return self.recall_result(
                 event,
                 {

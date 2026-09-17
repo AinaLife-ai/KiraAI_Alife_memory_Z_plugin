@@ -2868,7 +2868,7 @@ class Store:
                 best, score = row, current
         return {"fact": best, "score": round(score, 3)} if best and score >= threshold else None
 
-    def tidy_candidates(self, sid, days=14, limit=50):
+    def tidy_candidates(self, sid, days=14, limit=50, ids=None):
         """按「保留度」从低到高挑永久记忆整理候选（零模型）。
 
         保留度 = 重要度 0.35 + 访问衰减 0.25 + 创建衰减 0.1 + 访问加成 ≤0.3，
@@ -2885,6 +2885,10 @@ class Store:
                     (sid,),
                 )
             ]
+        if ids:
+            # v2.18.19：只整理**指定的这几条** ✓（前端"重新提取事实"按钮 / bot 指定 ✓）
+            keep = {str(i) for i in ids if i}
+            rows = [r for r in rows if str(r.get("id")) in keep]
         fresh = []
         for row in rows:
             if row.get("tidy_at") and row["tidy_at"] > cutoff:
@@ -3789,11 +3793,14 @@ class Store:
                 (record_id, model, revision, dump(vector)),
             )
 
-    def enqueue(self, kind, sid):
+    def enqueue(self, kind, sid, detail=""):
         with self.connect() as db:
             db.execute(
-                "INSERT OR IGNORE INTO jobs(id,kind,sid,state,created,updated) VALUES (?,?,?,'queued',?,?)",
-                (uid(), kind, sid, time.time(), time.time()),
+                # v2.18.19：`detail` 用来携带"强制整理 / 只整理某几条"这类参数 ✓
+                "INSERT OR IGNORE INTO jobs"
+                "(id,kind,sid,state,detail,created,updated)"
+                " VALUES (?,?,?,'queued',?,?,?)",
+                (uid(), kind, sid, detail, time.time(), time.time()),
             )
             return db.execute(
                 "SELECT id FROM jobs WHERE kind=? AND sid=? AND state IN ('queued','running')",
