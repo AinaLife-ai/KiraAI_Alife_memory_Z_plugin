@@ -909,13 +909,13 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception as exc:  # 清理只是让老数据更好用，失败不影响任何功能
             logger.warning("[记忆·Z] 存量记录清理失败（下次启动会重试）：%s", exc)
 
-    async def queue_tidy_all(self, fallback_sid=""):
+    async def queue_tidy_all(self, fallback_sid="", automatic=True):
         """把所有有意久记忆的会话都排上整理（去重/提炼/归档都按归属会话执行）。"""
         owners = set(await self.store.call("sessions_with_permanents"))
         if fallback_sid:
             owners.add(fallback_sid)
         for owner in sorted(owners):
-            await self.engine.enqueue("tidy", owner, automatic=True)
+            await self.engine.enqueue("tidy", owner, automatic=automatic)
         return sorted(owners)
 
     async def queue_compress_all(self, limit=8):
@@ -2664,7 +2664,8 @@ class AlifeMemoryPlugin(BasePlugin):
         if self.settings.permanent_tidy_on_write:
             # 刚写下的永久记忆也顺手过一遍整理（提炼成事实/确认是否真该常驻 ✓）
             # 开销小：刚写入的那条本来就是待整理项，旧记录在 permanent_tidy_days 内会被跳过 ✓
-            await self.engine.enqueue("tidy", value.sid, automatic=True)
+            # bot 自己写下的永久记忆、顺手整理 ⇒ 属于"**有发起方**"✓ 要有日志 ✓
+            await self.engine.enqueue("tidy", value.sid, automatic=False)
         return self.recall_result(
             event, {"ok": True, "id": await self.store.call("short_id", record_id)}
         )
@@ -2822,7 +2823,9 @@ class AlifeMemoryPlugin(BasePlugin):
             if not owners:
                 if cfg.recall_scope == "global":
                     owners = set(
-                        await self.queue_tidy_all(event.sid, force=bool(force), ids=targets or None)
+                        await self.queue_tidy_all(
+                            automatic=False,  # bot 发起的 ⇒ 要有日志 ✓
+                            fallback_sid=event.sid, force=bool(force), ids=targets or None)
                     )
                 else:
                     owners.add(event.sid)
@@ -3353,7 +3356,9 @@ class AlifeMemoryPlugin(BasePlugin):
             # 永久记忆的成本是全局的（默认 recall_scope=global 时，
             # 任何会话都在付所有会话的永久记忆），所以工作台的这个按钮
             # 也按「所有有意久记忆的会话」排队，与 Bot 的 tidy 一致。
-            owners = await self.queue_tidy_all(value.sid)
+            owners = await self.queue_tidy_all(
+                value.sid, automatic=False  # 工作台按钮 ⇒ 手动 ✓ 必须有日志 ✓
+            )
             return {
                 "id": "",
                 "state": "queued",

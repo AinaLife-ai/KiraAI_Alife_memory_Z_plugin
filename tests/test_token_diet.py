@@ -674,3 +674,86 @@ class CascadeCatchUpCase(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+
+class QuietAutomaticJobCase(unittest.TestCase):
+    """自动任务**空转**时不该刷日志/占工作台 ✓（2026-09-17 用户要求 ✓）
+
+    用户看到的是：一批「事实合并完成（合并 0 组重复事实）」✗
+    —— 这类**不调模型、什么都没做**的任务 ✓ 只是噪音 ✓（连排 7 条 ✓）
+
+    ⚠️ 三条铁律（不能伤到有意义的日志 ✓）：
+      · **手动**任务永不静默 ✓（用户明确要求手动的要看得见 ✓）
+      · **真干活**的（哪怕只合并了 1 组）永不静默 ✓
+      · `audit` / `classify` / `rewrite` **一定调过模型** ⇒ 永不静默 ✓✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.eng = e.Engine(self.store, lambda: c.Settings(), None, None, None)
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        self.loop.close()
+        self.temp.cleanup()
+
+    def _q(self, kind, detail, automatic=True):
+        return self.loop.run_until_complete(
+            self.eng._quiet_automatic({"id": "x", "kind": kind, "sid": "s", "automatic": int(automatic)}, detail))
+
+    def test_automatic_noop_is_quiet(self):
+        self.assertTrue(self._q("fact_merge", "合并 0 组重复事实（0 条并入）"), "空合并该静默 ✓")
+        self.assertTrue(self._q("compress", "本次没有需要压缩的内容"), "空压缩该静默 ✓")
+
+    def test_manual_noop_is_visible(self):
+        self.assertFalse(self._q("fact_merge", "合并 0 组重复事实（0 条并入）", automatic=False),
+                         "手动任务必须可见 ✗（用户明确要求 ✓）")
+
+    def test_real_work_is_visible(self):
+        self.assertFalse(self._q("fact_merge", "合并 2 组重复事实（3 条并入）"), "真合并必须可见 ✓")
+        self.assertFalse(self._q("compress", "压缩 40 条 → L1"), "真压缩必须可见 ✓")
+
+    def test_model_calling_kinds_never_quiet(self):
+        for kind, detail in (("audit", "保留 3 · 修正 1"), ("classify", "已归类"),
+                             ("rewrite", "重写 2 条")):
+            self.assertFalse(self._q(kind, detail), "%s 一定调过模型 ⇒ 不许静默 ✗" % kind)
+
+    def test_quiet_notes_only_contain_noop_wording(self):
+        """清单本身也要守 ✓：只允许"确定不调模型"的空转措辞 ✓"""
+        for note in e.QUIET_JOB_NOTES:
+            self.assertIn("没有", note, "清单里混进了非空转措辞 ✗：%s" % note)
+
+
+class BotIssuedTaskVisibleCase(unittest.TestCase):
+    """**有发起方**的任务必须有日志 ✓（bot 发起 / 工作台按钮 ✓）
+
+    用户 2026-09-17 指出：tidy 那边如果**是 bot 发出的**，也要算"手动" ⇒ 要有日志 ✓
+    （区分标准不是"谁在跑"，而是"**有没有人在等结果**" ✓）
+    """
+
+    def test_queue_tidy_all_accepts_automatic_flag(self):
+        import inspect
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True)", src)
+        self.assertIn('enqueue("tidy", owner, automatic=automatic)', src)
+
+    def test_bot_and_workbench_call_it_as_manual(self):
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn("automatic=False,  # bot 发起的", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
+        self.assertIn("automatic=False  # 工作台按钮", code, "工作台按钮没标成手动 ✗")
+        self.assertIn('enqueue("tidy", value.sid, automatic=False)', code,
+                      "bot 写永久记忆后的整理没标成手动 ✗")
+
+    def test_truly_automatic_ones_stay_automatic(self):
+        """真正自动的（阈值兜底 / 调度器）保持 automatic=True ✓ 空转时仍可静默 ✓"""
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn('enqueue("tidy", owner, automatic=True)', code, "阈值兜底那条被误改了 ✗")
+
+    def test_reindex_noop_drops_job(self):
+        src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn('"drop_job", job["id"]', code, "reindex 空转还在留任务 ✗")

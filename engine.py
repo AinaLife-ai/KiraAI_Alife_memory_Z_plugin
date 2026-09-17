@@ -73,6 +73,14 @@ AUDIT_INSTRUCTION = (
 REWRITE_MAX_ATTEMPTS = 3  # 自动重试次数上限（手动排队不受限）
 REWRITE_PER_TICK = 3  # 每轮审计最多自动重做几组，避免一次烧太多模型调用
 
+# 自动任务「空转」的判定 ✓（2026-09-17 用户要求：这类不显示 ✓）
+# ⚠️ 只收录**确定不调模型**的空转措辞 ✗✓ —— audit/classify/rewrite **一定调模型** ⇒ 不许进来 ✗
+# （有测试断言这份清单与实际产物一致 ✓ 漂移会被抓 ✓）
+QUIET_JOB_NOTES = (
+    "本次没有需要压缩的内容",          # compress：没有可压批次
+    "本次没有需要调整的永久记忆",      # tidy：没有要调整的
+)
+
 # 后台任务的显示名（日志用；前端有一份同名映射，保持措辞一致）
 JOB_LABELS = {
     "compress": "分层压缩",
@@ -727,9 +735,23 @@ class Engine:
         if automatic and not await self.store.call("can_schedule", kind, sid):
             return None
         # v2.18.19：`detail` 透传给 worker ✓（例如整理永久记忆的"强制/指定条"✓）
-        job = await self.store.call("enqueue", kind, sid, detail)
+        job = await self.store.call("enqueue", kind, sid, detail, automatic)
         self.wake.set()
         return job
+
+    async def _quiet_automatic(self, job, detail):
+        """自动任务且**空转** ⇒ 返回 True ✓（调用方负责不打日志 + 删任务 ✓）
+
+        判据只用**我们自己的产物**：detail 措辞 ✓ 或 fact_merge 的"合并 0 组" ✓
+        ⚠️ `audit` / `classify` / `rewrite` **一定调模型** ⇒ 永不静默 ✓✓
+        ⚠️ 手动任务永不静默 ✓（用户明确要求：手动的要看得见 ✓）
+        """
+        if not job.get("automatic"):
+            return False
+        kind = job["kind"]
+        if kind == "fact_merge":
+            return detail.startswith("合并 0 组")
+        return detail in QUIET_JOB_NOTES
 
     async def name_map(self, ids):
         """实体 id → 当前名字。发给模型的记录里带上名字，它才知道 id 背后是谁。"""
@@ -1738,6 +1760,9 @@ class Engine:
                     merged,
                     sum(1 for item in job_items if item["action"] == "merged"),
                 )
+                if await self._quiet_automatic(job, detail):
+                    await self.store.call("drop_job", job["id"])
+                    continue
                 await self.store.call("finish", job["id"], "completed", detail)
                 logger.info(
                     "[记忆·Z] 事实合并完成（%s），耗时 %.1f 秒",
@@ -1979,12 +2004,9 @@ class Engine:
                     )
                 elif job["kind"] == "reindex":
                     if not cfg.semantic_enabled:
-                        await self.store.call(
-                            "finish",
-                            job["id"],
-                            "completed",
-                            "vector search disabled; no model called",
-                        )
+                        # 语义检索关着 ⇒ 纯空转（**不调模型** ✓ 它自己的注释也这么写 ✓）
+                        # ⇒ 不留任务、不打日志 ✓（2026-09-17 用户要求 ✓）
+                        await self.store.call("drop_job", job["id"])
                         continue
                     offset = 0
                     while self.settings().enabled and self.settings().semantic_enabled:
@@ -1998,6 +2020,9 @@ class Engine:
                         offset += len(rows["items"])
                 else:
                     raise ValueError("unknown job kind")
+                if await self._quiet_automatic(job, detail):
+                    await self.store.call("drop_job", job["id"])
+                    continue
                 await self.store.call("finish", job["id"], "completed", detail)
                 logger.info(
                     "[记忆·Z] 后台任务完成 %s（%s），耗时 %.1f 秒",

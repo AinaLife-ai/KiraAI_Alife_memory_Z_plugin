@@ -284,6 +284,12 @@ class Store:
               observed REAL NOT NULL, reason TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS name_entity ON entity_names(entity_id,observed DESC);
             """)
+            _jcols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+            if "automatic" not in _jcols:
+                # 给旧库补列 ✓（默认 0 = 手动 ⇒ 老任务照旧显示 ✓ 不改变历史行为 ✓）
+                db.execute(
+                    "ALTER TABLE jobs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0"
+                )
             columns = {r[1] for r in db.execute("PRAGMA table_info(records)")}
             if "visibility" not in columns:
                 db.execute(
@@ -3894,14 +3900,15 @@ class Store:
                 (record_id, model, revision, dump(vector)),
             )
 
-    def enqueue(self, kind, sid, detail=""):
+    def enqueue(self, kind, sid, detail="", automatic=False):
         with self.connect() as db:
             db.execute(
                 # v2.18.19：`detail` 用来携带"强制整理 / 只整理某几条"这类参数 ✓
                 "INSERT OR IGNORE INTO jobs"
-                "(id,kind,sid,state,detail,created,updated)"
-                " VALUES (?,?,?,'queued',?,?,?)",
-                (uid(), kind, sid, detail, time.time(), time.time()),
+                "(id,kind,sid,state,detail,created,updated,automatic)"
+                " VALUES (?,?,?,'queued',?,?,?,?)",
+                (uid(), kind, sid, detail, time.time(), time.time(),
+                 1 if automatic else 0),
             )
             return db.execute(
                 "SELECT id FROM jobs WHERE kind=? AND sid=? AND state IN ('queued','running')",
@@ -3942,6 +3949,21 @@ class Store:
                 (state, detail, time.time(), job),
             )
             self.bump(db)
+
+    def drop_job(self, job_id):
+        """删掉一个任务及其明细 ✗✓（只用于"自动 + 空转"的任务 ✓）
+
+        为什么：这类任务**不调模型**、什么也没做 ✓ 留在工作台上只是噪音 ✓
+        用户 2026-09-17 反馈："像这种的后台模型非手动的日志和工作台记录不要显示"
+        ⚠️ 手动任务**永远不删** ✓ 真干活的也**永远不删** ✓（见 engine 的判定 ✓）
+        """
+        if not job_id:
+            return 0
+        with self.connect() as db:
+            n = db.execute("DELETE FROM jobs WHERE id=?", (job_id,)).rowcount
+            db.execute("DELETE FROM job_items WHERE job_id=?", (job_id,))
+            db.commit()
+        return n or 0
 
     def add_job_items(self, job_id, items):
         """记录后台任务处理了哪些条目，供前端「明细」查看与快速编辑。"""
