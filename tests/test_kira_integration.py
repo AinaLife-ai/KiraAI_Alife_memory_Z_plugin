@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import sys
+import time
 import types
 from pathlib import Path
 import pytest
@@ -1921,5 +1922,65 @@ async def test_quiet_migrated_sessions_get_compressed_by_sweep(tmp_path, monkeyp
         rows = [r for r in plugin.store.export()["records"] if r["sid"] == quiet]
         assert any(r["level"] == 1 for r in rows), "排出来了却没压出 L1 ✗"
         assert any(r["level"] == 0 and r["active"] == 0 for r in rows), "L0 原件没归档 ✗"
+    finally:
+        await plugin.terminate()
+
+@pytest.mark.asyncio
+async def test_global_bucket_sessions_also_get_swept_and_yield_facts(tmp_path, monkeypatch):
+    """**全局桶/伪会话**（legacy:unscoped、global、self）也必须被扫描到 ✓✓
+    （2026-09-17 用户提问：迁移的记录可能压根不属于某个会话 ✓ 而是算到全局桶 ✓）
+
+    迁移时 `sid` 兜底为 ``legacy:unscoped``（旧数据没有 session 字段 ✓）✓
+    它们同样是 records 表里的 sid ✓ ⇒ 批量扫描用 ``SELECT DISTINCT sid`` ✓ 天然覆盖 ✓
+    这里守住两件事：
+      ① `queue_compress_all` 必须把这类 sid 排上 ✓（否则它们的 L0 永远压不了 ✓）
+      ② 压缩**确实会把这些记录提炼成事实**落库 ✓（这是"要生效"的最终含义 ✓）
+    """
+    monkeypatch.setattr(module, "get_config_path", lambda: tmp_path / "config")
+
+    ctx = types.SimpleNamespace(
+        get_plugin_data_dir=lambda: tmp_path,
+        plugin_mgr=types.SimpleNamespace(plugin_configs={}),
+        get_default_fast_llm_client=lambda: types.SimpleNamespace(chat=None),
+        persona_mgr=types.SimpleNamespace(get_persona=lambda: types.SimpleNamespace(content="p")),
+    )
+    plugin = module.AlifeMemoryPlugin(ctx, {"alife": {"probability": 0.0, "audit_enabled": False}})
+    await plugin.initialize()
+    try:
+        bucket = "legacy:unscoped"
+        now = time.time()
+        with plugin.store.connect() as db:
+            ids = []
+            for i in range(20):
+                t = now - 400 * 86400 - i * 3600
+                rid = "gb-%d" % i
+                ids.append(rid)
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) "
+                    "VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    (rid, bucket, "user", t, t, "迁移内容 %d" % i, "迁移内容 %d" % i,
+                     "[]", i + 1, now, "session"),
+                )
+            db.commit()
+
+        pending = await plugin.queue_compress_all()
+        assert bucket in pending, "全局桶 session 没被扫描到 ✗（它的 L0 将永远压不出事实 ✗）"
+
+        # 压缩 → 事实落库 ✓
+        rows = await plugin.store.call("active", bucket)
+        plan = module.compression_plan(rows, plugin.runtime_settings(), boost_allowed=True)
+        assert plan, "全局桶拿不到压缩计划 ✗"
+        picked, level = plan[0], plan[1]
+        await plugin.store.call(
+            "compress", bucket, picked, level - 1,
+            {"summary": "迁移内容合并摘要",
+             "facts": [{"category": "preference", "subject": "u-zhou",
+                        "content": "喜欢喝拿铁", "reason": "用户说过", "scenario": "",
+                        "tags": [], "relations": [], "source_ids": [picked[0]["id"]]}]},
+        )
+        facts = plugin.store.facts(bucket, limit=10)
+        assert facts, "压缩没有把 L0 提炼成事实 ✗（这正是迁移记录存在的意义 ✗）"
+        assert any("拿铁" in f.get("content", "") for f in facts), "事实内容不对 ✗"
     finally:
         await plugin.terminate()
