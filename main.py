@@ -39,6 +39,7 @@ from .contracts import (
 )
 from . import identity
 from .engine import Engine, compression_plan
+from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime, source_roots
 from .retrieval import (
