@@ -1033,7 +1033,13 @@ class Engine:
                 ],
                 "evidence": [
                     {
-                        "content": model_text(row.get("content", ""), keep),
+                        # v2.18.19：工具步也转占位 ✗ 与压缩载荷保持一致 ✓
+                        # （否则审计会看到原始 tool_calls JSON ✓ 可能被当成用户的话 ✓）
+                        "content": (
+                            tool_placeholder()
+                            if is_tool_step(row)
+                            else model_text(row.get("content", ""), keep)
+                        ),
                         "t": full_time(row.get("start")),
                         # v2.18.9：**证据必须带上说话人与 bot 标记** ✗
                         # 之前这里重建了字典 ✗ 把 additions 里的 sp/bot 全丢了 ✓
