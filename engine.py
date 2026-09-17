@@ -818,6 +818,13 @@ class Engine:
     async def _compress_cascade(self, sid, steps=None, job_id=None):
         if steps is None:
             steps = []
+        # ⚠️ 「降门槛」资格**每条任务只判定一次** ✗✓ —— `_boost_ok` 会盖章写冷却 ✓
+        # 若在循环里每轮都问一次 ✗ 第二轮就已经在冷却里 ⇒ **只能压 1 批就收手** ✓
+        #   实测：200 条迁移记忆只归档 40 条（=batch_size）就停 ✓
+        #   2000 条要按 40 条/30 分钟慢慢爬 ⇒ **25 小时** ✗✓
+        # 一次判定 = 这条任务"追平这个会话"的授权 ✓ 循环里一直有效 ✓
+        # （循环本身在 `compression_plan` 返回 None 时立刻退出 ✓ 不会空转 ✓）
+        _boost = _boost_ok(sid, self.settings())
         for _ in range(64):
             cfg = self.settings()
             if not cfg.enabled:
@@ -826,7 +833,7 @@ class Engine:
             _now = time.time()
             plan = compression_plan(
                 rows, cfg, now=_now,
-                boost_allowed=_boost_ok(sid, cfg, _now),
+                boost_allowed=_boost,
             )
             if plan is None:
                 return steps

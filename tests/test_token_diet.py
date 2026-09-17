@@ -582,3 +582,62 @@ class SchedulerCompressCase(unittest.TestCase):
         # 直接验证判定：probability=0 时扫描应当**不排任何会话** ✓
         self.assertEqual(cfg.probability, 0.0)
         self.assertFalse(bool(cfg.probability), "0 就是「仅手动」✓（扫描必须直接返回 ✓）")
+
+
+class CascadeCatchUpCase(unittest.TestCase):
+    """一条压缩任务必须能**追平整个会话** ✗✓（用户问"2000 条会怎样"时实测 ✓）
+
+    故障形态（修复前 ✓）：`_compress_cascade` 在循环里**每轮都问一次** `_boost_ok` ✓
+    而它会盖章写冷却 ✓ ⇒ 第二轮就已经"冷却中" ⇒ 只能压 **1 批(40 条)** 就收手 ✓
+      实测：200 条 → `active{0:40, 1:161}` ✗ 2000 条要 40 条/30 分钟爬 25 小时 ✗✓
+    修复：资格**每条任务只判定一次** ✓ 循环里一直有效 ✓（计划为空即退出 ✓ 不空转 ✓）
+    """
+
+    def _seed(self, sid, n):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in range(n):
+                t = now - 400 * 86400 - i * 180
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("c-%d" % i, sid, "user", t, t, "旧 %d" % i, "旧 %d" % i,
+                     "[]", i + 1, now, "session"))
+            db.commit()
+
+    def test_one_job_catches_up_whole_session(self):
+        sid = "legacy:catchup:1"
+        n = 200
+        self._seed(sid, n)
+        cfg = c.Settings()          # 默认 batch_size=40 / rounds=12 ✓
+        e._BOOST_AT.pop(sid, None)
+        calls = []
+
+        async def model(*a, **k):
+            calls.append(1)
+            return json.dumps({"summary": "合并摘要", "facts": []})
+
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = e.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            left = db.execute("SELECT count(*) FROM records WHERE sid=? AND active=1 AND level=0",
+                              (sid,)).fetchone()[0]
+        self.assertEqual(left, 0, "还剩 %d 条 L0 没归档 ✗ ⇒ 一条任务没能追平会话 ✓" % left)
+        self.assertGreater(len(calls), 1, "只调了一次模型 ✗ ⇒ 又被冷却卡住了（回归 ✓）")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
