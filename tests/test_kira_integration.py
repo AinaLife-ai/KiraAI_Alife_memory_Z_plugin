@@ -1854,3 +1854,72 @@ def test_every_setting_is_actually_used():
     blob = "".join((ROOT / f).read_text(encoding="utf-8") for f in files)
     unused = [k for k in names if k not in blob]
     assert not unused, "这些配置项在代码里从未被引用：%s" % ", ".join(unused)
+
+
+@pytest.mark.asyncio
+async def test_quiet_migrated_sessions_get_compressed_by_sweep(tmp_path, monkeypatch):
+    """安静的迁移会话必须被"批量扫描"排进压缩 ✓（2026-09-17 用户实测缺口 ✓）
+
+    自动压缩原本**只有一个触发点** ✗：``on_request`` 里按 ``probability`` 抽的那一轮 ✓
+    ⇒ 迁移导入进来的旧会话（旧插件迁过来后**再没人说话** ✓）永远轮不到 ✓
+    ⇒ 存档里一堆 L0 一直不动 ✓（用户实测 ✓）
+
+    这里守住：`queue_compress_all` 要排上"真有得压"的会话 ✓ 且**不排**空会话 ✓
+    """
+    import time as _t
+
+    monkeypatch.setattr(module, "get_config_path", lambda: tmp_path / "config")
+
+    async def chat(request):
+        return LLMResponse(text_response='{"summary":"迁移内容合并摘要","facts":[]}')
+
+    async def persona():
+        return types.SimpleNamespace(content="固定人格")
+
+    ctx = types.SimpleNamespace(
+        get_plugin_data_dir=lambda: tmp_path,
+        plugin_mgr=types.SimpleNamespace(plugin_configs={}),
+        get_default_fast_llm_client=lambda: types.SimpleNamespace(chat=chat),
+        persona_mgr=types.SimpleNamespace(get_persona=persona),
+    )
+    plugin = module.AlifeMemoryPlugin(
+        ctx, {"alife": {"probability": 0.0, "audit_enabled": False}}
+    )
+    await plugin.initialize()
+    try:
+        quiet, busy = "qq:dm:769690776", "qq:gm:999"
+        now = _t.time()
+        with plugin.store.connect() as db:
+            # 迁移形态：全 user ✓ 时间很老 ✓（import_snapshot 就是这么写的 ✓）
+            for i in range(20):
+                t = now - 400 * 86400 - i * 3600
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) "
+                    "VALUES(?,?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                    ("m-%d" % i, quiet, t, t, "迁移内容 %d" % i, "迁移内容 %d" % i,
+                     "[]", i + 1, now, "session"),
+                )
+            # 刚聊过、量又不够 ✓ 不该被排（否则刷一屏"本次没有需要压缩的内容" ✗）
+            for i in range(3):
+                t = now - i
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) "
+                    "VALUES(?,?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                    ("b-%d" % i, busy, t, t, "刚聊 %d" % i, "刚聊 %d" % i,
+                     "[]", i + 1, now, "session"),
+                )
+            db.commit()
+
+        pending = await plugin.queue_compress_all()
+        assert quiet in pending, "安静的迁移会话没被排进压缩 ✗（L0 会一直留着 ✓）"
+        assert busy not in pending, "刚聊过、量不够的会话不该被排 ✗（会刷空任务 ✓）"
+
+        # 排出去的 job 走的还是同一条 cascade ✓ 这里直接跑一次确认能压出 L1 ✓
+        await plugin.engine.compress(quiet)
+        rows = [r for r in plugin.store.export()["records"] if r["sid"] == quiet]
+        assert any(r["level"] == 1 for r in rows), "排出来了却没压出 L1 ✗"
+        assert any(r["level"] == 0 and r["active"] == 0 for r in rows), "L0 原件没归档 ✗"
+    finally:
+        await plugin.terminate()
