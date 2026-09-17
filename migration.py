@@ -37,7 +37,12 @@ def source_roots(data_root, plugin_data_root):
     - simple_memory / KiraOS 都写在共享的 ``data/memory`` ✓
     - 海马体写在自己的插件数据目录 ``data/plugin_data/<id>/memory`` ✓（main.py:110）
     布局（``global/{facts,self,skills}`` + ``entities/<类型>_<编码ID>/{facts,reflections,skills}``
-    + ``profile.json``）三者一致 ✓ 所以解析分支可以复用 ✓
+    + ``profile.json``）**KiraOS / 海马体一致** ✓ 所以那条分支可复用 ✓
+
+    ⚠️ **默认记忆（simple_memory）不是这个格式** ✗✓ —— 它只有一个
+    ``core.txt`` **纯文本** ✓ 逐**行**读 ✓ 每行写死类别 ``fact`` ✓
+    （源数据里本来就没有类别信息 ✓ 所以不是"偷懒归类" ✗ 是格式使然 ✓）
+    2026-09-17 用户提醒核对时发现本注释此前把三者写成"一致" ✗ 已更正 ✓
     """
     data_root = Path(data_root)
     return {

@@ -1960,6 +1960,56 @@ class Store:
             ).fetchone()
             return row["real"] if row else value
 
+    def distilled_only(self, sid, ids):
+        """这批记录是否**全部**属于「迁移导入 + 已提炼过知识」✓（方案 B 的判据 ✓）
+
+        判据（对**存量用户**同样有效 ✗✓ 不依赖任何新列 ✓）：
+          · 记录在 `migration_items` 里（= 迁移来的 ✓）
+          · **同一个来源 key** 已经产生过一条非 event 事实
+            （按 key 而不是 record_id ✗✓：重复导入时**首次那条**才写了事实 ✓
+             而重复项**记录照写、事实不写** ✗ 按 record_id 判会漏掉它们 ⇒ 白走压缩 ✓）
+          · 那条事实的 category **不是 event** ✗（经历类仍需模型做叙事摘要 ✓）
+        三条都满足 ⇒ 知识已经在事实层 ✓ 再压一遍纯属重复花钱 ✗
+        """
+        if not ids:
+            return False
+        marks = ",".join("?" * len(ids))
+        with self.connect() as db:
+            hit = db.execute(
+                "SELECT count(DISTINCT r.id) FROM records r "
+                " JOIN migration_items mi ON mi.record_id = r.id "
+                " WHERE r.sid = ? AND r.id IN (%s) "
+                "   AND EXISTS ("
+                "     SELECT 1 FROM migration_items mi2 "
+                "       JOIN facts f ON f.deleted = 0 AND f.category != 'event' "
+                "       JOIN json_each(f.sources) s ON s.value = mi2.record_id "
+                "      WHERE mi2.source_key = mi.source_key)" % marks,
+                [sid, *ids],
+            ).fetchone()[0]
+        return int(hit) == len(set(ids))
+
+    def archive_distilled(self, sid, candidates):
+        """只归档（active=0）**不调模型** ✗✓ —— 知识已在事实层 ✓ 原文仍可按 ID 检索 ✓
+
+        ⚠️ 不创建上层摘要 ✓（这正是省掉的那次模型调用 ✓）
+        合并 / 审计**不受影响** ✗：合并由 job 包装层（`queue_fact_merges` ✓）
+        与召回路径触发 ✓ 审计由 scheduler 按会话跑 ✓ 都与本路径无关 ✓✓
+        """
+        if not candidates:
+            return 0
+        changed = 0
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in candidates:
+                cur = db.execute(
+                    "UPDATE records SET active=0, revision=revision+1 "
+                    " WHERE id=? AND sid=? AND active=1 AND deleted=0",
+                    (row["id"], sid),
+                )
+                changed += cur.rowcount or 0
+            db.commit()
+        return changed
+
     def compress(self, sid, candidates, level, output):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -2176,22 +2226,50 @@ class Store:
             ).fetchone()
         return {"live": row["live"] or 0, "archived": row["archived"] or 0}
 
-    def sessions_by_audit_age(self, limit, recheck_seconds=0):
-        """Sessions with audit-eligible facts, most stale first."""
+    def sessions_by_audit_age(self, limit, recheck_seconds=0, reserve_buckets=1, bucket_sids=()):
+        """Sessions with audit-eligible facts, most stale first.
+
+        `reserve_buckets` ✓：给「**无归属的桶**」（`legacy:global` / `legacy:unscoped`）
+        **预留**至多这么多名额 ✓ 让它们有机会被审计归类 ✓（方案 A ✓ 2026-09-17 用户要求 ✓）
+
+        ⚠️ **安全约束（关键 ✓）**：迁移导入的桶可能有**几千条**事实 ✗
+        如果简单地"永远排最前" ⇒ **普通会话会被饿死** ✗✓
+        （引擎里本来就写着 "a big imported backlog cannot keep the queue permanently busy" ✓）
+        所以这里只**限量预留** ✓ 其余名额**照旧**按陈旧度给普通会话 ✓
+        桶一条都没有时 ⇒ 返回值与改动前**完全一致** ✓（零行为变化 ✓）
+        """
         where = ["deleted=0", "merge_pending=0"]
         args = []
         if recheck_seconds > 0:
             where.append("(audited=0 OR audited < ?)")
             args.append(time.time() - recheck_seconds)
+        clause = " AND ".join(where)
+        limit = max(1, int(limit))
         with self.connect() as db:
-            return [
+            normal = [
                 row[0]
                 for row in db.execute(
-                    "SELECT sid FROM facts WHERE " + " AND ".join(where) + " GROUP BY sid "
+                    "SELECT sid FROM facts WHERE " + clause + " GROUP BY sid "
                     "ORDER BY min(audited) ASC, sid LIMIT ?",
-                    [*args, max(1, limit)],
+                    [*args, limit],
                 )
             ]
+            reserved = []
+            if reserve_buckets and bucket_sids:
+                marks = ",".join("?" * len(bucket_sids))
+                reserved = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT sid FROM facts WHERE " + clause + " AND sid IN (%s) "
+                        "GROUP BY sid ORDER BY min(audited) ASC, sid LIMIT ?" % marks,
+                        [*args, *bucket_sids, max(1, int(reserve_buckets))],
+                    )
+                ]
+        out = []
+        for sid in [*reserved, *normal]:
+            if sid not in out:
+                out.append(sid)
+        return out[:limit]
 
     def sessions_with_permanents(self):
         with self.connect() as db:

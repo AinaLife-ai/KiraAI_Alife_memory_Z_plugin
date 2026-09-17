@@ -866,6 +866,23 @@ class Engine:
             if plan is None:
                 return steps
             candidates, level = plan
+            # ★ 方案 B（2026-09-17 用户要求 ✓）：迁移导入且**已提炼过知识**的批次
+            #   ⇒ **只归档、不调模型** ✗✓（迁移时每个条目就写过 fact ✓ 知识已在事实层 ✓）
+            #   · 只对**迁移来的**记录生效 ✓（普通会话不受影响 ✓ 它们不在 migration_items 里 ✓）
+            #   · `event` 类不跳 ✓（经历类仍需要叙事摘要 ✓）
+            #   · 合并/审计照常 ✓（都由本函数之外的地方触发 ✓）
+            try:
+                _ids = [row["id"] for row in candidates]
+                if await self.store.call("distilled_only", sid, _ids):
+                    _n = await self.store.call("archive_distilled", sid, candidates)
+                    steps.append({
+                        "count": _n,
+                        "level": level,
+                        "note": "迁移内容已提炼过知识 ⇒ 直接归档（未调用模型 ✓）",
+                    })
+                    continue
+            except Exception:
+                logger.exception("[记忆·Z] 迁移直归档判定失败（按普通压缩继续 ✓）")
             # Bound complete records in one pass, never truncate evidence or fabricate a level.
             names = await self.name_map(
                 {user for row in candidates for user in row["users"]}
@@ -2095,6 +2112,20 @@ class Engine:
                         "sessions_by_audit_age",
                         max(1, cfg.worker_count),
                         cfg.audit_recheck_days * 86400,
+                        # 方案 A ✓：给无归属的桶**限量预留**名额（至多 1 个 ✓）
+                        # 让迁移来的「全局/未归属」事实有机会被审计归类 ✓
+                        # 但绝不让它们霸占队列 ⇒ 普通会话照旧按陈旧度轮到自己 ✓
+                        reserve_buckets=1,
+                        # ⚠️ 桶的 sid 有**两种写法** ✗✓ —— 实测事实表里既有
+                        # `legacy:unscoped` ✓ 也有**短形式** `global` / `self` / `unscoped` ✗
+                        # （取决于写库时走的是 GLOBAL_ID 还是 GLOBAL ✓）
+                        # ⇒ 两种都列上 ✓ 否则这个功能会**静默无效** ✗
+                        bucket_sids=tuple({
+                            identity.GLOBAL_ID,
+                            identity.GLOBAL,
+                            identity.UNSCOPED_ID,
+                            identity.UNSCOPED_ID[len(identity.LEGACY):],
+                        }),
                     )
                     # v2.18 第6项：审计侧计数（轮次 / 本轮涉及会话数 / 上次轮询时间）
                     _as = getattr(self, "_audit_stats", None)

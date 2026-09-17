@@ -6,8 +6,11 @@
 轮的定义（与 KiraOS 的 chunk 一致）：用户（们）发言 → 助手回复
 ⇒ 边界 =「助手说完之后、下一条用户发言之前」✓
 """
+import asyncio
 import importlib
+import json
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -19,6 +22,7 @@ package.__path__ = [str(ROOT)]
 sys.modules.setdefault("alife_mode_test", package)
 engine = importlib.import_module("alife_mode_test.engine")
 contracts = importlib.import_module("alife_mode_test.contracts")
+storage = importlib.import_module("alife_mode_test.storage")
 
 
 def row(i, role, vis="session", level=0):
@@ -190,3 +194,261 @@ class OversizedRoundCase(unittest.TestCase):
             ids = {r["id"] for r in plan[0]}
             left = [r for r in left if r["id"] not in ids]
         self.assertLessEqual(len(left), 2, "残留 %d 条 ⇒ 有滞留 ✗" % len(left))
+
+
+class MigratedDistilledCase(unittest.TestCase):
+    """方案 B：迁移导入且**已提炼过知识**的内容 ⇒ 只归档、不调模型 ✓
+
+    为什么能省（2026-09-17 用户提出 ✓）：迁移时每个条目**就已经写过一条 fact** ✓
+    知识已经在事实层 ✓ 再让模型压一遍纯属重复花钱 ✗（2000 条 ≈50 次调用 → **0 次** ✓）
+
+    判据对**存量用户**同样有效 ✓（不依赖新列 ✓ 直接查 migration_items + facts.sources ✓）
+    且**只对迁移来的记录生效** ✓（普通会话不在 migration_items 里 ⇒ 行为完全不变 ✓✓）
+
+    ⚠️ 合并与审计**不受影响** ✗：
+      · 合并：迁移时 queue_migration_merges ✓ 压缩产生新事实时 queue_fact_merges ✓
+        召回时 queue_recall_merges ✓ —— 都在本路径之外 ✓
+      · 审计：scheduler 按会话跑 ✓ 与压缩无关 ✓
+    """
+
+    def _seed(self, cats, sid, n=40):
+        now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(n):
+                t = now - 400 * 86400 - i * 60
+                rid = "m%02d" % i
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    (rid, sid, "user", t, t, "旧内容 %d" % i, "旧内容 %d" % i,
+                     json.dumps(["u-1"]), i + 1, now, "session"))
+                db.execute("INSERT INTO migration_items VALUES(?,?,?,?,?,?,?,?)",
+                           ("old", "k%d" % i, "d%d" % i, rid, "imported", "fh", "{}", now))
+                db.execute(
+                    "INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,"
+                    "relations,sources,fingerprint,deleted,revision,audited,importance,"
+                    "merge_pending,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,1,0,5,0,?)",
+                    ("f%d" % i, sid, cats[i % len(cats)], "u-1", "知识 %d" % i, "", "", "[]",
+                     "[]", json.dumps([rid]), "fp%d" % i, now))
+            db.commit()
+
+    def _run(self, sid):
+        calls = []
+
+        async def model(*a, **k):
+            calls.append(1)
+            return json.dumps({"summary": "摘要", "facts": []})
+
+        cfg = contracts.Settings()
+        engine._BOOST_AT.pop(sid, None)
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = engine.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            ac = dict(db.execute("SELECT active,count(*) FROM records WHERE sid=? GROUP BY active",
+                                 (sid,)).fetchall())
+            nf = db.execute("SELECT count(*) FROM facts WHERE sid=? AND deleted=0", (sid,)).fetchone()[0]
+        return calls, ac, nf
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = storage.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_knowledge_categories_skip_model_and_archive(self):
+        sid = "legacy:know:1"
+        self._seed(["fact", "preference", "profile"], sid)
+        calls, ac, nf = self._run(sid)
+        self.assertEqual(calls, [], "还在调模型 ✗ ⇒ 没省到钱（方案 B 失效 ✓）")
+        self.assertEqual(ac.get(1, 0), 0, "记录没退出活跃上下文 ✗")
+        self.assertEqual(nf, 40, "事实被动了 ✗（必须一条不丢 ✓）")
+
+    def test_event_category_still_compresses(self):
+        """经历类（event）**不跳** ✓ —— 它还需要模型做叙事摘要 ✓"""
+        sid = "legacy:event:1"
+        self._seed(["event"], sid)
+        calls, ac, nf = self._run(sid)
+        self.assertTrue(calls, "event 类也被跳过了 ✗ ⇒ 经历类会失去摘要 ✓")
+
+    def test_non_migrated_session_unaffected(self):
+        """普通会话（不在 migration_items 里）行为**完全不变** ✓"""
+        sid = "qq:gm:5"
+        now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(20):
+                t = now - 10 * 86400 - i * 60
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("n%02d" % i, sid, ("user", "assistant")[i % 2], t, t, "对话 %d" % i,
+                     "对话 %d" % i, json.dumps(["u-1"]), i + 1, now, "session"))
+            db.commit()
+        calls, ac, nf = self._run(sid)
+        self.assertTrue(calls, "普通会话也应正常压缩 ✗（不能被我改坏 ✓）")
+
+
+class DuplicateImportCase(unittest.TestCase):
+    """重复导入的记录（同一 key 第二次导入）也要被判为「已提炼」✓
+
+    迁移时重复项**记录照写、事实不写** ✗（fact 只在首次写 ✓）
+    ⇒ 按 record_id 判会漏掉它们 ⇒ 白走一次模型压缩 ✗（成本泄漏 ✓）
+    ⇒ 改成按**来源 key** 判：同 key 只要有一条被提炼过 ✓ 整组都算已提炼 ✓
+    """
+
+    def test_duplicate_key_record_is_distilled(self):
+        now = time.time()
+        st = storage.Store(Path(tempfile.mkdtemp()) / "db")
+        st.initialize()
+        sid = "legacy:dup:1"
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            # 首次导入：记录 + 事实 ✓
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('r1',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "内容", "内容", "[]", 1, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','same-key','d1','r1','',?, '{}',?)", ("fh", now))
+            db.execute("INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,sources,"
+                       "fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                       " VALUES('f1',?,'preference','u-1','知识','','','[]','[]',?,'fp1',0,1,0,5,0,?)",
+                       (sid, json.dumps(["r1"]), now))
+            # 二次导入：同 key，记录照写 ✓ 但**没有事实** ✗
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('r2',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "内容", "内容", "[]", 2, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','same-key','d2','r2','',?, '{}',?)", ("fh", now))
+            db.commit()
+        self.assertTrue(st.distilled_only(sid, ["r1"]), "首次导入应判为已提炼 ✓")
+        self.assertTrue(st.distilled_only(sid, ["r2"]), "重复导入（无事实 ✗）也必须判为已提炼 ✓")
+        self.assertTrue(st.distilled_only(sid, ["r1", "r2"]), "整批都要判为已提炼 ✓")
+
+    def test_event_category_is_not_distilled(self):
+        now = time.time()
+        st = storage.Store(Path(tempfile.mkdtemp()) / "db")
+        st.initialize()
+        sid = "legacy:dup:2"
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('e1',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "经历", "经历", "[]", 1, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','ev-key','d1','e1','',?, '{}',?)", ("fh", now))
+            db.execute("INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,sources,"
+                       "fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                       " VALUES('f2',?,'event','u-1','经历','','','[]','[]',?,'fp2',0,1,0,5,0,?)",
+                       (sid, json.dumps(["e1"]), now))
+            db.commit()
+        self.assertFalse(st.distilled_only(sid, ["e1"]), "event 类不许判为已提炼 ✗（仍需要摘要 ✓）")
+
+
+class AuditBucketPriorityCase(unittest.TestCase):
+    """方案 A：无归属的桶在审计队列里**限量预留**名额 ✓（2026-09-17 用户要求 ✓）
+
+    目标：让迁移来的「全局 / 未归属」事实**有机会**被审计归类 ✓
+    ⚠️ **安全约束**：桶可能有几千条 ✗ 若"永远排最前" ⇒ **普通会话被饿死** ✗✓
+    （引擎里原本就写着 "a big imported backlog cannot keep the queue permanently busy" ✓）
+    ⇒ 只**限量预留** ✓ 其余名额照旧给普通会话 ✓；桶一条都没有时**行为完全不变** ✓
+    """
+
+    _n = 0
+
+    def _seed(self, st, sid, audited, count=1):
+        """按 sid 造 count 条事实 ✓（id 必须唯一 ✓ 否则 UNIQUE 冲突 ✗）"""
+        now = time.time()
+        with st.connect() as db:
+            for _ in range(count):
+                AuditBucketPriorityCase._n += 1
+                k = AuditBucketPriorityCase._n
+                db.execute(
+                    "INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,"
+                    "sources,fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,0,1,?,5,0,?)",
+                    ("f-%d" % k, sid, "fact", "u-1", "内容", "", "", "[]", "[]", "[]",
+                     "fp-%d" % k, audited, now))
+            db.commit()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = storage.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_bucket_gets_reserved_slot_despite_being_fresh(self):
+        """桶的事实很**新**（本来轮不到 ✓）也要给它一个名额 ✓"""
+        self._seed(self.store, "legacy:global", audited=time.time())      # 最新
+        self._seed(self.store, "global", audited=time.time())             # 短形式也要认 ✓
+        for i in range(4):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 1000 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            3, 0, reserve_buckets=1,
+            bucket_sids=("legacy:global", "global", "legacy:unscoped", "unscoped"))
+        self.assertTrue({"legacy:global", "global"} & set(out),
+                        "桶没拿到预留名额 ✗（两种 sid 形式都要认 ✓）")
+
+    def test_normal_sessions_are_not_starved(self):
+        """桶很多、很新 ⇒ 普通会话仍必须占住**其余**名额 ✓（不许饿死 ✓）"""
+        self._seed(self.store, "legacy:global", audited=time.time(), count=20)   # 同 sid 多条 ✓
+        for i in range(3):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 100 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            4, 0, reserve_buckets=1,
+            bucket_sids=("legacy:global", "global", "legacy:unscoped", "unscoped"))
+        self.assertLessEqual(len([s for s in out if s == "legacy:global"]), 1, "桶占了多份 ✗")
+        self.assertEqual(len([s for s in out if s.startswith("qq:")]), 3, "普通会话被饿死 ✗")
+
+    def test_no_buckets_behaviour_unchanged(self):
+        """桶一条都没有 ⇒ 返回值必须与**改动前**完全一致 ✓（零行为变化 ✓）"""
+        for i in range(5):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 100 * (i + 1))
+        new = self.store.sessions_by_audit_age(
+            3, 0, reserve_buckets=1, bucket_sids=("legacy:global", "global"))
+        old = self.store.sessions_by_audit_age(3, 0)     # 默认参数 ✓ 走旧逻辑 ✓
+        self.assertEqual(new, old, "没有桶时行为变了 ✗")
+
+    def test_reserve_zero_means_no_jump(self):
+        """`reserve_buckets=0` ⇒ 关掉优先 ✓（可回退 ✓）"""
+        self._seed(self.store, "legacy:global", audited=time.time())
+        for i in range(3):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 1000 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            2, 0, reserve_buckets=0, bucket_sids=("legacy:global",))
+        self.assertNotIn("legacy:global", out, "reserve=0 时不该插队 ✗")
+
+
+class AuditBucketWiringCase(unittest.TestCase):
+    """接线检查 ✓：引擎必须**真的**把预留名额和两种 sid 形式传下去 ✓
+
+    （实测事实表里桶 sid 有 `legacy:global` **和** `global` 两种写法 ✗
+     只传一种 ⇒ 这个功能会**静默失效** ✗ —— 所以要静态守住 ✓）
+    """
+
+    def test_engine_passes_reserve_and_both_sid_forms(self):
+        src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
+        # ⚠️ 必须**剥掉注释行** ✗✓ —— 否则"把接线注释掉"也能骗过检查 ✓（2026-09-17 实测踩到 ✓）
+        src = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn("reserve_buckets=1", src, "引擎没传预留名额 ✗（方案 A 失效 ✓）")
+        self.assertIn('"sessions_by_audit_age"', src, "调用点被删了 ✗")
+        for frag in ("identity.GLOBAL_ID", "identity.GLOBAL,",
+                     "identity.UNSCOPED_ID", "[len(identity.LEGACY):]"):
+            self.assertIn(frag, src, "桶 sid 的形式少了一种 ✗ ⇒ 可能静默失效 ✓（缺 %s）" % frag)
+
+    def test_storage_supports_reserve_and_defaults_to_old_behaviour(self):
+        """默认参数必须保持**旧行为** ✓（老调用方不传也不变 ✓）"""
+        import inspect
+        sig = inspect.signature(storage.Store.sessions_by_audit_age)
+        self.assertEqual(sig.parameters["reserve_buckets"].default, 1)
+        self.assertEqual(sig.parameters["bucket_sids"].default, ())
