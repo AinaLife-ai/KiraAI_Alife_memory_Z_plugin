@@ -64,3 +64,40 @@ class ToolStepCase(unittest.TestCase):
     def test_placeholder_is_short(self):
         """喂给压缩模型的工具步是极短占位 ✓（不夹带 tool_calls JSON ✗）"""
         self.assertLessEqual(len(retrieval.tool_placeholder()), 8)
+
+
+class BackfillCase(unittest.TestCase):
+    """**存量用户**升级即可享受：老工具步（升级前入库、没标记）要被补标 ✓
+
+    工具步标记是 v2.18.19 才加的 ✗ ⇒ 升级前的记录没标记 ✓
+    不补的话"bot 看不到工具步"这个收益对存量用户**不生效** ✗（用户明确要求 ✓）
+    识别方式：工具步的 content 里必定带 `{"tool_calls": …}`（capture 写入 ✓）
+    """
+
+    def test_backfill_marks_legacy_tool_steps(self):
+        async def run():
+            tmp = tempfile.TemporaryDirectory()
+            store = storage.Store(Path(tmp.name) / "m.db")
+            store.initialize()
+            now = time.time()
+            await store.call("capture", "s", "k1", [
+                {"role": "user", "content": "帮我查天气", "users": ["qq:1"], "speaker": "qq:1", "time": now},
+                # ★ 模拟"升级前"的工具步：内容带 tool_calls 但 category 为空 ✗
+                {"role": "assistant", "content": '我看看{"tool_calls": [{"name": "get_weather"}]}',
+                 "users": ["qq:1"], "speaker": "qq:1", "time": now + 1},
+                {"role": "assistant", "content": "明天晴", "users": ["qq:1"], "speaker": "qq:1", "time": now + 2},
+            ])
+            before = [r["content"][:6] for r in (await store.call("search", "s", limit=10))["items"]]
+            marked = await store.call("backfill_tool_steps")
+            after = [r["content"][:6] for r in (await store.call("search", "s", limit=10))["items"]]
+            ui = [r["content"][:6] for r in (await store.call("search", "s", limit=10, include_tools=True))["items"]]
+            again = await store.call("backfill_tool_steps")   # 幂等 ✓
+            tmp.cleanup()
+            return before, marked, after, ui, again
+
+        before, marked, after, ui, again = asyncio.run(run())
+        self.assertIn("我看看", str(before), "回填前 bot 本该看得到（否则用例前提不成立）")
+        self.assertGreaterEqual(marked, 1, "没回填到老工具步 ✗")
+        self.assertNotIn("我看看", str(after), "回填后 bot 仍看到工具步 ✗")
+        self.assertIn("我看看", str(ui), "前端开关应仍能看到 ✓")
+        self.assertEqual(again, 0, "回填不幂等 ✗（第二次不该再改）")

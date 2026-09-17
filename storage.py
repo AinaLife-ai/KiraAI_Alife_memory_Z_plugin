@@ -1267,6 +1267,22 @@ class Store:
             ]
         return snapshot(root, plugin_id, limit, Resolver(entities, adapters), decay_days=decay_days)
 
+    def backfill_tool_steps(self):
+        """把**存量**的工具步记录补上 `category='tool'` ✓（v2.18.19 ✓ 幂等 ✓）
+
+        背景：工具步的标记是 v2.18.19 才加的 ✗ ⇒ 升级前入库的工具步没标记 ✓
+        ⇒ 那些记录**过滤不到** ✗ 存量用户享受不到"bot 看不到工具步"的收益 ✓
+        识别方式：工具步的 content 里必定带 `{"tool_calls": …}`（capture 时写入 ✓）
+        返回补标的条数 ✓（0 = 无需回填 ✓）
+        """
+        with self.connect() as db:
+            cur = db.execute(
+                "UPDATE records SET category='tool'"
+                " WHERE category='' AND deleted=0"
+                " AND content LIKE '%\"tool_calls\"%'"
+            )
+            return cur.rowcount or 0
+
     def legacy_migrated_at(self):
         """上次成功迁移旧记忆的时间戳（0 表示还没成功过）。"""
         with self.connect() as db:

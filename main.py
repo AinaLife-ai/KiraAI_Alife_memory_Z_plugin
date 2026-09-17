@@ -522,6 +522,13 @@ class AlifeMemoryPlugin(BasePlugin):
         await self.store.call("initialize")
         try:
             # v2.13.0 之前拼接出来的事实没有待重做标记，这里回填一次（幂等）
+            # v2.18.19：存量工具步补标 ✗（升级前入库的没标记 ✓ 不补的话过滤不到 ✓）
+            tool_marked = await self.store.call("backfill_tool_steps")
+            if tool_marked:
+                logger.info(
+                    "[记忆·Z] 发现 %s 条历史工具步记录，已标记为不回召（bot 侧不再看到）✓",
+                    tool_marked,
+                )
             marked = await self.store.call("backfill_rewrite_pending")
             if marked:
                 logger.info(
