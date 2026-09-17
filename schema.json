@@ -659,6 +659,30 @@
         "description": "人物列表卡片上直接显示的画像要点条数（按重要度取）。默认3。",
         "minimum": 1,
         "maximum": 10
+      },
+      "compress_input_max_chars": {
+        "type": "integer",
+        "name": "每批压缩的原文上限（字符）",
+        "default": 20000,
+        "description": "一批压缩最多喂多少字符的原文。在轮边界上截断，绝不切半轮；只有单轮本身就超限时才切、并在摘要尾部加省略号。防止几千条存量数据一次喂进去把 token 撑爆。"
+      },
+      "compress_stale_after_days": {
+        "type": "integer",
+        "name": "陈旧记忆几天后开始消化",
+        "default": 3,
+        "description": "最老的未压缩记忆超过这么多天，就把它所在会话的门槛降为 1（默认 3 天）。专治存量：会话还在活跃、永远不空闲，靠这一条才排得上。"
+      },
+      "compress_idle_after_hours": {
+        "type": "integer",
+        "name": "会话闲置几小时后收尾",
+        "default": 6,
+        "description": "会话最新一条记忆超过这么多小时没动静，就视为这轮对话已结束，压缩门槛降为 1（默认 6 小时）。"
+      },
+      "compress_idle_cooldown_min": {
+        "type": "integer",
+        "name": "收尾压缩的冷却（分钟）",
+        "default": 30,
+        "description": "同一个会话两次「降门槛抽干」之间至少隔多少分钟（默认 30）。防止连续抽干烧 token。"
       }
     }
   }
