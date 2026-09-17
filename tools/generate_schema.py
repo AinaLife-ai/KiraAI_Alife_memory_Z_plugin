@@ -108,9 +108,14 @@ names = dict(
             "永久记忆合并理由（硬上限）",
             "永久记忆合并提示词",
             "画像摘要条数",
+            "永久记忆合并理由（提示词）",
+            "永久记忆合并理由（硬上限）",
+            "永久记忆合并提示词",
+            "画像摘要条数",
         ],
     )
 )
+_missing = [k for k in schema["properties"] if k not in names]
 fields = {}
 for key, p in schema["properties"].items():
     kind = {
@@ -122,7 +127,10 @@ for key, p in schema["properties"].items():
     }[p["type"]]
     field = {
         "type": kind,
-        "name": names[key],
+        # v2.18.19：**缺标签时不再崩** ✗ 而是用键名兜底并**报警** ✓
+        # 原来 `names[key]` 直接 KeyError ✗ ⇒ 生成器整个跑不通 ✓
+        # ⇒ 任何新增配置都只能手改 schema.json ✓（这正是之前 4 个新配置漏进去的根因 ✓）
+        "name": names.get(key) or ("⚠️缺标签:" + key),
         "default": module.Settings().model_dump()[key],
         "description": help_module.HELP[key],
     }
@@ -153,3 +161,8 @@ for key, p in schema["properties"].items():
     + "\n",
     encoding="utf-8",
 )
+
+if _missing:
+    print("⚠️ 以下配置缺中文标签（已用占位符 ✓ 请补进 names 表）：")
+    for _k in _missing:
+        print("   -", _k)
