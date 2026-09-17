@@ -167,7 +167,8 @@ class TimeProvenanceTests(unittest.TestCase):
         _record(self.store, "r1", 1.0, speaker="星月")
         with self.store.connect() as db:
             row = dict(db.execute("SELECT * FROM records WHERE id='r1'").fetchone())
-        self.assertEqual(retrieval.archive_view(row)["speaker"], "星月")
+        # v2.18.19：读原文改用短键 ✓ speaker → sp ✓
+        self.assertEqual(retrieval.archive_view(row)["sp"], "星月")
 
 
 def test_prompt_tells_model_to_absolutize_relative_dates():

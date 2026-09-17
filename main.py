@@ -198,9 +198,10 @@ def brief(perception):
 
     archives = perception.get("archives")
     if archives:
-        if isinstance(archives, dict) and archives.get("rows"):
-            # 图例里的会话与说话人已经进了表头 ✓ 不再重复 ✗
-            lines.extend(str(r) for r in archives["rows"])
+        if isinstance(archives, str) and archives.strip():
+            lines.append(archives)                      # v2.18.19：已是紧凑单串 ✓
+        elif isinstance(archives, dict) and archives.get("rows"):
+            lines.extend(str(r) for r in archives["rows"])   # 兼容旧形状 ✓
         elif isinstance(archives, list) and archives:
             lines.extend(str(r) for r in archives)
 
@@ -1851,14 +1852,14 @@ class AlifeMemoryPlugin(BasePlugin):
             name = self.model_text(row["speaker"] or "", keep_names)
             if name and name not in speakers:
                 speakers.append(name)
-        selected = {
-            "legend": "会话=%s｜说话人=%s" % (sid, "、".join(speakers) or "?"),
-            "rows": lines,
-        }
+        # v2.18.19：**单字符串** ✓（原来 {legend, rows, more_hint} 三个键名白占 ~30 字符 ✗）
+        _head = "会话=%s｜说话人=%s" % (sid, "、".join(speakers) or "?")
+        selected = "\n".join([_head] + lines)
         if omitted:
-            # 明确的**调用字样** ✓（用户要求：不要用"说 more"这种自然语言提示 ✗）
-            selected["more_hint"] = (
-                "还有 %d 条 · 继续请调用 SearchMemoryArchive(next_batch=true)" % len(omitted)
+            # 明确的**调用字样** ✓（不要用"说 more"这种自然语言提示 ✗）
+            selected += (
+                "\n还有 %d 条 · 继续请调用 SearchMemoryArchive(next_batch=true)"
+                % len(omitted)
             )
         # 记下这一次的清单顺序 ✓（序号 → 真实 id ✓ 只留最新一份 ✓）
         # ⚠️ 每次召回都重建 ✗ 不保留旧清单 ✓ —— 免得模型引用上一份的序号而改错记忆 ✓
@@ -1943,11 +1944,15 @@ class AlifeMemoryPlugin(BasePlugin):
             # v2.18.19：`archives` 现在是 {legend, rows} ✗ **形状无关**地裁剪 ✓
             # （A3 改形状时漏了这一处 ✗ 终审才发现 ✓ —— 以前是 list[dict] ✓）
             _arch = perception["archives"]
-            _rows = _arch.get("rows") if isinstance(_arch, dict) else _arch
-            if not _rows:
+            _parts = (
+                _arch.splitlines() if isinstance(_arch, str)
+                else (_arch.get("rows") if isinstance(_arch, dict) else _arch)
+            )
+            if not _parts:
                 perception.pop("archives", None)
                 break
-            _rows.pop()
+            _parts.pop()
+            perception["archives"] = "\n".join(_parts) if isinstance(_arch, str) else _arch
             perception["omitted_count"] = perception.get("omitted_count", 0) + 1
             content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         for key in ("names", "related_archives"):

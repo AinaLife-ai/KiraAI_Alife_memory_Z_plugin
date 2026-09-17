@@ -151,27 +151,28 @@ def identity_info(entity_id):
 
 
 def archive_view(row, child_offset=0, child_count=20, include_content=False):
-    # v2.18.19：**紧凑化** ✓ 原来每条 ~424 字符 ✗ 大半是模型用不上的机器字段
-    # 删：`id`(32 字符 ✗) / `sid` / `users`(与 speaker 重复 ✗) / `revision` / `parents` / `child_offset`
-    # 子条目：**不再回传内容** ✗（去码后模型也寻不到它们 ✓）只留**条数与翻页** ✓
-    # 保留：内容 ✓ 时间 ✓ 说话人 ✓ 层级 ✓ 永久标记 ✓
+    # v2.18.19：**短键 + 绝对时间 + 只带必要标记** ✓（用户要求与其他通道一致 ✓）
+    # · `t` 用**可读时间** ✗ 不再发 epoch 浮点（`1783254654.123` 谁都读不出 ✓）
+    # · `mem` **只在是永久记忆时**才写 ✓（不是就不写 ✗ 省掉 `"permanent":0` ✓）
     result = {
-        k: row[k]
-        for k in ("role", "level", "start", "end", "summary", "speaker", "permanent")
-        if k in row
+        "s": row.get("summary") or "",                        # 内容 ✓
+        "t": short_time(row.get("end") or row.get("start")),  # 绝对时间（跨年才带年份 ✓）
+        "sp": row.get("speaker") or "",                       # 说话人 ✓
+        "lv": row.get("level", 0),                            # 0=原文 / 1+=摘要 ✓
     }
+    if row.get("permanent"):
+        # 永久记忆 = 必须每轮在场的那种（bot 主动写的约束/身份 ✓ 不是提取出来的事实 ✓）
+        result["mem"] = 1
     children = row.get("children", [])
-    result["children_total"] = len(children)
-    result["next_child_offset"] = (
-        child_offset + child_count
-        if child_offset + child_count < len(children)
-        else None
-    )
+    if children:
+        result["kids"] = len(children)
+        if child_offset + child_count < len(children):
+            result["next"] = child_offset + child_count
     if include_content:
         result["versions"] = row.get("versions", [])
         result["legacy_sources"] = row.get("legacy_sources", [])
-    result["content_included"] = not children or include_content
-    if result["content_included"]:
+    result["ci"] = not children or include_content
+    if result["ci"]:
         # Decode only the plugin's own complete archive/message envelope, not arbitrary prose.
         content = row["content"]
         try:
