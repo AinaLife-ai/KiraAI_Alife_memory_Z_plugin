@@ -2226,22 +2226,50 @@ class Store:
             ).fetchone()
         return {"live": row["live"] or 0, "archived": row["archived"] or 0}
 
-    def sessions_by_audit_age(self, limit, recheck_seconds=0):
-        """Sessions with audit-eligible facts, most stale first."""
+    def sessions_by_audit_age(self, limit, recheck_seconds=0, reserve_buckets=1, bucket_sids=()):
+        """Sessions with audit-eligible facts, most stale first.
+
+        `reserve_buckets` ✓：给「**无归属的桶**」（`legacy:global` / `legacy:unscoped`）
+        **预留**至多这么多名额 ✓ 让它们有机会被审计归类 ✓（方案 A ✓ 2026-09-17 用户要求 ✓）
+
+        ⚠️ **安全约束（关键 ✓）**：迁移导入的桶可能有**几千条**事实 ✗
+        如果简单地"永远排最前" ⇒ **普通会话会被饿死** ✗✓
+        （引擎里本来就写着 "a big imported backlog cannot keep the queue permanently busy" ✓）
+        所以这里只**限量预留** ✓ 其余名额**照旧**按陈旧度给普通会话 ✓
+        桶一条都没有时 ⇒ 返回值与改动前**完全一致** ✓（零行为变化 ✓）
+        """
         where = ["deleted=0", "merge_pending=0"]
         args = []
         if recheck_seconds > 0:
             where.append("(audited=0 OR audited < ?)")
             args.append(time.time() - recheck_seconds)
+        clause = " AND ".join(where)
+        limit = max(1, int(limit))
         with self.connect() as db:
-            return [
+            normal = [
                 row[0]
                 for row in db.execute(
-                    "SELECT sid FROM facts WHERE " + " AND ".join(where) + " GROUP BY sid "
+                    "SELECT sid FROM facts WHERE " + clause + " GROUP BY sid "
                     "ORDER BY min(audited) ASC, sid LIMIT ?",
-                    [*args, max(1, limit)],
+                    [*args, limit],
                 )
             ]
+            reserved = []
+            if reserve_buckets and bucket_sids:
+                marks = ",".join("?" * len(bucket_sids))
+                reserved = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT sid FROM facts WHERE " + clause + " AND sid IN (%s) "
+                        "GROUP BY sid ORDER BY min(audited) ASC, sid LIMIT ?" % marks,
+                        [*args, *bucket_sids, max(1, int(reserve_buckets))],
+                    )
+                ]
+        out = []
+        for sid in [*reserved, *normal]:
+            if sid not in out:
+                out.append(sid)
+        return out[:limit]
 
     def sessions_with_permanents(self):
         with self.connect() as db:

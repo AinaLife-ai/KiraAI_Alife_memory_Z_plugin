@@ -2112,6 +2112,20 @@ class Engine:
                         "sessions_by_audit_age",
                         max(1, cfg.worker_count),
                         cfg.audit_recheck_days * 86400,
+                        # 方案 A ✓：给无归属的桶**限量预留**名额（至多 1 个 ✓）
+                        # 让迁移来的「全局/未归属」事实有机会被审计归类 ✓
+                        # 但绝不让它们霸占队列 ⇒ 普通会话照旧按陈旧度轮到自己 ✓
+                        reserve_buckets=1,
+                        # ⚠️ 桶的 sid 有**两种写法** ✗✓ —— 实测事实表里既有
+                        # `legacy:unscoped` ✓ 也有**短形式** `global` / `self` / `unscoped` ✗
+                        # （取决于写库时走的是 GLOBAL_ID 还是 GLOBAL ✓）
+                        # ⇒ 两种都列上 ✓ 否则这个功能会**静默无效** ✗
+                        bucket_sids=tuple({
+                            identity.GLOBAL_ID,
+                            identity.GLOBAL,
+                            identity.UNSCOPED_ID,
+                            identity.UNSCOPED_ID[len(identity.LEGACY):],
+                        }),
                     )
                     # v2.18 第6项：审计侧计数（轮次 / 本轮涉及会话数 / 上次轮询时间）
                     _as = getattr(self, "_audit_stats", None)

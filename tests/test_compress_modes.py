@@ -351,3 +351,104 @@ class DuplicateImportCase(unittest.TestCase):
                        (sid, json.dumps(["e1"]), now))
             db.commit()
         self.assertFalse(st.distilled_only(sid, ["e1"]), "event 类不许判为已提炼 ✗（仍需要摘要 ✓）")
+
+
+class AuditBucketPriorityCase(unittest.TestCase):
+    """方案 A：无归属的桶在审计队列里**限量预留**名额 ✓（2026-09-17 用户要求 ✓）
+
+    目标：让迁移来的「全局 / 未归属」事实**有机会**被审计归类 ✓
+    ⚠️ **安全约束**：桶可能有几千条 ✗ 若"永远排最前" ⇒ **普通会话被饿死** ✗✓
+    （引擎里原本就写着 "a big imported backlog cannot keep the queue permanently busy" ✓）
+    ⇒ 只**限量预留** ✓ 其余名额照旧给普通会话 ✓；桶一条都没有时**行为完全不变** ✓
+    """
+
+    _n = 0
+
+    def _seed(self, st, sid, audited, count=1):
+        """按 sid 造 count 条事实 ✓（id 必须唯一 ✓ 否则 UNIQUE 冲突 ✗）"""
+        now = time.time()
+        with st.connect() as db:
+            for _ in range(count):
+                AuditBucketPriorityCase._n += 1
+                k = AuditBucketPriorityCase._n
+                db.execute(
+                    "INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,"
+                    "sources,fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,0,1,?,5,0,?)",
+                    ("f-%d" % k, sid, "fact", "u-1", "内容", "", "", "[]", "[]", "[]",
+                     "fp-%d" % k, audited, now))
+            db.commit()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = storage.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_bucket_gets_reserved_slot_despite_being_fresh(self):
+        """桶的事实很**新**（本来轮不到 ✓）也要给它一个名额 ✓"""
+        self._seed(self.store, "legacy:global", audited=time.time())      # 最新
+        self._seed(self.store, "global", audited=time.time())             # 短形式也要认 ✓
+        for i in range(4):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 1000 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            3, 0, reserve_buckets=1,
+            bucket_sids=("legacy:global", "global", "legacy:unscoped", "unscoped"))
+        self.assertTrue({"legacy:global", "global"} & set(out),
+                        "桶没拿到预留名额 ✗（两种 sid 形式都要认 ✓）")
+
+    def test_normal_sessions_are_not_starved(self):
+        """桶很多、很新 ⇒ 普通会话仍必须占住**其余**名额 ✓（不许饿死 ✓）"""
+        self._seed(self.store, "legacy:global", audited=time.time(), count=20)   # 同 sid 多条 ✓
+        for i in range(3):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 100 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            4, 0, reserve_buckets=1,
+            bucket_sids=("legacy:global", "global", "legacy:unscoped", "unscoped"))
+        self.assertLessEqual(len([s for s in out if s == "legacy:global"]), 1, "桶占了多份 ✗")
+        self.assertEqual(len([s for s in out if s.startswith("qq:")]), 3, "普通会话被饿死 ✗")
+
+    def test_no_buckets_behaviour_unchanged(self):
+        """桶一条都没有 ⇒ 返回值必须与**改动前**完全一致 ✓（零行为变化 ✓）"""
+        for i in range(5):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 100 * (i + 1))
+        new = self.store.sessions_by_audit_age(
+            3, 0, reserve_buckets=1, bucket_sids=("legacy:global", "global"))
+        old = self.store.sessions_by_audit_age(3, 0)     # 默认参数 ✓ 走旧逻辑 ✓
+        self.assertEqual(new, old, "没有桶时行为变了 ✗")
+
+    def test_reserve_zero_means_no_jump(self):
+        """`reserve_buckets=0` ⇒ 关掉优先 ✓（可回退 ✓）"""
+        self._seed(self.store, "legacy:global", audited=time.time())
+        for i in range(3):
+            self._seed(self.store, "qq:gm:%d" % i, audited=time.time() - 1000 * (i + 1))
+        out = self.store.sessions_by_audit_age(
+            2, 0, reserve_buckets=0, bucket_sids=("legacy:global",))
+        self.assertNotIn("legacy:global", out, "reserve=0 时不该插队 ✗")
+
+
+class AuditBucketWiringCase(unittest.TestCase):
+    """接线检查 ✓：引擎必须**真的**把预留名额和两种 sid 形式传下去 ✓
+
+    （实测事实表里桶 sid 有 `legacy:global` **和** `global` 两种写法 ✗
+     只传一种 ⇒ 这个功能会**静默失效** ✗ —— 所以要静态守住 ✓）
+    """
+
+    def test_engine_passes_reserve_and_both_sid_forms(self):
+        src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
+        # ⚠️ 必须**剥掉注释行** ✗✓ —— 否则"把接线注释掉"也能骗过检查 ✓（2026-09-17 实测踩到 ✓）
+        src = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn("reserve_buckets=1", src, "引擎没传预留名额 ✗（方案 A 失效 ✓）")
+        self.assertIn('"sessions_by_audit_age"', src, "调用点被删了 ✗")
+        for frag in ("identity.GLOBAL_ID", "identity.GLOBAL,",
+                     "identity.UNSCOPED_ID", "[len(identity.LEGACY):]"):
+            self.assertIn(frag, src, "桶 sid 的形式少了一种 ✗ ⇒ 可能静默失效 ✓（缺 %s）" % frag)
+
+    def test_storage_supports_reserve_and_defaults_to_old_behaviour(self):
+        """默认参数必须保持**旧行为** ✓（老调用方不传也不变 ✓）"""
+        import inspect
+        sig = inspect.signature(storage.Store.sessions_by_audit_age)
+        self.assertEqual(sig.parameters["reserve_buckets"].default, 1)
+        self.assertEqual(sig.parameters["bucket_sids"].default, ())
