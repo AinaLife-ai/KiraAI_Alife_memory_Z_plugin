@@ -92,3 +92,34 @@ class KeyContractsInHelpCase(unittest.TestCase):
         text = h.HELP.get("compress_batch_mode") or ""
         for word in ("rounds", "records"):
             self.assertIn(word, text, "模式 %s 没在帮助里说明 ✗" % word)
+
+
+class HelpStyleCase(unittest.TestCase):
+    """帮助文案要**像产品说明** ✓ 不能像代码注释 ✗（2026-09-17 用户指出 ✓）
+
+    实测：我写的两条带 `**粗体**` 与 ⚠️ ✓ 长度 141/118 字（全库中位只有 45 字 ✗）
+    ⇒ 界面会把 `**` **原样显示**出来 ✗ 而且又长又像"内部推理" ✓
+    ⇒ 这条守卫把三件事钉住：无格式符号 ✓ 无 emoji ✓ 不过长 ✓
+    """
+
+    MAX = 120
+
+    def test_no_markdown_symbols(self):
+        bad = [k for k, v in h.HELP.items() if re.search(r"\*\*|__|`", v or "")]
+        self.assertEqual(bad, [], "帮助文案里有 Markdown 符号 ✗（界面会显示成 `**这样**` ✓）：%s" % bad)
+
+    def test_no_emoji(self):
+        bad = [k for k, v in h.HELP.items()
+               if re.search(r"[\u2600-\u27bf\U0001F300-\U0001FAFF\u26A0\uFE0F]", v or "")]
+        self.assertEqual(bad, [], "帮助文案里有 emoji ✗：%s" % bad)
+
+    def test_not_comment_like(self):
+        bad = [(k, len(v)) for k, v in h.HELP.items() if len(v or "") > self.MAX]
+        self.assertEqual(bad, [], "帮助文案超过 %d 字 ✗（像注释 ✓ 应像产品说明 ✓）：%s" % (self.MAX, bad))
+
+    def test_style_matches_house_tone(self):
+        """抽查：至少多数帮助是**一句话**级别 ✓（中位数应远小于上限 ✓）"""
+        lens = sorted(len(v or "") for v in h.HELP.values())
+        median = lens[len(lens) // 2]
+        self.assertLess(median, self.MAX / 2,
+                        "帮助文案整体变长了 ✗（中位 %d 字 ✓ 应在一句话级别 ✓）" % median)
