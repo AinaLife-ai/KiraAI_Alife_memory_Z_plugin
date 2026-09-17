@@ -219,12 +219,12 @@ def brief(perception):
             elif item:
                 lines.append("- %s" % item)
 
-    new_cnt = perception.get("new_related_count")
-    if new_cnt:
-        lines.append("（本会话另有 %s 条未展示 · 用 next_batch 继续找）" % new_cnt)
-    more = perception.get("more") or perception.get("omitted_count")
-    if more:
-        lines.append("（还有 %s 条没展示 · 用 next_batch 继续找）" % more)
+    # v2.18.19：两个计数合并成一行 ✓（原来各写一句 ✗ 只差 2 个字 ✓ 白占 20 字符 ✓）
+    new_cnt = perception.get("new_related_count") or 0
+    more = perception.get("more") or perception.get("omitted_count") or 0
+    total_more = (new_cnt or 0) + (more or 0)
+    if total_more:
+        lines.append("（另有 %s 条未展示 · 用 next_batch 继续找）" % total_more)
     return "\n".join(lines)
 
 
