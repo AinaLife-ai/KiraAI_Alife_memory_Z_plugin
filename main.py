@@ -939,13 +939,23 @@ class AlifeMemoryPlugin(BasePlugin):
             return []
         now = time.time()
         pending = []
+        archived_only = 0
         for sid in sorted(await self.store.call("sessions")):
             try:
                 rows = await self.store.call("active", sid)
                 # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
-                if compression_plan(rows, cfg, now=now,
-                                    boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False)):
-                    pending.append(sid)
+                _plan = compression_plan(rows, cfg, now=now,
+                                         boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False))
+                if not _plan:
+                    continue
+                # ★ 扫描阶段就判「迁移已提炼」⇒ **就地归档、不排任务** ✗✓
+                # 判定原本只在 job 里 ✓ ⇒ 白排一次任务（跑起来才发现只需归档 ✓）
+                # 用户抱怨过后台任务刷屏 ✓ 这里省掉往返与噪音 ✓ 且**本来就不花模型钱** ✓
+                _cands = [r["id"] for r in _plan[0]]
+                if await self.store.call("distilled_only", sid, _cands):
+                    archived_only += await self.store.call("archive_distilled", sid, _plan[0])
+                    continue
+                pending.append(sid)
             except Exception:
                 logger.exception("[记忆·Z] 扫描待压缩会话失败：%s", sid)
         cap = max(1, int(limit))
@@ -955,6 +965,11 @@ class AlifeMemoryPlugin(BasePlugin):
             logger.info(
                 "[记忆·Z] 待压缩扫描：%s 个会话有内容可压，本次排 %s 个",
                 len(pending), min(len(pending), cap),
+            )
+        if archived_only:
+            logger.info(
+                "[记忆·Z] 迁移已提炼内容就地归档 %s 条 ✓（未调用模型 ✓）",
+                archived_only,
             )
         return pending
 
