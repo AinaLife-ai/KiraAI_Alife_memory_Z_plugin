@@ -562,7 +562,18 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
                     pos = end
                 need = 1 if boost else cfg.compress_rounds
                 if len(rounds) >= need:
-                    return _fit_rows(subset[: rounds[need - 1][1]], _cap), level + 1
+                    # ⚠️ 取够**一整批**（按**条数**装，不能假定"一轮 2 条" ✗ —— 一轮可能是 4 条 ✓）
+                    # 原来 `rounds[need-1][1]`：boost 时 need=1 ⇒ **一次只压 1 轮(=2 条)** ✗
+                    #   审计实测：3 次模型调用只消化 6 条 ✓ 而按条路一次 40 条 ⇒ 浪费约 6 倍 ✓
+                    # 现在：门槛仍按 need 判（boost 让步 ✓）但批量按 batch_size 条装满 ✓
+                    #   至少取 need 轮 ✓（即使它本身就超过 batch_size ✓ 保持原语义 ✓）
+                    _pick = max(1, need)
+                    for _i in range(_pick, len(rounds) + 1):
+                        if rounds[_i - 1][1] <= cfg.batch_size:
+                            _pick = _i
+                        else:
+                            break
+                    return _fit_rows(subset[: rounds[_pick - 1][1]], _cap), level + 1
                 if boost and not rounds:
                     # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
                     # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**
