@@ -473,6 +473,25 @@ def trim_to_round(rows, target, extra=8):
     return rows[: max(target, min(end, len(rows)))]
 
 
+def _fit_rows(rows, cap_chars):
+    """按**字符上限前缀式**取 ✓ —— 取到放不下为止 ✓ **绝不丢已选中的** ✓
+
+    ⚠️ 不能"选完再截" ✗ —— 那会把已选中的记录丢掉 ✗
+    （契约：计划返回的这一批，来源**一条都不会少** ✓ 见 test_reliability
+      `test_timeout_shrinks_batch_without_losing_any_source` ✓）
+    ⚠️ 至少给 1 条 ✗ —— 否则单条超大记录会让这一层**永远动不了** ✓（死锁 ✓）
+    用来防的是：几千条存量数据一次喂进去把 token 撑爆 ✗（`compress_input_max_chars` ✓）
+    """
+    out, used = [], 0
+    for row in rows:
+        size = len(str(row.get("summary") or row.get("content") or ""))
+        if out and used + size > cap_chars:
+            break
+        out.append(row)
+        used += size
+    return out
+
+
 def compression_plan(rows, cfg, now=None, boost_allowed=False):
     """挑出一批可以压缩的内容 ✓
 
@@ -486,6 +505,7 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
     # Canonical ordering repairs reversed persisted regions without forging depth.
     # v2.18.19（B）：门槛覆盖 ✓ —— 只影响"什么时候动手"✗ 绝不切半轮 ✓
     # 目标场景：**会话还在活跃**（所以永远不"闲置"✗）但**旧数据一直压不到** ✓
+    _cap = int(getattr(cfg, "compress_input_max_chars", 20000) or 20000)
     boost = False
     if boost_allowed and rows:
         _times = [t for t in ((r.get("end") or r.get("start") or 0) for r in rows) if t]
@@ -529,25 +549,25 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
                     pos = end
                 need = 1 if boost else cfg.compress_rounds
                 if len(rounds) >= need:
-                    return subset[: rounds[need - 1][1]], level + 1
+                    return _fit_rows(subset[: rounds[need - 1][1]], _cap), level + 1
                 if boost and not rounds:
                     # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
                     # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**
                     # ⇒ 退回按条（仍受 batch_size 限制 ✓）
                     _count = min(int(cfg.batch_size), len(subset))
                     if _count > 0:
-                        return subset[:_count], level + 1
+                        return _fit_rows(subset[:_count], _cap), level + 1
             elif len(subset) >= threshold:
                 # **按条**：取 count 条 ✓ 但**叶子层**的最后一轮必须收尾完整 ✗（无视条数 ✓ 只受安全上限约束 ✓）
                 # ⚠️ 两个前提：① 只在叶子层（摘要层不是"轮" ✗ 保持纯条数 ✓）
                 #            ② 这一批里真的存在助手回复 ✗ 否则谈不上"收尾"（用户连发时退回按条 ✓）
                 if not leaf:
-                    return subset[:count], level + 1
+                    return _fit_rows(subset[:count], _cap), level + 1
                 has_reply = any(r.get("role") == "assistant" for r in subset)
                 # 从**最后取到的那条**（count-1）往后找它所属那一轮的结尾 ✗
                 # （从 count 开始会多抓一整轮 ✓ 批次平白翻倍 ✗）
                 end = _round_end(subset, count - 1, cap)[0] if has_reply else count
-                return subset[:end], level + 1
+                return _fit_rows(subset[:end], _cap), level + 1
     return None
 
 
