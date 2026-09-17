@@ -518,8 +518,11 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
     """挑出一批可以压缩的内容 ✓
 
     v2.18.19（B）：加了**门槛覆盖**（`boost_allowed=True` 时生效 ✓）
-      · **陈旧**：最老的未压缩记录超过 `compress_stale_after_days`（默认 3 天）→ 门槛降为 1 ✓
-      · **闲置**：该会话最新记录超过 `compress_idle_after_hours`（默认 6 小时）→ 门槛降为 1 ✓
+      · **冷会话**：`compress_stale_after_days`（默认 3 天）与 `compress_idle_after_hours`
+        （默认 6 小时）**同时满足** ⇒ 门槛降为 1 ✓
+        （2026-09-17 用户要求：**既久没动、又有积压** ✓ 才算真正沉睡 ✓
+          只看其一 ✗ 会把"还在聊但有老记录"或"刚停下但内容很新"的会话也提前压 ✓
+          任一项设为 0 ⇒ 自动退回"或" ✓ 不锁死 ✓）
       ⚠️ 默认**关** ✗ —— 由引擎按每会话冷却显式打开 ✓
          这样纯函数的老语义（单测依赖 ✓）一个字不变 ✓
     """
