@@ -724,3 +724,36 @@ class QuietAutomaticJobCase(unittest.TestCase):
         """清单本身也要守 ✓：只允许"确定不调模型"的空转措辞 ✓"""
         for note in e.QUIET_JOB_NOTES:
             self.assertIn("没有", note, "清单里混进了非空转措辞 ✗：%s" % note)
+
+
+class BotIssuedTaskVisibleCase(unittest.TestCase):
+    """**有发起方**的任务必须有日志 ✓（bot 发起 / 工作台按钮 ✓）
+
+    用户 2026-09-17 指出：tidy 那边如果**是 bot 发出的**，也要算"手动" ⇒ 要有日志 ✓
+    （区分标准不是"谁在跑"，而是"**有没有人在等结果**" ✓）
+    """
+
+    def test_queue_tidy_all_accepts_automatic_flag(self):
+        import inspect
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True)", src)
+        self.assertIn('enqueue("tidy", owner, automatic=automatic)', src)
+
+    def test_bot_and_workbench_call_it_as_manual(self):
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn("automatic=False,  # bot 发起的", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
+        self.assertIn("automatic=False  # 工作台按钮", code, "工作台按钮没标成手动 ✗")
+        self.assertIn('enqueue("tidy", value.sid, automatic=False)', code,
+                      "bot 写永久记忆后的整理没标成手动 ✗")
+
+    def test_truly_automatic_ones_stay_automatic(self):
+        """真正自动的（阈值兜底 / 调度器）保持 automatic=True ✓ 空转时仍可静默 ✓"""
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn('enqueue("tidy", owner, automatic=True)', code, "阈值兜底那条被误改了 ✗")
+
+    def test_reindex_noop_drops_job(self):
+        src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn('"drop_job", job["id"]', code, "reindex 空转还在留任务 ✗")

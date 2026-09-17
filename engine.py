@@ -2004,12 +2004,9 @@ class Engine:
                     )
                 elif job["kind"] == "reindex":
                     if not cfg.semantic_enabled:
-                        await self.store.call(
-                            "finish",
-                            job["id"],
-                            "completed",
-                            "vector search disabled; no model called",
-                        )
+                        # 语义检索关着 ⇒ 纯空转（**不调模型** ✓ 它自己的注释也这么写 ✓）
+                        # ⇒ 不留任务、不打日志 ✓（2026-09-17 用户要求 ✓）
+                        await self.store.call("drop_job", job["id"])
                         continue
                     offset = 0
                     while self.settings().enabled and self.settings().semantic_enabled:

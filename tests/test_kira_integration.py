@@ -830,7 +830,11 @@ async def test_optional_vectors_never_call_provider_when_disabled(tmp_path):
             if any(j["id"] == job and j["state"] == "completed" for j in rows):
                 break
             await asyncio.sleep(0.01)
-        assert any(j["id"] == job and "no model called" in j["detail"] for j in rows)
+        # 语义关闭时的 reindex 是**纯空转** ✓ ⇒ 现在直接删掉任务、不进工作台 ✓
+        # （2026-09-17 用户要求：这类不调模型的任务不要显示 ✓）
+        # 真正要守的不变量是"**没有调用任何 provider**" ✓ 见下面的断言 ✓
+        rows = plugin.store.status()["jobs"]
+        assert not any(j["id"] == job for j in rows), "空转任务不该留在工作台 ✗"
         assert plugin.store.search(sid=event.sid, lexical="橘猫")["total"] == 1
 
         async def body(*args):
