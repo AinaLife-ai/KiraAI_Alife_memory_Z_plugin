@@ -757,3 +757,103 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
         code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
         self.assertIn('"drop_job", job["id"]', code, "reindex 空转还在留任务 ✗")
+
+
+class JobHousekeepingCase(unittest.TestCase):
+    """方案 A（清理过期任务）+ 方案 C（扫描按陈旧度排 ✓）—— 2026-09-17 用户要求 ✓
+
+    A：工作台的"工作明细"原来**只增不减** ✗（jobs 表永久堆积 ✓）
+    C：扫描原来用 `sorted(sessions)` = **字母序** ✗ ⇒ 挑出的 8 个跟"谁更需要压"无关 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # ── A ──
+    def _job(self, jid, state, updated):
+        # ⚠️ jobs 有 UNIQUE(kind, sid) ✗✓ ⇒ 同一 (kind,sid) 只能有一行 ✓
+        # （这正是"同一会话不会重复排队"的天然保证 ✓ 也说明"任务多"= 会话多 ✓）
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO jobs(id,kind,sid,state,detail,created,updated,automatic)"
+                " VALUES(?,'compress',?,?,?,?,?,1)",
+                (jid, "s-" + jid, state, "", updated, updated))
+            db.commit()
+
+    def test_prune_drops_old_but_keeps_recent(self):
+        now = time.time()
+        for i in range(10):
+            self._job("old-%d" % i, "completed", now - 30 * 86400 - i)
+        for i in range(3):
+            self._job("new-%d" % i, "completed", now - i)
+        self.store.prune_jobs(keep_days=7, keep_min=3)
+        with self.store.connect() as db:
+            left = {r[0] for r in db.execute("SELECT id FROM jobs").fetchall()}
+        self.assertTrue(all(x.startswith("new-") for x in left), "新任务被误删 ✗：%s" % left)
+        self.assertGreaterEqual(len(left), 3, "keep_min 没保住 ✗")
+
+    def test_prune_never_touches_queued_or_running(self):
+        """🔴 安全底线：**正在排队/执行的任务绝不能删** ✓✓"""
+        now = time.time()
+        self._job("q-1", "queued", now - 90 * 86400)
+        self._job("r-1", "running", now - 90 * 86400)
+        for i in range(30):
+            self._job("done-%d" % i, "completed", now - 60 * 86400 - i)
+        self.store.prune_jobs(keep_days=1, keep_min=1)
+        with self.store.connect() as db:
+            left = {r[0] for r in db.execute("SELECT id FROM jobs").fetchall()}
+        self.assertEqual({"q-1", "r-1"}, left, "排队/执行中的任务被删了 ✗✗ 严重 ✓")
+
+    def test_prune_cleans_orphan_items(self):
+        now = time.time()
+        self._job("keep", "completed", now)
+        self._job("gone", "completed", now - 100 * 86400)
+        with self.store.connect() as db:
+            db.execute("INSERT INTO job_items(job_id,kind,target,action,note,before,created) VALUES('gone','compress','t','a','','',?)", (time.time(),))
+            db.commit()
+        self.store.prune_jobs(keep_days=7, keep_min=1)
+        with self.store.connect() as db:
+            n = db.execute("SELECT count(*) FROM job_items WHERE job_id='gone'").fetchone()[0]
+        self.assertEqual(n, 0, "孤儿明细没清掉 ✗")
+
+    # ── C ──
+    def test_sessions_by_age_orders_oldest_first(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for sid, age_days in (("s:new", 1), ("s:old", 30), ("s:mid", 10)):
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                    ("r-" + sid, sid, now - age_days * 86400, now - age_days * 86400,
+                     "内容", "内容", "[]", 1, now, "session"))
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted) VALUES('r-off','s:old','user',0,?,?,?,?,?,?,?,?,0,0)",
+                (now, now, "内容", "内容", "[]", 9, now, "session"))
+            db.commit()
+        out = self.store.sessions_by_age()
+        self.assertEqual(out, ["s:old", "s:mid", "s:new"], "没按陈旧度排 ✗（字母序会排成 mid/new/old ✓）")
+
+
+class HousekeepingWiringCase(unittest.TestCase):
+    """接线检查 ✓（剥注释后判 ✗ 免得被注释骗过 ✓）"""
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_scan_uses_staleness_order(self):
+        code = self._code("main.py")
+        self.assertIn('"sessions_by_age"', code, "扫描没用按陈旧度排序 ✗（方案 C 失效 ✓）")
+        self.assertIn("sorted(await self.store.call(\"sessions\"))", code,
+                      "兜底分支没了 ✗（老库要还能跑 ✓）")
+
+    def test_engine_prunes_jobs_periodically(self):
+        code = self._code("engine.py")
+        self.assertIn('"prune_jobs"', code, "没有接周期清理 ✗（方案 A 失效 ✓ 列表会无限增长 ✓）")
+        self.assertIn("_last_prune", code, "没有节流 ⇒ 会每 30 秒清一次 ✗")

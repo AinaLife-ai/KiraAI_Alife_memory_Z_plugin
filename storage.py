@@ -2232,6 +2232,49 @@ class Store:
             ).fetchone()
         return {"live": row["live"] or 0, "archived": row["archived"] or 0}
 
+    def sessions_by_age(self):
+        """按「**最老活跃记录**的 start」升序返回会话 ✓（越老越先处理 ✓）
+
+        2026-09-17 用户要求（方案 C ✓）：原来 `queue_compress_all` 用
+        `sorted(sessions)` ✗ = **字母序** ⇒ 挑出来的 8 个跟"谁更需要压"无关 ✓
+        换成这个 ⇒ 每次扫描都从**真正最陈旧**的会话开始 ✓
+        """
+        with self.connect() as db:
+            return [
+                row[0]
+                for row in db.execute(
+                    "SELECT sid FROM records WHERE active=1 AND deleted=0 "
+                    "GROUP BY sid ORDER BY min(COALESCE(start, created)) ASC, sid"
+                )
+            ]
+
+    def prune_jobs(self, keep_days=7, keep_min=50):
+        """清掉过期的历史任务 ✓（工作台"工作明细"不再**无限增长** ✓ 方案 A ✓）
+
+        只删**历史记录** ✗ 不动任何业务数据 ✓✓
+        · `queued` / `running` 的**一律不碰** ✓（正在跑的绝不能删 ✓）
+        · 至少保留最近 `keep_min` 条 ✓（免得列表被清空 ✓）
+        · 顺带清掉孤儿 job_items ✓
+        """
+        cutoff = time.time() - max(1, int(keep_days)) * 86400
+        keep = max(1, int(keep_min))
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM jobs WHERE state NOT IN ('queued','running') "
+                "AND id NOT IN (SELECT id FROM jobs ORDER BY updated DESC LIMIT ?)",
+                (keep,),
+            )
+            n = db.execute(
+                "DELETE FROM jobs WHERE state NOT IN ('queued','running') AND updated < ?",
+                (cutoff,),
+            ).rowcount
+            db.execute(
+                "DELETE FROM job_items WHERE job_id NOT IN (SELECT id FROM jobs)"
+            )
+            db.commit()
+        return int(n or 0)
+
     def sessions_by_audit_age(self, limit, recheck_seconds=0, reserve_buckets=1, bucket_sids=()):
         """Sessions with audit-eligible facts, most stale first.
 

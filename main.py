@@ -940,7 +940,13 @@ class AlifeMemoryPlugin(BasePlugin):
         now = time.time()
         pending = []
         archived_only = 0
-        for sid in sorted(await self.store.call("sessions")):
+        # 方案 C ✓（2026-09-17 用户要求）：按**陈旧度**排 ✓ 而不是字母序 ✗
+        # 原来 `sorted(sessions)` 挑出的 8 个跟"谁更需要压"无关 ✓
+        try:
+            _order = await self.store.call("sessions_by_age")
+        except Exception:
+            _order = sorted(await self.store.call("sessions"))   # 兜底 ✓ 老库也能跑 ✓
+        for sid in _order:
             try:
                 rows = await self.store.call("active", sid)
                 # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓

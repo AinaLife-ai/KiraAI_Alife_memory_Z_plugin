@@ -2125,6 +2125,15 @@ class Engine:
                         if compression_plan(rows, cfg, now=time.time(),
                                  boost_allowed=_boost_ok(sid, cfg, stamp=False)):
                             await self.enqueue("compress", sid, automatic=True)
+            if now - getattr(self, "_last_prune", 0.0) >= 3600:
+                # 方案 A ✓：每小时清一次过期历史任务 ✓（工作台列表不再无限增长 ✓）
+                try:
+                    dropped = await self.store.call("prune_jobs")
+                    if dropped:
+                        logger.info("[记忆·Z] 清理过期任务记录 %s 条 ✓", dropped)
+                except Exception:
+                    logger.exception("[记忆·Z] 清理过期任务失败（下轮再试 ✓）")
+                self._last_prune = now
             if cfg.audit_enabled and now - self.last_audit >= cfg.audit_interval:
                 self.last_audit = now
                 if self.audit_budget_ok(cfg):
