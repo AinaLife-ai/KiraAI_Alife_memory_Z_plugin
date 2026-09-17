@@ -857,3 +857,33 @@ class HousekeepingWiringCase(unittest.TestCase):
         code = self._code("engine.py")
         self.assertIn('"prune_jobs"', code, "没有接周期清理 ✗（方案 A 失效 ✓ 列表会无限增长 ✓）")
         self.assertIn("_last_prune", code, "没有节流 ⇒ 会每 30 秒清一次 ✗")
+
+
+class SweepBurstCase(unittest.TestCase):
+    """扫描的 `limit` 是**花钱闸门** ✓（2026-09-17 用户实测反馈 ✓）
+
+    用户问："存量用户更新后，为什么一次性有满 8 个分层压缩？"
+    查明：`queue_compress_all(limit=8)` ✗ —— 而每个任务最多 `compress_batches_per_job`
+    （默认 3 ✓）批 ⇒ **启动瞬间最多 24 次模型调用** ✗ 与"省钱闸门"设计相悖 ✓
+    ⇒ 默认降到 2（突发 ≤ 6 次 ✓）其余交给 30 秒调度器与下一轮扫描 ✓（不会漏 ✓）
+    """
+
+    def _main_code(self):
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_default_limit_is_gentle(self):
+        import re
+        code = self._main_code()
+        m = re.search(r"async def queue_compress_all\(self, limit=(\d+)\)", code)
+        self.assertIsNotNone(m, "扫描签名变了 ✗")
+        self.assertLessEqual(int(m.group(1)), 2,
+                             "扫描默认上限 %s 太大 ✗（一次会打出很多模型调用 ✓）" % m.group(1))
+
+    def test_burst_is_bounded(self):
+        import re
+        code = self._main_code()
+        limit = int(re.search(r"async def queue_compress_all\(self, limit=(\d+)\)", code).group(1))
+        per_job = c.Settings.model_fields["compress_batches_per_job"].default
+        self.assertLessEqual(limit * per_job, 6,
+                             "一次扫描最坏 %d 次调用 ✗ 太猛 ✓（应 ≤ 6 ✓）" % (limit * per_job))
