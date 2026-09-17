@@ -1977,7 +1977,11 @@ class Store:
                     level,
                     start,
                     end,
-                    output["summary"],
+                    # v2.18.19：这一批若被**字符上限截断** ✗（可能切在轮中间 ✓）
+                    # ⇒ 摘要尾部标「（续）」✓ 让后面读到的人/模型知道它不是完整一轮 ✓
+                    # ⚠️ 内联表达式 ✗ 不要另起变量 ✓（定义与使用曾在不同作用域炸过 ✓）
+                    str(output["summary"])
+                    + ("（续）" if any(r.get("_partial") for r in candidates) else ""),
                     content,
                     dump(users),
                     min(r["position"] for r in candidates),

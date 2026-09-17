@@ -482,13 +482,19 @@ def _fit_rows(rows, cap_chars):
     ⚠️ 至少给 1 条 ✗ —— 否则单条超大记录会让这一层**永远动不了** ✓（死锁 ✓）
     用来防的是：几千条存量数据一次喂进去把 token 撑爆 ✗（`compress_input_max_chars` ✓）
     """
-    out, used = [], 0
+    out, used, cut = [], 0, False
     for row in rows:
         size = len(str(row.get("summary") or row.get("content") or ""))
         if out and used + size > cap_chars:
+            cut = True          # ★ 没放完 → 这一批被**字符上限截断**了 ✓（可能正好切在轮中间 ✗）
             break
         out.append(row)
         used += size
+    if cut and out:
+        # v2.18.19：给压缩侧留个记号 ✓ —— 它会给这条例存档的摘要加「（续）」✓
+        # 只在**真的截断**时打 ✗（正常情况一个字不加 ✓）
+        # ⚠️ 用 `dict(...)` 复制 ✗ 不要原地改传入的行 ✓
+        out[-1] = dict(out[-1], _partial=True)
     return out
 
 
