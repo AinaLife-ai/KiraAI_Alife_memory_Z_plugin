@@ -10,6 +10,7 @@ from collections import OrderedDict
 _MEMORY_PAYLOAD_MARKERS = (
     '"archives_in_context"',
     '"children_total"',
+    '"kids"',        # v2.18.19：读原文改短键 ✗ 新旧都留以便识别历史载荷 ✓
     '"next_page"',
     '"subjects"',
     '"entities"',

@@ -498,7 +498,7 @@
         "type": "switch",
         "name": "自动合并相似永久记忆",
         "default": true,
-        "description": "开启后，后台用审计模型检查相似的永久记忆，确属同一件事的重复或更正时自动合并（保留最新一条，其余移出常驻上下文，原文保留）。默认开启。"
+        "description": "开启后，后台用审计模型检查相似的永久记忆，确属同一件事的重复或更正时自动合并（保留最新一条，其余移出活跃记忆，原文保留）。默认开启。"
       },
       "dedupe_force_merge": {
         "type": "switch",
@@ -526,7 +526,7 @@
         "type": "switch",
         "name": "检索默认只搜常驻",
         "default": false,
-        "description": "关闭（默认）时检索会连已归档的旧记忆一起搜，被动召回更全；开启后只搜常驻上下文，归档需显式 include_archived=true。冷归档、软删与超龄淡出不受影响。"
+        "description": "关闭（默认）时检索会连已归档的旧记忆一起搜，被动召回更全；开启后只搜活跃记忆，归档需显式 include_archived=true。冷归档、软删与超龄淡出不受影响。"
       },
       "recall_skip_media": {
         "type": "switch",
