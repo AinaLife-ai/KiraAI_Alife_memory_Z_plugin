@@ -1978,10 +1978,17 @@ class Store:
                     start,
                     end,
                     # v2.18.19：这一批若被**字符上限截断** ✗（可能切在轮中间 ✓）
-                    # ⇒ 摘要尾部标「（续）」✓ 让后面读到的人/模型知道它不是完整一轮 ✓
+                    # ⇒ 摘要尾部加 `…` ✓ 表示"后面还有" ✓
+                    #    用省略号而不是「（续）」✓ —— 更短 ✓ 且沿用仓库既有的截断约定 ✓
+                    #    已以 `…` 结尾就不重复加 ✗（模型自己可能写了 ✓）
                     # ⚠️ 内联表达式 ✗ 不要另起变量 ✓（定义与使用曾在不同作用域炸过 ✓）
                     str(output["summary"])
-                    + ("（续）" if any(r.get("_partial") for r in candidates) else ""),
+                    + (
+                        "…"
+                        if any(r.get("_partial") for r in candidates)
+                        and not str(output["summary"]).rstrip().endswith("…")
+                        else ""
+                    ),
                     content,
                     dump(users),
                     min(r["position"] for r in candidates),
