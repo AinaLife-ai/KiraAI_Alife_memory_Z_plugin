@@ -1690,3 +1690,27 @@ button.primary:hover::after {
   line-height: 1.6;
 }
 .conflict .actions { margin-top: 8px; display: flex; gap: 8px; }
+
+
+/* 整理永久记忆弹窗：两个选项做成"可选卡片" ✓
+   （2026-09-17 用户要求"契合已有主题又美观一点" ✓ 只用主题变量 ⇒ 深浅色自动适配 ✓） */
+.dialog .tidy-opt {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.dialog .tidy-opt:hover { border-color: var(--accent); }
+.dialog .tidy-opt.on { border-color: var(--accent); background: var(--soft); }
+.dialog .tidy-opt input {
+  width: 18px; height: 18px; margin: 2px 0 0; flex: none; accent-color: var(--accent);
+}
+.dialog .tidy-opt > span { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.dialog .tidy-opt small { color: var(--muted); font-size: 11px; line-height: 1.6; }
+
+.dialog .tidy-opt > span > b { display: flex; align-items: center; gap: 8px; font-weight: 600; }

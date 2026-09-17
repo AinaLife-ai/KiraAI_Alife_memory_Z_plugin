@@ -153,3 +153,22 @@ class HtmlStructureCase(unittest.TestCase):
         want = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', js))
         missing = sorted(want - have)
         self.assertEqual(missing, [], "JS 引用了 HTML 里不存在的 id ✗：%s" % missing)
+
+
+class SchemaDescriptionSyncCase(unittest.TestCase):
+    """`schema.json` 的 description 必须与 `setting_help` 一致 ✓
+
+    （2026-09-17 发现：改了帮助文案却**忘了重新生成** schema ✗ ⇒ 界面起作用的
+      其实是 schema 里的描述 ✓ 不同步就会出现"代码改了、界面还是旧话"✓）
+    """
+
+    def test_schema_description_matches_help(self):
+        import json
+        sch = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["alife"]["fields"]
+        bad = []
+        for key in c.Settings.model_fields:
+            entry = sch.get(key) or {}
+            desc = entry.get("description")
+            if desc and desc != h.HELP.get(key):
+                bad.append(key)
+        self.assertEqual(bad, [], "schema 描述与 setting_help 不一致 ✗（忘记重新生成？✓）：%s" % bad)

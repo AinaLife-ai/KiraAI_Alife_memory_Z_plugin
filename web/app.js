@@ -1813,20 +1813,35 @@ function askTidyMode() {
     const days = (box && box.value) || "14";
     const d = document.createElement("dialog");
     d.className = "dialog";
+    // v2.18.23：按仓库**房型风格**重写 ✓（panel-title + muted + notice + actions + primary ✓）
+    // 两个选项做成"可选卡片" ✓（.tidy-opt ✓ 样式只吃主题变量 ⇒ 深浅色自动适配 ✓）
     d.innerHTML =
-      "<h4>整理永久记忆</h4>" +
-      '<label class="field"><input type="radio" name="tidymode" value="due" checked>' +
-      "<span>只整理到期的 —— 按 " + days + " 天冷却挑还没整理的，省 token</span></label>" +
-      '<label class="field"><input type="radio" name="tidymode" value="all">' +
-      "<span>全部重新整理 —— 无视冷却，把每个会话里常驻的永久记忆都过一遍；" +
-      "更耗 token，但可以重新提取事实</span></label>" +
+      '<div class="panel-title"><h2>整理永久记忆</h2>' +
+      '<button id="tidyClose" aria-label="关闭">×</button></div>' +
+      '<p class="muted">永久记忆会常驻在会话上下文里，整理会重新核对它们与原文的关系。</p>' +
+      '<div class="notice">按冷却整理更省 token；全部重新整理更彻底。</div>' +
+      '<label class="field tidy-opt"><input type="radio" name="tidymode" value="due" checked>' +
+      '<span><b>只整理到期的</b>' +
+      '<small class="muted">按 ' + days + ' 天冷却，挑还没整理过的会话；token 花得更少</small></span></label>' +
+      '<label class="field tidy-opt"><input type="radio" name="tidymode" value="all">' +
+      '<span><b>全部重新整理</b>' +
+      '<small class="muted">无视冷却，把每个会话常驻的永久记忆都过一遍；' +
+      'token 花得更多，但会重新提取事实</small></span></label>' +
       '<div class="actions"><button id="tidyCancel">取消</button>' +
-      '<button id="tidyGo">开始</button></div>';
+      '<button id="tidyGo" class="primary">开始</button></div>';
     document.body.appendChild(d);
     const done = (v) => { try { d.close(); } catch (err) {} d.remove(); resolve(v); };
     d.querySelector("#tidyCancel").onclick = () => done(null);
+    d.querySelector("#tidyClose").onclick = () => done(null);
     d.querySelector("#tidyGo").onclick = () =>
       done(d.querySelector('input[name="tidymode"]:checked').value);
+    // 选中项高亮 ✓（JS 切 class ✗ 不依赖 :has ✓ 兼容性更稳 ✓）
+    const mark = () => d.querySelectorAll(".tidy-opt").forEach((el) => {
+      const input = el.querySelector("input");
+      el.classList.toggle("on", !!(input && input.checked));
+    });
+    d.querySelectorAll('input[name="tidymode"]').forEach((i) => { i.onchange = mark; });
+    mark();
     d.addEventListener("cancel", () => done(null));   // ESC ✓
     d.showModal();
   });
