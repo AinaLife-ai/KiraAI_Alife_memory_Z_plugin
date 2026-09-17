@@ -1832,12 +1832,21 @@ $$("[data-job]").forEach(
   (e) =>
     (e.onclick = () =>
       guard(async () => {
-        if (!$("#jobSession").value) throw Error("请先选择一个已有会话");
+        const job = e.dataset.job;
+        // 「整理永久记忆」「重建向量索引」是**全局**任务：后端 tidy 走
+        // `queue_tidy_all(sid)`（忽略 sid、按"所有有意久记忆的会话"排队 ✓），
+        // reindex 更是与会话无关 ✓ ⇒ 不能因为没选会话就把它们拦掉 ✗✓
+        // （按钮提示本来就写着"不受上方会话选择限制" ✓ 原来前后矛盾 ✓
+        //   于是「无视冷却」那个确认框**永远弹不出来** ✓ 2026-09-17 用户实测 ✓）
+        const needsSession = job !== "tidy" && job !== "reindex";
+        if (needsSession && !$("#jobSession").value) {
+          throw Error("请先选择一个已有会话");
+        }
         const payload = {
-          sid: $("#jobSession").value,
-          kind: e.dataset.job,
+          sid: $("#jobSession").value || "",
+          kind: job,
         };
-        if (e.dataset.job === "tidy") {
+        if (job === "tidy") {
           const mode = await askTidyMode();
           if (!mode) return;                       // 取消 ✓
           payload.force = mode === "all";           // 全部重新整理 → 无视冷却 ✓

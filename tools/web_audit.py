@@ -212,7 +212,40 @@ def audit(root: Path | str = ROOT) -> dict[str, list[str]]:
         ],
         "binding_mismatch": _check_bindings(js),
         "route_mismatch": _check_routes(js, main_py),
+        "global_jobs_gate": _global_jobs_gate(js, html, main_py),
     }
+
+
+def _global_jobs_gate(js: str, html: str, main_py: str) -> list[str]:
+    """全局任务不得被"未选会话"挡住 ✗✓（2026-09-17 实测事故 ✓）
+
+    事实链（三处必须一致 ✓）：
+      · 后端 `main.py`：``kind == "tidy"`` → ``queue_tidy_all(value.sid)``
+        （注释写明"按所有有意久记忆的会话排队" ✓ **忽略 sid** ✓）
+      · 前端按钮 `index.html`：title = "整理所有会话的永久记忆（不受上方会话选择限制）"
+      · 前端处理器 `app.js`：必须把这类 kind 排除在"需要选会话"之外 ✓
+
+    曾经的断点：处理器在**任何 kind 之前**就
+    ``if (!$("#jobSession").value) throw Error("请先选择一个已有会话")`` ✗
+    ⇒ 「整理永久记忆」按钮永远进不去确认框 ✓（用户实测：无视冷却的弹窗根本没有 ✓）
+    """
+    problems: list[str] = []
+    if "queue_tidy_all" not in main_py:
+        return problems  # 后端形态变了 → 不判（避免误报 ✓）
+    m = re.search(r"needsSession\s*=\s*([^;]+);", js)
+    if not m:
+        problems.append(
+            "app.js 找不到 needsSession 判定 ✗ —— 全局任务可能仍被「未选会话」拦住 ✓"
+        )
+        return problems
+    expr = m.group(1)
+    for kind in ("tidy", "reindex"):
+        if ('"%s"' % kind) not in expr:
+            problems.append(
+                'needsSession 没排除 "%s" ✗ —— 该按钮会被「请先选择一个已有会话」卡死 ✓'
+                % kind
+            )
+    return problems
 
 
 def main() -> int:
@@ -222,6 +255,7 @@ def main() -> int:
         "orphan_writer": "B. data-* 写出后没有任何读取方（属性名可能写错）",
         "binding_mismatch": "C. 绑定选择器与处理器读取的 dataset 键不一致",
         "route_mismatch": "D. 前端调用的接口与后端路由不一致",
+        "global_jobs_gate": "E. 全局任务（整理永久记忆等）不得被「未选会话」拦住",
     }
     fatal = 0
     for key, title in titles.items():

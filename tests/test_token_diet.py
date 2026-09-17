@@ -383,3 +383,59 @@ class EmptyLexicalQueryCase(unittest.TestCase):
             # 真跑一遍 SQLite 才算数 ✓
             with self.store.connect() as db:
                 db.execute("SELECT * FROM facts ORDER BY %s DESC LIMIT 1" % sql).fetchall()
+
+
+class CompressionTriggerCase(unittest.TestCase):
+    """冷会话三触发 + 迁移（B4）门槛退回 ✓（2026-09-17 用户要求实测确认 ✓）
+
+    规则（`engine.compression_plan` ✓）：
+      · 常态：攒够 `compress_rounds` 个**完整轮**才压 ✓
+      · **陈旧**：最老记录超过 `compress_stale_after_days` → 门槛降为 **1** ✓
+      · **闲置**：最新记录超过 `compress_idle_after_hours` → 门槛降为 **1** ✓
+      · **B4**：一个完整轮都算不出（迁移导入 / 同角色堆叠）→ 退回**按条** ✓
+    行的形状必须带 start/end + level + position ✓（boost 读的是 end/start ✗ 不是 created ✓）
+    """
+
+    def _rows(self, n, age_h, roles=("user", "assistant")):
+        now = time.time()
+        out = []
+        for i in range(n):
+            t = now - age_h * 3600 - i * 180
+            out.append(dict(id="r%d" % i, start=t, end=t, created=t, summary="s%d" % i,
+                            permanent=0, tier="active", importance=5, level=0,
+                            position=i + 1, sid="qq:gm:1", visibility="session",
+                            role=roles[i % len(roles)]))
+        return out
+
+    def _cfg(self, **over):
+        base = dict(compress_batch_mode="rounds", compress_rounds=12,
+                    batch_size=8, threshold=40)
+        base.update(over)
+        return c.Settings(**base)
+
+    def test_stale_triggers_threshold_one(self):
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "陈旧数据没触发压缩 ✗（阈值没降到 1 ✗）")
+
+    def test_idle_triggers_threshold_one(self):
+        plan = e.compression_plan(self._rows(20, 30), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "闲置会话没触发压缩 ✗")
+
+    def test_fresh_session_does_not_trigger(self):
+        plan = e.compression_plan(self._rows(20, 0.1), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNone(plan, "刚聊过的会话不该降门槛 ✗")
+
+    def test_boost_disallowed_does_not_trigger(self):
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=False)
+        self.assertIsNone(plan, "调度没放行时不该降门槛 ✗")
+
+    def test_migrated_rows_fall_back_to_count(self):
+        """B4：迁移导入（全是 user，算不出完整轮）→ 退回按条 ✓"""
+        rows = self._rows(24, 24 * 400, roles=("user",))
+        plan = e.compression_plan(rows, self._cfg(), now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "迁移数据压不动 ✗（B4 退回按条没生效 ✗）")
+        self.assertLessEqual(len(plan[0]), 8, "退回按条时不得超过 batch_size ✗")
