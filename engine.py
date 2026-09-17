@@ -536,10 +536,17 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
             _newest, _oldest = max(_times), min(_times)
             _stale_days = int(getattr(cfg, "compress_stale_after_days", 3) or 0)
             _idle_hours = int(getattr(cfg, "compress_idle_after_hours", 6) or 0)
-            if _stale_days and _oldest < _now - _stale_days * 86400:
-                boost = True          # 陈旧：有积压 ✓
-            if _idle_hours and _newest < _now - _idle_hours * 3600:
-                boost = True          # 闲置：这轮对话已经结束了 ✓
+            _stale = bool(_stale_days) and _oldest < _now - _stale_days * 86400
+            _idle = bool(_idle_hours) and _newest < _now - _idle_hours * 3600
+            # 用户 2026-09-17 要求：两个条件要**同时满足** ✓（原来是与 ✗）
+            #   · 只看"陈旧" ✗ ⇒ 一个**还在活跃聊天**、只是有几条老记录的会话也会被降门槛 ✗
+            #   · 只看"闲置" ✗ ⇒ 刚停下来、内容还很新的会话也会被降门槛 ✗
+            #   · 同时满足 ⇒ **既久没动、又有积压** ✓ 才是真正该"赶进度"的会话 ✓
+            if _stale_days and _idle_hours:
+                boost = _stale and _idle
+            else:
+                # 只配了其中一个（另一个设 0=关闭 ✓）⇒ 退回"或" ✓ 不把功能锁死 ✓
+                boost = _stale or _idle
     ordered = sorted(
         (r for r in rows if not r["permanent"]),
         key=lambda r: (-r["level"], r["position"], r["id"]),
@@ -2119,9 +2126,10 @@ class Engine:
             now = time.monotonic()
             if now - last_compress >= 30:
                 last_compress = now
-                for sid in await self.store.call("sessions"):
+                # 一次取回全部会话的活跃记录 ✓（原来 N+1 次查询 ✗ 2026-09-17 优化 ✓）
+                _by_sid = await self.store.call("active_by_session")
+                for sid, rows in _by_sid.items():
                     if random.random() < cfg.probability:
-                        rows = await self.store.call("active", sid)
                         if compression_plan(rows, cfg, now=time.time(),
                                  boost_allowed=_boost_ok(sid, cfg, stamp=False)):
                             await self.enqueue("compress", sid, automatic=True)

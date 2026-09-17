@@ -954,9 +954,11 @@ class AlifeMemoryPlugin(BasePlugin):
             _order = await self.store.call("sessions_by_age")
         except Exception:
             _order = sorted(await self.store.call("sessions"))   # 兜底 ✓ 老库也能跑 ✓
+        # 同样改为一次取回 ✓（扫描要遍历**所有**会话 ⇒ 原来也是 N+1 ✗ 2026-09-17 优化 ✓）
+        _by_sid = await self.store.call("active_by_session")
         for sid in _order:
             try:
-                rows = await self.store.call("active", sid)
+                rows = _by_sid.get(sid) or []
                 # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
                 _plan = compression_plan(rows, cfg, now=now,
                                          boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False))

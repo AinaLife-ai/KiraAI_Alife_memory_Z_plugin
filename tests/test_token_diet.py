@@ -418,10 +418,29 @@ class CompressionTriggerCase(unittest.TestCase):
                                   now=time.time(), boost_allowed=True)
         self.assertIsNotNone(plan, "陈旧数据没触发压缩 ✗（阈值没降到 1 ✗）")
 
-    def test_idle_triggers_threshold_one(self):
+    def test_idle_alone_does_not_trigger(self):
+        """⚠️ 用户 2026-09-17 要求：陈旧与闲置**必须同时满足** ✓（原来是"或" ✗）
+
+        只闲置（新内容也很新 ✗ 但停了 30 小时 ✓）⇒ **不降门槛** ✓
+        （否则「刚停下来、内容还很新」的会话也会被提前压 ✓）
+        """
         plan = e.compression_plan(self._rows(20, 30), self._cfg(),
                                   now=time.time(), boost_allowed=True)
-        self.assertIsNotNone(plan, "闲置会话没触发压缩 ✗")
+        self.assertIsNone(plan, "只满足「闲置」就降门槛了 ✗（应当两个都满足 ✓）")
+
+    def test_stale_alone_does_not_trigger(self):
+        """只陈旧（老记录 > 3 天 ✗ 但**刚刚还在聊** ✓）⇒ 不降门槛 ✓"""
+        rows = self._rows(3, 24 * 10) + self._rows(17, 0.05)
+        for i, r in enumerate(rows):
+            r["id"] = "x%d" % i
+        plan = e.compression_plan(rows, self._cfg(), now=time.time(), boost_allowed=True)
+        self.assertIsNone(plan, "只满足「陈旧」就降门槛了 ✗（应当两个都满足 ✓）")
+
+    def test_both_stale_and_idle_triggers(self):
+        """两个都满足（既久没动 ✓ 又有积压 ✓）⇒ 降门槛 ✓"""
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "两个条件都满足却没降门槛 ✗")
 
     def test_fresh_session_does_not_trigger(self):
         plan = e.compression_plan(self._rows(20, 0.1), self._cfg(),
@@ -887,3 +906,47 @@ class SweepBurstCase(unittest.TestCase):
         per_job = c.Settings.model_fields["compress_batches_per_job"].default
         self.assertLessEqual(limit * per_job, 6,
                              "一次扫描最坏 %d 次调用 ✗ 太猛 ✓（应 ≤ 6 ✓）" % (limit * per_job))
+
+
+class ActiveBySessionEquivalenceCase(unittest.TestCase):
+    """合并查询必须与逐会话查询**完全等价** ✓（2026-09-17 的性能优化 ✓）
+
+    调度器原来 `for sid in sessions: active(sid)` ✗ = N+1 次查询 ✓（100 会话 ⇒ 每 30 秒 100 次 ✓）
+    ⇒ 改成一次 `active_by_session` ✓ 但**行的形状与顺序必须一模一样** ✓✓
+    （否则压缩取到的批次会变 ✗ 那就动了实质逻辑 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_equivalent_to_per_session_active(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for sid in ("s:a", "s:b", "s:c"):
+                for i in range(5):
+                    db.execute(
+                        "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                        "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,?,0)",
+                        ("%s-%d" % (sid, i), sid, ("user", "assistant")[i % 2], now - i * 60, now - i * 60,
+                         "内容 %d" % i, "内容 %d" % i, "[]", i + 1, now, "session", 1 if i < 4 else 0))
+            db.commit()
+        grouped = self.store.active_by_session()
+        for sid in ("s:a", "s:b", "s:c"):
+            self.assertEqual(grouped[sid], self.store.active(sid),
+                             "%s 的合并查询结果与逐会话查询不一致 ✗" % sid)
+        self.assertEqual(sorted(grouped), ["s:a", "s:b", "s:c"], "分组丢会话 ✗")
+
+    def test_only_active_rows(self):
+        now = time.time()
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,"
+                "created,visibility,active,deleted) VALUES('x','s:x','user',0,?,?,?,?,?,?,?,?,0,0)",
+                (now, now, "归档", "归档", "[]", 1, now, "session"))
+            db.commit()
+        self.assertNotIn("s:x", self.store.active_by_session(), "归档记录不该被带出来 ✗")

@@ -1241,6 +1241,24 @@ class Store:
             [(u,) for u in users],
         )
 
+    def active_by_session(self):
+        """一次取回**所有**会话的活跃记录 ✓（按 sid 分组 ✓）
+
+        原来调度器是 `for sid in sessions: active(sid)` ✗ = **N+1 次查询** ✓
+        （100 个会话 ⇒ 每 30 秒 100 次查询 ✓ 纯 DB 开销 ✓ 不花钱 ✓ 但没必要 ✓）
+        用户 2026-09-17 同意优化 ✓
+        ⚠️ 行的形状与 `active(sid)` **完全一致** ✓（同一套 SELECT ✓ 只是去掉 sid 过滤 ✓）
+        """
+        out = {}
+        with self.connect() as db:
+            for r in db.execute(
+                """SELECT * FROM records WHERE active=1 AND deleted=0
+              ORDER BY sid, permanent DESC, level DESC, position, id"""
+            ):
+                row = self.row(r)
+                out.setdefault(row["sid"], []).append(row)
+        return out
+
     def active(self, sid):
         with self.connect() as db:
             return [
