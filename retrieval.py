@@ -151,32 +151,22 @@ def identity_info(entity_id):
 
 
 def archive_view(row, child_offset=0, child_count=20, include_content=False):
+    # v2.18.19：**紧凑化** ✓ 原来每条 ~424 字符 ✗ 大半是模型用不上的机器字段
+    # 删：`id`(32 字符 ✗) / `sid` / `users`(与 speaker 重复 ✗) / `revision` / `parents` / `child_offset`
+    # 子条目：**不再回传内容** ✗（去码后模型也寻不到它们 ✓）只留**条数与翻页** ✓
+    # 保留：内容 ✓ 时间 ✓ 说话人 ✓ 层级 ✓ 永久标记 ✓
     result = {
         k: row[k]
-        for k in (
-            "id",
-            "sid",
-            "role",
-            "level",
-            "start",
-            "end",
-            "summary",
-            "users",
-            "speaker",
-            "revision",
-            "permanent",
-        )
+        for k in ("role", "level", "start", "end", "summary", "speaker", "permanent")
+        if k in row
     }
     children = row.get("children", [])
-    result.update(
-        children=children[child_offset : child_offset + child_count],
-        children_total=len(children),
-        child_offset=child_offset,
-        next_child_offset=child_offset + child_count
+    result["children_total"] = len(children)
+    result["next_child_offset"] = (
+        child_offset + child_count
         if child_offset + child_count < len(children)
-        else None,
+        else None
     )
-    result["parents"] = row.get("parents", [])
     if include_content:
         result["versions"] = row.get("versions", [])
         result["legacy_sources"] = row.get("legacy_sources", [])

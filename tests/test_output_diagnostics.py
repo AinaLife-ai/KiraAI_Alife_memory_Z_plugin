@@ -124,15 +124,13 @@ def test_read_archive_projection_avoids_double_encoded_batch_and_pages_ids():
         content=content,
         children=[f"legacy-{i}" for i in range(70)],
     )
+    # v2.18.19：紧凑化后**不再回传子条目内容** ✗ 只保留条数与翻页 ✓
+    # （去码之后模型也寻不到它们 ✓ 回传纯属浪费 ✓）
     view = archive_view(row)
-    assert (
-        "content" not in view
-        and len(view["children"]) == 20
-        and view["children_total"] == 70
-    )
+    assert "content" not in view and view["children_total"] == 70
     assert view["next_child_offset"] == 20
     full = archive_view(row, 60, 20, True)
-    assert len(full["children"]) == 10 and full["next_child_offset"] is None
+    assert full["next_child_offset"] is None
     assert full["content"] == json.loads(content) and row["content"] == content
 
 
