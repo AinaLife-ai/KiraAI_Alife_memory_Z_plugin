@@ -61,9 +61,15 @@ class ToolStepCase(unittest.TestCase):
         flags = [retrieval.is_tool_step(r) for r in rows]
         self.assertEqual(flags, [False, True, False], "工具步标记不对 ✗")
 
-    def test_placeholder_is_short(self):
-        """喂给压缩模型的工具步是极短占位 ✓（不夹带 tool_calls JSON ✗）"""
-        self.assertLessEqual(len(retrieval.tool_placeholder()), 8)
+    def test_tool_step_feeds_summary_not_json(self):
+        """喂给后台模型的是 **summary**（`[调用工具：名(参数)]` ✓ 无 JSON ✓）
+
+        v2.18.19：一度改成裸占位 `[工具调用]` ✗ 但那会**丢掉工具名与参数** ✓
+        summary 本就是人话 ✗ 不含 JSON ✓ ⇒ 用它信息量更大 ✓
+        """
+        from alife_toolcase import retrieval as _r
+        self.assertIn("调用工具", _r.tool_call_summary([{"function": {"name": "get_weather", "arguments": "{}"}}]))
+        self.assertNotIn("tool_calls", _r.tool_call_summary([{"function": {"name": "x", "arguments": "{}"}}]))
 
 
 class BackfillCase(unittest.TestCase):

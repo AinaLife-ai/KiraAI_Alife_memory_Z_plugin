@@ -1033,9 +1033,6 @@ def is_tool_step(row):
     return str((row or {}).get("category") or "") == "tool"
 
 
-def tool_placeholder():
-    """工具步喂给压缩模型时的短占位 ✓（不带 tool_calls JSON ✓ 省 token ✓）"""
-    return "[工具调用]"
 
 
 def media_only(content, names=()):

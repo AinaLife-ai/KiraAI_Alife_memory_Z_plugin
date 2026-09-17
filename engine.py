@@ -11,7 +11,6 @@ from .retrieval import (
     full_time,
     model_text,
     is_tool_step,
-    tool_placeholder,
 
     short_time,
     squeeze,
@@ -213,11 +212,10 @@ def compress_records(candidates, aliases, names=None, keep=()):
         # v2.18.19：工具步只给短占位 ✓（省 token ✓ 又不丢"这一步发生过" ✓）
         record = {
             "id": "r%d" % (index + 1),
-            "s": (
-                tool_placeholder()
-                if is_tool_step(row)
-                else model_text(row["summary"], keep)
-            ),
+            # v2.18.19：工具步**直接用 summary** ✗ 不用裸占位 ✓
+            # summary 是 capture 时写的 `[调用工具：名称(参数前60字)]` ✓
+            # 本来就无 JSON ✗ 还带工具名 ✗ ⇒ 比 `[工具调用]` 信息量大得多 ✓
+            "s": model_text(row["summary"], keep),
         }
         if row["role"] == "assistant":
             record["bot"] = 1
@@ -1033,10 +1031,10 @@ class Engine:
                 ],
                 "evidence": [
                     {
-                        # v2.18.19：工具步也转占位 ✗ 与压缩载荷保持一致 ✓
-                        # （否则审计会看到原始 tool_calls JSON ✓ 可能被当成用户的话 ✓）
+                        # v2.18.19：工具步改给 **summary**（`[调用工具：名(参数)]` ✓ 无 JSON ✓）
+                        # 其余仍是**原文** ✓ —— 审计要看原话 ✓ 不能被摘要替代 ✓
                         "content": (
-                            tool_placeholder()
+                            model_text(row.get("summary", ""), keep)
                             if is_tool_step(row)
                             else model_text(row.get("content", ""), keep)
                         ),
