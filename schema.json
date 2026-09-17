@@ -544,7 +544,7 @@
       },
       "compress_input_max_chars": {
         "type": "integer",
-        "name": "写入时自动合并事实",
+        "name": "每批压缩的原文上限（字符）",
         "default": 20000,
         "description": "一批压缩最多喂多少字符的原文（默认 20000）。在轮边界上截断，绝不切半轮；只有单轮本身就超限时才切并标「（续）」。防止几千条存量数据一次喂进去把 token 撑爆。",
         "minimum": 1000,
@@ -552,7 +552,7 @@
       },
       "compress_stale_after_days": {
         "type": "integer",
-        "name": "事实合并触发阈值",
+        "name": "陈旧记忆几天后开始消化",
         "default": 3,
         "description": "最老的未压缩记忆超过这么多天，就把它所在会话的门槛降为 1（默认 3 天）。用于消化存量：老数据不用等攒够轮数或条数。",
         "minimum": 0,
@@ -560,7 +560,7 @@
       },
       "compress_idle_after_hours": {
         "type": "integer",
-        "name": "事实合并字数（提示词）",
+        "name": "会话闲置几小时后收尾",
         "default": 6,
         "description": "会话最新一条记忆超过这么多小时没动静，就视为这轮对话已结束，门槛降为 1（默认 6 小时）。",
         "minimum": 0,
@@ -568,7 +568,7 @@
       },
       "compress_idle_cooldown_min": {
         "type": "integer",
-        "name": "事实合并字数（硬上限）",
+        "name": "收尾压缩的冷却（分钟）",
         "default": 30,
         "description": "同一个会话两次「降门槛抽干」之间至少隔多少分钟（默认 30）。防止连续抽干烧 token。",
         "minimum": 0,
@@ -576,13 +576,13 @@
       },
       "fact_merge_enabled": {
         "type": "switch",
-        "name": "事实合并理由（提示词）",
+        "name": "写入时自动合并事实",
         "default": true,
         "description": "新事实入库时先和相似的旧事实比对，触发即合并（冲突以时间较晚的说法为准），避免重复记忆堆积。默认开启。"
       },
       "fact_merge_threshold": {
         "type": "float",
-        "name": "事实合并理由（硬上限）",
+        "name": "事实合并触发阈值",
         "default": 0.25,
         "description": "相似度达到这个值就触发合并。越低越激进，默认0.25。",
         "minimum": 0.1,
@@ -590,7 +590,7 @@
       },
       "fact_merge_soft_chars": {
         "type": "integer",
-        "name": "事实合并每批簇数",
+        "name": "事实合并字数（提示词）",
         "default": 80,
         "description": "提示词里要求模型把合并后的事实写多长；改这里会同步替换提示词里的数字。",
         "minimum": 10,
@@ -598,7 +598,7 @@
       },
       "fact_merge_max_chars": {
         "type": "integer",
-        "name": "事实合并提示词",
+        "name": "事实合并字数（硬上限）",
         "default": 150,
         "description": "超过这个字数直接判定失败并重试。必须不小于提示词字数。",
         "minimum": 10,
@@ -606,7 +606,7 @@
       },
       "fact_merge_soft_reason_chars": {
         "type": "integer",
-        "name": "跨会话合并（身份类）",
+        "name": "事实合并理由（提示词）",
         "default": 15,
         "description": "提示词里要求合并理由写多长。",
         "minimum": 2,
@@ -614,7 +614,7 @@
       },
       "fact_merge_reason_chars": {
         "type": "integer",
-        "name": "合并前不参与检索",
+        "name": "事实合并理由（硬上限）",
         "default": 40,
         "description": "理由超过这个字数判定失败；留余量可避免模型反复重试。",
         "minimum": 2,
@@ -622,7 +622,7 @@
       },
       "fact_merge_batch_clusters": {
         "type": "integer",
-        "name": "永久记忆合并字数（提示词）",
+        "name": "事实合并每批簇数",
         "default": 5,
         "description": "一次模型调用最多处理几组待合并事实。",
         "minimum": 1,
@@ -630,25 +630,25 @@
       },
       "fact_merge_prompt": {
         "type": "string",
-        "name": "永久记忆合并字数（硬上限）",
+        "name": "事实合并提示词",
         "default": "输入 groups[]：同组同主体，类别可能相同也可能不同；facts 按时间从新到旧排列，facts[0] 最新；若附了 evidence，那是这些事实的来源原文，用它核对。\n每组输出一条，数量与顺序与输入完全一致。【必须给出动作，没有 keep】三种动作：\n- merge：同一件事 → 以 facts[0] 为基准合并，把其余事实独有的人名、数字、日期、否定、条件、状态补进去；冲突以时间较晚者为准；不同对象分别写明，不得丢弃独有信息。content 必须自包含，不写“同上”、不引用 ID、不写“根据记录”之类元话，不得编造。**合并后若原标签不再贴切，一并给 tags** ✗（不给就沿用原来的并集 ✓）\n**但“以时间较晚者为准”只适用于同一来源强度**：若附了 evidence，其中的 bot=1 表示那条原文是**助手自己说的** ✗ —— 助手更晚的转述**不能覆盖用户更早的原话** ✓ 冲突时一律以用户为准；没有证据就按原说法保留，别凭“更晚”擅自改结论。\n- relabel：同一件事，但两边内容各自都成立、无需合并 → 只统一类别（给 category）。\n- drop：若干条是纯冗余或错误 → 保留 target_id，其余进 source_ids 删除（可恢复）。\n跨类别（组内 category 不一致）必须给 category；合并前会先把整组统一到该类别。\n硬性字数：每条 content ≤ {content_max} 字，reason ≤ {reason_max} 字；超出即判定失败。\n只输出 JSON：{\"groups\":[{\"target_id\":\"…\",\"source_ids\":[\"…\"],\"action\":\"merge|relabel|drop\",\"category\":\"…\",\"content\":\"…\",\"reason\":\"…\"}]}\ntarget_id 取要保留的那条 id；source_ids 至少一条，逐字复制。",
         "description": "事实合并提示词。可用 {content_max} 与 {reason_max} 占位符，保存后替换成上面的字数设置；无需再要求 JSON，程序会严格检查格式。；改乱了可点旁边的「恢复默认」"
       },
       "cross_session_merge": {
         "type": "switch",
-        "name": "永久记忆合并理由（提示词）",
+        "name": "跨会话合并（身份类）",
         "default": true,
         "description": "仅对身份/偏好/关系类事实生效：同一个人的跨会话重复事实合并成一条全局记忆；事件与约定不跨会话合并。"
       },
       "merge_pending_hide": {
         "type": "switch",
-        "name": "永久记忆合并理由（硬上限）",
+        "name": "合并前不参与检索",
         "default": true,
         "description": "检测到重复的新事实在合并完成前不进入检索与注入，避免对话中同时看到重复记忆。默认开启。"
       },
       "record_merge_soft_chars": {
         "type": "integer",
-        "name": "永久记忆合并提示词",
+        "name": "永久记忆合并字数（提示词）",
         "default": 500,
         "description": "提示词里要求合并后的永久记忆写多长。",
         "minimum": 50,
@@ -656,7 +656,7 @@
       },
       "record_merge_max_chars": {
         "type": "integer",
-        "name": "画像摘要条数",
+        "name": "永久记忆合并字数（硬上限）",
         "default": 16000,
         "description": "超过这个字数判定失败并重试；默认保持宽松，按需收紧。",
         "minimum": 100,

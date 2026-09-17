@@ -21,6 +21,7 @@ pkg = types.ModuleType("alife_tidyforce")
 pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("alife_tidyforce", pkg)
 storage = importlib.import_module("alife_tidyforce.storage")
+C = importlib.import_module("alife_tidyforce.contracts")
 
 
 async def _seed(n=3):
@@ -74,3 +75,51 @@ class TidyForceCase(unittest.TestCase):
             return ids[1], [r["id"] for r in got]
         want, got = asyncio.run(run())
         self.assertEqual(got, [want], "ids 过滤没生效 ✗ 应只返回指定的那一条")
+
+
+class SchemaNameAlignmentCase(unittest.TestCase):
+    """生成器的名字列表必须与 Settings 字段**一一对齐** ✗✓
+
+    `generate_schema.py` 用 `dict(zip(model_fields, [中文名单]))` ✗ —— **按位置配对** ✓
+    往中间插一个配置却忘了在名单同位置补名 ✗ ⇒ 后面**整片错位 4 格** ✓
+    ⇒ 界面会把「事实合并」的名字挂到「压缩推进」的配置上 ✗✓（本会话真实踩过 ✓）
+
+    这里守住两件事：
+      ① **数量一致**（少一条 = 后面全错 ✗）
+      ② **抽样语义**（几个新配置的名字必须配得上它自己 ✓）
+    """
+
+    def test_generator_list_aligns_with_fields(self):
+        import ast
+        import io
+        from pathlib import Path as _P
+
+        root = _P(__file__).resolve().parents[1]
+        src = io.open(root / "tools" / "generate_schema.py", encoding="utf-8").read()
+        lst = None
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "dict":
+                for a in node.args:
+                    if isinstance(a, ast.Call) and getattr(a.func, "id", "") == "zip":
+                        for arg in a.args:
+                            if isinstance(arg, ast.List):
+                                lst = [e.value for e in arg.elts]
+        self.assertIsNotNone(lst, "没解析到生成器的名字列表 ✗")
+        fields = list(C.Settings.model_fields.keys())
+        self.assertEqual(
+            len(lst), len(fields),
+            "名字列表 %d 条 ≠ 字段 %d 个 ✗ zip 会截断 → 后面整片错位 ✓" % (len(lst), len(fields)),
+        )
+        # 抽样：名字里必须带该配置的语义关键词 ✓
+        probes = {
+            "compress_input_max_chars": "上限",
+            "compress_stale_after_days": "陈旧",
+            "compress_idle_after_hours": "闲置",
+            "compress_idle_cooldown_min": "冷却",
+            "fact_merge_enabled": "合并",
+            "record_merge_prompt": "提示词",
+            "profile_summary_count": "摘要",
+        }
+        for key, frag in probes.items():
+            i = fields.index(key)
+            self.assertIn(frag, lst[i], "%s 的名字配错位了 ✗（拿到 %r）" % (key, lst[i]))
