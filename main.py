@@ -46,7 +46,6 @@ from .retrieval import (
     CATEGORY_RANK,
     archives_flat,
     FACT_VIEW_GROUPED,
-    GROUPED_EXAMPLE_LINE,
     pack_facts,
     short_names,
     SYNTHETIC_NAMES,
@@ -75,9 +74,19 @@ from .retrieval import recall_text   # v2.18.12：媒体判定统一放 retrieva
 from .retrieval import _MEDIA_HEAD as _MEDIA_HEAD_PAT   # v2.18.18 绊线用同一份判据 ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
 _GROUPED_FACT_DOC = (
-    "facts 按主体分组：键是主体短码（见 names），组内每行 [类别, 内容, 重要度?, 关系?, 时间?, 谁说的?]，"
-    "尾部为空即省略（中间位缺是空串）；时间缺失就不写；关系写作 主体>关系>客体（多条用 ; 分隔）。"
-    + GROUPED_EXAMPLE_LINE
+    # v2.18.19：注入已改成**紧凑简报** ✗ 旧说明还在教模型读 JSON 数组/键名 ✓
+    # ⇒ 模型会去找不存在的结构 ✓ 这里按**真实渲染**重写 ✓
+    "记忆简报（alife_memory.m）的格式：\n"
+    "  第 1 行是表头，形如【记忆·范围】会话｜主体码=名字。\n"
+    "  常驻事实每行形如 <主体码> <类别码> <内容> ★重要度 <关系> <时间>，后三项可能缺。\n"
+    "  相关存档每行形如 <序号>|<角色>|<时间>|<说话人>|<内容>，角色 A=助手 U=用户。\n"
+    "  跨会话条目形如 - 内容　来自 会话，要核对来源会话。\n"
+    "  结尾「另有 N 条未展示」表示还有没给你的，用 next_batch=true 继续找。\n"
+    "下面是示例。\n"
+    "  【记忆·关联会话】某会话｜n1=某成员\n"
+    "  n1 pf 一条画像事实 ★7 n1>关系>n2 08-20\n"
+    "  1|A|07-05 20:30|某成员|一条原文消息\n"
+    "  - 一条跨会话记忆　来自 某会话\n"
 )
 
 MEMORY_RULES = (
@@ -90,27 +99,21 @@ MEMORY_RULES = (
     "跨会话记忆要核对来源会话、用户与时间；别人的经历不等于当前用户的；同名不代表同一人；"
     "needs_review 只是待核对描述。\n"
     + _GROUPED_FACT_DOC
-    + "sp=存档里「这句谁说的」；names 是「账号/群号 → 名称」。\n"
-    "要精确到分钟或核对原话：用 SearchMemoryArchive(expand=[序号]) 展开刚看到的那份清单"
+    + "要精确到分钟或核对原话：用 SearchMemoryArchive(expand=[序号]) 展开刚看到的那份清单"
     "（原文自带时间戳与发言人）。\n"
     "摘要不是回答模板；用户追问还有别的时用 SearchMemoryArchive(next_batch=true)，"
     "没找到就坦诚说明，不反复复述或编造。永久记忆只放「必须每轮在场」的约束与身份，"
     "其余交给事实库。"
 )
 
-_FLAT_FACT_DOC = (
-    "事实短键：c=类别(ev/fa/pr/co/re/pf/rs/sf) u=主体ID x=内容 imp=重要度(略=5) "
-    "src=来源存档ID t=事件日期(跨天给 t2) rec=记录日期(与事件相差远时才有) "
-    "sp=存档里「这句谁说的」；names 是「账号/群号 → 名称」。\n"
-)
 
 
 def memory_rules(view=None):
     """按事实视图给出规则块：grouped(默认)/flat(回滚) 各自自洽 ✓
 
     同一模式下逐字节稳定 ✓ → 提供方前缀缓存只在切换模式那一次失效 ✓"""
-    if str(view or "").strip().lower() == "flat":
-        return MEMORY_RULES.replace(_GROUPED_FACT_DOC, _FLAT_FACT_DOC)
+    # v2.18.19：注入统一为紧凑简报 ✗ 两种「事实视图」的渲染已一致 ✓
+    # ⇒ 不再按视图切换说明 ✗（旧的两份文案都在教模型读已经不存在的键名 ✓）
     return MEMORY_RULES
 
 

@@ -181,10 +181,15 @@ def test_prompt_tells_model_to_absolutize_relative_dates():
 def test_rules_document_time_and_speaker_fields():
     """规则块要说明时间与发言人短键，模型才会用。"""
     main = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = main.find("MEMORY_RULES = (")
-    block = main[start : main.find(")\\n", start)]
+    # v2.18.19：改用**下一个顶层定义**做边界 ✗ 不再靠脆弱的首个括号行 ✓
+    # （旧写法会在 _GROUPED_FACT_DOC 里出现括号时提前截断 ✓）
+    # v2.18.19：格式说明在 `_GROUPED_FACT_DOC` 里 ✗（它拼进 MEMORY_RULES ✓）
+    # 所以切片要从它的定义处开始 ✓ 否则切不到格式段 ✓
+    start = main.find("_GROUPED_FACT_DOC = (")
+    _end = main.find("\ndef memory_rules", start)
+    block = main[start : _end if _end > start else len(main)]
     # v2.17.0：事实改为按主体分组、组内位置化 —— 时间/发言人不再是键名，而是位置槽
-    for field in ("时间", "谁说的", "sp=存档里", "SearchMemoryArchive", "names"):
+    for field in ("时间", "说话人", "SearchMemoryArchive", "主体码"):
         assert field in block, field
 
 
