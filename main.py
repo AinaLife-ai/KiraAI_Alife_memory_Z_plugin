@@ -69,7 +69,8 @@ from .config_migrate import migrate as migrate_config
 
 PLUGIN_ID = "alife_memory_z"
 
-from .retrieval import media_only   # v2.18.12：媒体判定统一放 retrieval ✓
+from .retrieval import media_only
+from .retrieval import recall_text   # v2.18.12：媒体判定统一放 retrieval ✓
 from .retrieval import _MEDIA_HEAD as _MEDIA_HEAD_PAT   # v2.18.18 绊线用同一份判据 ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
 _GROUPED_FACT_DOC = (
@@ -1594,7 +1595,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 item = {
                     "a": related_shorts.get(r["id"], r["id"]),
                     "t": short_time(r["end"] or r["start"]),
-                    "s": self.model_text(r["summary"], keep_names),
+                    "s": recall_text(self.model_text(r["summary"], keep_names), 200),
                 }
                 if r["speaker"]:
                     # 这条是谁说的：正文里不一定带名字，模型否则分不清谁说了哪句 ✗
@@ -1964,7 +1965,10 @@ class AlifeMemoryPlugin(BasePlugin):
             )
         if random.random() < self.settings.probability:
             rows = await self.store.call("active", sid)
-            if compression_plan(rows, self.settings):
+            if compression_plan(
+                rows, self.settings, now=time.time(),
+                boost_allowed=_boost_ok(sid, self.settings),
+            ):
                 await self.engine.enqueue("compress", sid, automatic=True)
 
     def note_recall(self, sid, text):
@@ -2299,7 +2303,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 item = {
                     "i": shorts.get(r["id"], r["id"]),
                     "t": short_time(r["end"] or r["start"]),
-                    "s": self.model_text(r["summary"], keep_names),
+                    "s": recall_text(self.model_text(r["summary"], keep_names), 200),
                 }
                 if r["speaker"]:
                     item["sp"] = self.model_text(r["speaker"], keep_names)
@@ -2503,7 +2507,7 @@ class AlifeMemoryPlugin(BasePlugin):
             "并带 revision（用你读到的那个版本号，避免覆盖别人的修改）。\n"
             "merge：把重复的多条合成一条，ids 给 2 条以上，content 给合并后的正文。\n"
             "delete：软删（进回收站，可还原）；restore：从回收站恢复。\n"
-            "archive：把记录移出常驻上下文（原文保留、可按 id 读回）。\n"
+            "archive：把记录移出活跃记忆（原文保留、可按 id 读回）。\n"
             "refresh：从适配器重新拉取某实体的当前昵称。\n"
             "tidy：请系统整理永久记忆（不传 ids = 按保留度挑候选；传 ids = 这几条重新参与整理）。"
         ),
