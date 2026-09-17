@@ -683,6 +683,10 @@ async function loadArchives() {
             '<article class="card"><div class="row"><span class="tag">' +
             (r.permanent ? "永久记忆" : "L" + r.level) +
             "</span>" +
+            // 已归档（active=0）的原件**仍然可检索** ✓（"沿着存档逐层回到最初" ✓）
+            // 但以前卡片上没有任何标记 ✗ ⇒ 压缩完还是显示 L0 ✓
+            // 看起来像"根本没压" ✗✓（2026-09-17 用户实测 ✓）
+            (r.active === 0 ? '<span class="tag">已归档</span>' : "") +
             (selectedSid && r.sid !== selectedSid
               ? '<span class="tag">跨会话</span>'
               : "") +
