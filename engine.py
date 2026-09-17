@@ -518,8 +518,11 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
     """挑出一批可以压缩的内容 ✓
 
     v2.18.19（B）：加了**门槛覆盖**（`boost_allowed=True` 时生效 ✓）
-      · **陈旧**：最老的未压缩记录超过 `compress_stale_after_days`（默认 3 天）→ 门槛降为 1 ✓
-      · **闲置**：该会话最新记录超过 `compress_idle_after_hours`（默认 6 小时）→ 门槛降为 1 ✓
+      · **冷会话**：`compress_stale_after_days`（默认 3 天）与 `compress_idle_after_hours`
+        （默认 6 小时）**同时满足** ⇒ 门槛降为 1 ✓
+        （2026-09-17 用户要求：**既久没动、又有积压** ✓ 才算真正沉睡 ✓
+          只看其一 ✗ 会把"还在聊但有老记录"或"刚停下但内容很新"的会话也提前压 ✓
+          任一项设为 0 ⇒ 自动退回"或" ✓ 不锁死 ✓）
       ⚠️ 默认**关** ✗ —— 由引擎按每会话冷却显式打开 ✓
          这样纯函数的老语义（单测依赖 ✓）一个字不变 ✓
     """
@@ -536,10 +539,17 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
             _newest, _oldest = max(_times), min(_times)
             _stale_days = int(getattr(cfg, "compress_stale_after_days", 3) or 0)
             _idle_hours = int(getattr(cfg, "compress_idle_after_hours", 6) or 0)
-            if _stale_days and _oldest < _now - _stale_days * 86400:
-                boost = True          # 陈旧：有积压 ✓
-            if _idle_hours and _newest < _now - _idle_hours * 3600:
-                boost = True          # 闲置：这轮对话已经结束了 ✓
+            _stale = bool(_stale_days) and _oldest < _now - _stale_days * 86400
+            _idle = bool(_idle_hours) and _newest < _now - _idle_hours * 3600
+            # 用户 2026-09-17 要求：两个条件要**同时满足** ✓（原来是与 ✗）
+            #   · 只看"陈旧" ✗ ⇒ 一个**还在活跃聊天**、只是有几条老记录的会话也会被降门槛 ✗
+            #   · 只看"闲置" ✗ ⇒ 刚停下来、内容还很新的会话也会被降门槛 ✗
+            #   · 同时满足 ⇒ **既久没动、又有积压** ✓ 才是真正该"赶进度"的会话 ✓
+            if _stale_days and _idle_hours:
+                boost = _stale and _idle
+            else:
+                # 只配了其中一个（另一个设 0=关闭 ✓）⇒ 退回"或" ✓ 不把功能锁死 ✓
+                boost = _stale or _idle
     ordered = sorted(
         (r for r in rows if not r["permanent"]),
         key=lambda r: (-r["level"], r["position"], r["id"]),
@@ -2119,12 +2129,22 @@ class Engine:
             now = time.monotonic()
             if now - last_compress >= 30:
                 last_compress = now
-                for sid in await self.store.call("sessions"):
+                # 一次取回全部会话的活跃记录 ✓（原来 N+1 次查询 ✗ 2026-09-17 优化 ✓）
+                _by_sid = await self.store.call("active_by_session")
+                for sid, rows in _by_sid.items():
                     if random.random() < cfg.probability:
-                        rows = await self.store.call("active", sid)
                         if compression_plan(rows, cfg, now=time.time(),
                                  boost_allowed=_boost_ok(sid, cfg, stamp=False)):
                             await self.enqueue("compress", sid, automatic=True)
+            if now - getattr(self, "_last_prune", 0.0) >= 3600:
+                # 方案 A ✓：每小时清一次过期历史任务 ✓（工作台列表不再无限增长 ✓）
+                try:
+                    dropped = await self.store.call("prune_jobs")
+                    if dropped:
+                        logger.info("[记忆·Z] 清理过期任务记录 %s 条 ✓", dropped)
+                except Exception:
+                    logger.exception("[记忆·Z] 清理过期任务失败（下轮再试 ✓）")
+                self._last_prune = now
             if cfg.audit_enabled and now - self.last_audit >= cfg.audit_interval:
                 self.last_audit = now
                 if self.audit_budget_ok(cfg):

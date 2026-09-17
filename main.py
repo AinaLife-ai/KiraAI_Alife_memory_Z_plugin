@@ -918,7 +918,15 @@ class AlifeMemoryPlugin(BasePlugin):
             await self.engine.enqueue("tidy", owner, automatic=automatic)
         return sorted(owners)
 
-    async def queue_compress_all(self, limit=8):
+    async def queue_compress_all(self, limit=2):
+        """排"该压但还没压"的会话 ✓（**确定性**兜底 ✓ 不看骰子 ✓）
+
+        ⚠️ `limit` 是**花钱闸门** ✗✓ —— 每个压缩任务最多 `compress_batches_per_job` 批
+        （默认 3 ✓ ⇒ 每批 1 次模型调用 ✓）⇒ limit=8 时**启动瞬间最多 24 次调用** ✗
+        （2026-09-17 用户实测反馈："存量用户更新后一次性满 8 个分层压缩" ✓）
+        ⇒ 默认降到 **2** ✓：突发 ≤ 6 次调用 ✓ 剩下的交给
+        **30 秒调度器**（持续有机会 ✓）与**下一轮扫描**（15 分钟 ✓）✓ 不会漏 ✓
+        """
         """把「该压缩却一直没被压」的会话排上压缩 ✓（2026-09-17 补 ✓）
 
         ⚠️ 自动压缩原本**只有一个触发点** ✗：``on_request`` 里
@@ -940,9 +948,17 @@ class AlifeMemoryPlugin(BasePlugin):
         now = time.time()
         pending = []
         archived_only = 0
-        for sid in sorted(await self.store.call("sessions")):
+        # 方案 C ✓（2026-09-17 用户要求）：按**陈旧度**排 ✓ 而不是字母序 ✗
+        # 原来 `sorted(sessions)` 挑出的 8 个跟"谁更需要压"无关 ✓
+        try:
+            _order = await self.store.call("sessions_by_age")
+        except Exception:
+            _order = sorted(await self.store.call("sessions"))   # 兜底 ✓ 老库也能跑 ✓
+        # 同样改为一次取回 ✓（扫描要遍历**所有**会话 ⇒ 原来也是 N+1 ✗ 2026-09-17 优化 ✓）
+        _by_sid = await self.store.call("active_by_session")
+        for sid in _order:
             try:
-                rows = await self.store.call("active", sid)
+                rows = _by_sid.get(sid) or []
                 # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
                 _plan = compression_plan(rows, cfg, now=now,
                                          boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False))

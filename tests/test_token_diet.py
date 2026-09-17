@@ -418,10 +418,29 @@ class CompressionTriggerCase(unittest.TestCase):
                                   now=time.time(), boost_allowed=True)
         self.assertIsNotNone(plan, "陈旧数据没触发压缩 ✗（阈值没降到 1 ✗）")
 
-    def test_idle_triggers_threshold_one(self):
+    def test_idle_alone_does_not_trigger(self):
+        """⚠️ 用户 2026-09-17 要求：陈旧与闲置**必须同时满足** ✓（原来是"或" ✗）
+
+        只闲置（新内容也很新 ✗ 但停了 30 小时 ✓）⇒ **不降门槛** ✓
+        （否则「刚停下来、内容还很新」的会话也会被提前压 ✓）
+        """
         plan = e.compression_plan(self._rows(20, 30), self._cfg(),
                                   now=time.time(), boost_allowed=True)
-        self.assertIsNotNone(plan, "闲置会话没触发压缩 ✗")
+        self.assertIsNone(plan, "只满足「闲置」就降门槛了 ✗（应当两个都满足 ✓）")
+
+    def test_stale_alone_does_not_trigger(self):
+        """只陈旧（老记录 > 3 天 ✗ 但**刚刚还在聊** ✓）⇒ 不降门槛 ✓"""
+        rows = self._rows(3, 24 * 10) + self._rows(17, 0.05)
+        for i, r in enumerate(rows):
+            r["id"] = "x%d" % i
+        plan = e.compression_plan(rows, self._cfg(), now=time.time(), boost_allowed=True)
+        self.assertIsNone(plan, "只满足「陈旧」就降门槛了 ✗（应当两个都满足 ✓）")
+
+    def test_both_stale_and_idle_triggers(self):
+        """两个都满足（既久没动 ✓ 又有积压 ✓）⇒ 降门槛 ✓"""
+        plan = e.compression_plan(self._rows(20, 24 * 10), self._cfg(),
+                                  now=time.time(), boost_allowed=True)
+        self.assertIsNotNone(plan, "两个条件都满足却没降门槛 ✗")
 
     def test_fresh_session_does_not_trigger(self):
         plan = e.compression_plan(self._rows(20, 0.1), self._cfg(),
@@ -757,3 +776,177 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
         code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
         self.assertIn('"drop_job", job["id"]', code, "reindex 空转还在留任务 ✗")
+
+
+class JobHousekeepingCase(unittest.TestCase):
+    """方案 A（清理过期任务）+ 方案 C（扫描按陈旧度排 ✓）—— 2026-09-17 用户要求 ✓
+
+    A：工作台的"工作明细"原来**只增不减** ✗（jobs 表永久堆积 ✓）
+    C：扫描原来用 `sorted(sessions)` = **字母序** ✗ ⇒ 挑出的 8 个跟"谁更需要压"无关 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # ── A ──
+    def _job(self, jid, state, updated):
+        # ⚠️ jobs 有 UNIQUE(kind, sid) ✗✓ ⇒ 同一 (kind,sid) 只能有一行 ✓
+        # （这正是"同一会话不会重复排队"的天然保证 ✓ 也说明"任务多"= 会话多 ✓）
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO jobs(id,kind,sid,state,detail,created,updated,automatic)"
+                " VALUES(?,'compress',?,?,?,?,?,1)",
+                (jid, "s-" + jid, state, "", updated, updated))
+            db.commit()
+
+    def test_prune_drops_old_but_keeps_recent(self):
+        now = time.time()
+        for i in range(10):
+            self._job("old-%d" % i, "completed", now - 30 * 86400 - i)
+        for i in range(3):
+            self._job("new-%d" % i, "completed", now - i)
+        self.store.prune_jobs(keep_days=7, keep_min=3)
+        with self.store.connect() as db:
+            left = {r[0] for r in db.execute("SELECT id FROM jobs").fetchall()}
+        self.assertTrue(all(x.startswith("new-") for x in left), "新任务被误删 ✗：%s" % left)
+        self.assertGreaterEqual(len(left), 3, "keep_min 没保住 ✗")
+
+    def test_prune_never_touches_queued_or_running(self):
+        """🔴 安全底线：**正在排队/执行的任务绝不能删** ✓✓"""
+        now = time.time()
+        self._job("q-1", "queued", now - 90 * 86400)
+        self._job("r-1", "running", now - 90 * 86400)
+        for i in range(30):
+            self._job("done-%d" % i, "completed", now - 60 * 86400 - i)
+        self.store.prune_jobs(keep_days=1, keep_min=1)
+        with self.store.connect() as db:
+            left = {r[0] for r in db.execute("SELECT id FROM jobs").fetchall()}
+        self.assertEqual({"q-1", "r-1"}, left, "排队/执行中的任务被删了 ✗✗ 严重 ✓")
+
+    def test_prune_cleans_orphan_items(self):
+        now = time.time()
+        self._job("keep", "completed", now)
+        self._job("gone", "completed", now - 100 * 86400)
+        with self.store.connect() as db:
+            db.execute("INSERT INTO job_items(job_id,kind,target,action,note,before,created) VALUES('gone','compress','t','a','','',?)", (time.time(),))
+            db.commit()
+        self.store.prune_jobs(keep_days=7, keep_min=1)
+        with self.store.connect() as db:
+            n = db.execute("SELECT count(*) FROM job_items WHERE job_id='gone'").fetchone()[0]
+        self.assertEqual(n, 0, "孤儿明细没清掉 ✗")
+
+    # ── C ──
+    def test_sessions_by_age_orders_oldest_first(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for sid, age_days in (("s:new", 1), ("s:old", 30), ("s:mid", 10)):
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                    ("r-" + sid, sid, now - age_days * 86400, now - age_days * 86400,
+                     "内容", "内容", "[]", 1, now, "session"))
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted) VALUES('r-off','s:old','user',0,?,?,?,?,?,?,?,?,0,0)",
+                (now, now, "内容", "内容", "[]", 9, now, "session"))
+            db.commit()
+        out = self.store.sessions_by_age()
+        self.assertEqual(out, ["s:old", "s:mid", "s:new"], "没按陈旧度排 ✗（字母序会排成 mid/new/old ✓）")
+
+
+class HousekeepingWiringCase(unittest.TestCase):
+    """接线检查 ✓（剥注释后判 ✗ 免得被注释骗过 ✓）"""
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_scan_uses_staleness_order(self):
+        code = self._code("main.py")
+        self.assertIn('"sessions_by_age"', code, "扫描没用按陈旧度排序 ✗（方案 C 失效 ✓）")
+        self.assertIn("sorted(await self.store.call(\"sessions\"))", code,
+                      "兜底分支没了 ✗（老库要还能跑 ✓）")
+
+    def test_engine_prunes_jobs_periodically(self):
+        code = self._code("engine.py")
+        self.assertIn('"prune_jobs"', code, "没有接周期清理 ✗（方案 A 失效 ✓ 列表会无限增长 ✓）")
+        self.assertIn("_last_prune", code, "没有节流 ⇒ 会每 30 秒清一次 ✗")
+
+
+class SweepBurstCase(unittest.TestCase):
+    """扫描的 `limit` 是**花钱闸门** ✓（2026-09-17 用户实测反馈 ✓）
+
+    用户问："存量用户更新后，为什么一次性有满 8 个分层压缩？"
+    查明：`queue_compress_all(limit=8)` ✗ —— 而每个任务最多 `compress_batches_per_job`
+    （默认 3 ✓）批 ⇒ **启动瞬间最多 24 次模型调用** ✗ 与"省钱闸门"设计相悖 ✓
+    ⇒ 默认降到 2（突发 ≤ 6 次 ✓）其余交给 30 秒调度器与下一轮扫描 ✓（不会漏 ✓）
+    """
+
+    def _main_code(self):
+        src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_default_limit_is_gentle(self):
+        import re
+        code = self._main_code()
+        m = re.search(r"async def queue_compress_all\(self, limit=(\d+)\)", code)
+        self.assertIsNotNone(m, "扫描签名变了 ✗")
+        self.assertLessEqual(int(m.group(1)), 2,
+                             "扫描默认上限 %s 太大 ✗（一次会打出很多模型调用 ✓）" % m.group(1))
+
+    def test_burst_is_bounded(self):
+        import re
+        code = self._main_code()
+        limit = int(re.search(r"async def queue_compress_all\(self, limit=(\d+)\)", code).group(1))
+        per_job = c.Settings.model_fields["compress_batches_per_job"].default
+        self.assertLessEqual(limit * per_job, 6,
+                             "一次扫描最坏 %d 次调用 ✗ 太猛 ✓（应 ≤ 6 ✓）" % (limit * per_job))
+
+
+class ActiveBySessionEquivalenceCase(unittest.TestCase):
+    """合并查询必须与逐会话查询**完全等价** ✓（2026-09-17 的性能优化 ✓）
+
+    调度器原来 `for sid in sessions: active(sid)` ✗ = N+1 次查询 ✓（100 会话 ⇒ 每 30 秒 100 次 ✓）
+    ⇒ 改成一次 `active_by_session` ✓ 但**行的形状与顺序必须一模一样** ✓✓
+    （否则压缩取到的批次会变 ✗ 那就动了实质逻辑 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_equivalent_to_per_session_active(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for sid in ("s:a", "s:b", "s:c"):
+                for i in range(5):
+                    db.execute(
+                        "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                        "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,?,0)",
+                        ("%s-%d" % (sid, i), sid, ("user", "assistant")[i % 2], now - i * 60, now - i * 60,
+                         "内容 %d" % i, "内容 %d" % i, "[]", i + 1, now, "session", 1 if i < 4 else 0))
+            db.commit()
+        grouped = self.store.active_by_session()
+        for sid in ("s:a", "s:b", "s:c"):
+            self.assertEqual(grouped[sid], self.store.active(sid),
+                             "%s 的合并查询结果与逐会话查询不一致 ✗" % sid)
+        self.assertEqual(sorted(grouped), ["s:a", "s:b", "s:c"], "分组丢会话 ✗")
+
+    def test_only_active_rows(self):
+        now = time.time()
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,"
+                "created,visibility,active,deleted) VALUES('x','s:x','user',0,?,?,?,?,?,?,?,?,0,0)",
+                (now, now, "归档", "归档", "[]", 1, now, "session"))
+            db.commit()
+        self.assertNotIn("s:x", self.store.active_by_session(), "归档记录不该被带出来 ✗")
