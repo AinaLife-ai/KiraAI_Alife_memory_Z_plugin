@@ -674,3 +674,53 @@ class CascadeCatchUpCase(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+
+class QuietAutomaticJobCase(unittest.TestCase):
+    """自动任务**空转**时不该刷日志/占工作台 ✓（2026-09-17 用户要求 ✓）
+
+    用户看到的是：一批「事实合并完成（合并 0 组重复事实）」✗
+    —— 这类**不调模型、什么都没做**的任务 ✓ 只是噪音 ✓（连排 7 条 ✓）
+
+    ⚠️ 三条铁律（不能伤到有意义的日志 ✓）：
+      · **手动**任务永不静默 ✓（用户明确要求手动的要看得见 ✓）
+      · **真干活**的（哪怕只合并了 1 组）永不静默 ✓
+      · `audit` / `classify` / `rewrite` **一定调过模型** ⇒ 永不静默 ✓✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.eng = e.Engine(self.store, lambda: c.Settings(), None, None, None)
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        self.loop.close()
+        self.temp.cleanup()
+
+    def _q(self, kind, detail, automatic=True):
+        return self.loop.run_until_complete(
+            self.eng._quiet_automatic({"id": "x", "kind": kind, "sid": "s", "automatic": int(automatic)}, detail))
+
+    def test_automatic_noop_is_quiet(self):
+        self.assertTrue(self._q("fact_merge", "合并 0 组重复事实（0 条并入）"), "空合并该静默 ✓")
+        self.assertTrue(self._q("compress", "本次没有需要压缩的内容"), "空压缩该静默 ✓")
+
+    def test_manual_noop_is_visible(self):
+        self.assertFalse(self._q("fact_merge", "合并 0 组重复事实（0 条并入）", automatic=False),
+                         "手动任务必须可见 ✗（用户明确要求 ✓）")
+
+    def test_real_work_is_visible(self):
+        self.assertFalse(self._q("fact_merge", "合并 2 组重复事实（3 条并入）"), "真合并必须可见 ✓")
+        self.assertFalse(self._q("compress", "压缩 40 条 → L1"), "真压缩必须可见 ✓")
+
+    def test_model_calling_kinds_never_quiet(self):
+        for kind, detail in (("audit", "保留 3 · 修正 1"), ("classify", "已归类"),
+                             ("rewrite", "重写 2 条")):
+            self.assertFalse(self._q(kind, detail), "%s 一定调过模型 ⇒ 不许静默 ✗" % kind)
+
+    def test_quiet_notes_only_contain_noop_wording(self):
+        """清单本身也要守 ✓：只允许"确定不调模型"的空转措辞 ✓"""
+        for note in e.QUIET_JOB_NOTES:
+            self.assertIn("没有", note, "清单里混进了非空转措辞 ✗：%s" % note)
