@@ -6,8 +6,11 @@
 轮的定义（与 KiraOS 的 chunk 一致）：用户（们）发言 → 助手回复
 ⇒ 边界 =「助手说完之后、下一条用户发言之前」✓
 """
+import asyncio
 import importlib
+import json
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -19,6 +22,7 @@ package.__path__ = [str(ROOT)]
 sys.modules.setdefault("alife_mode_test", package)
 engine = importlib.import_module("alife_mode_test.engine")
 contracts = importlib.import_module("alife_mode_test.contracts")
+storage = importlib.import_module("alife_mode_test.storage")
 
 
 def row(i, role, vis="session", level=0):
@@ -190,3 +194,107 @@ class OversizedRoundCase(unittest.TestCase):
             ids = {r["id"] for r in plan[0]}
             left = [r for r in left if r["id"] not in ids]
         self.assertLessEqual(len(left), 2, "残留 %d 条 ⇒ 有滞留 ✗" % len(left))
+
+
+class MigratedDistilledCase(unittest.TestCase):
+    """方案 B：迁移导入且**已提炼过知识**的内容 ⇒ 只归档、不调模型 ✓
+
+    为什么能省（2026-09-17 用户提出 ✓）：迁移时每个条目**就已经写过一条 fact** ✓
+    知识已经在事实层 ✓ 再让模型压一遍纯属重复花钱 ✗（2000 条 ≈50 次调用 → **0 次** ✓）
+
+    判据对**存量用户**同样有效 ✓（不依赖新列 ✓ 直接查 migration_items + facts.sources ✓）
+    且**只对迁移来的记录生效** ✓（普通会话不在 migration_items 里 ⇒ 行为完全不变 ✓✓）
+
+    ⚠️ 合并与审计**不受影响** ✗：
+      · 合并：迁移时 queue_migration_merges ✓ 压缩产生新事实时 queue_fact_merges ✓
+        召回时 queue_recall_merges ✓ —— 都在本路径之外 ✓
+      · 审计：scheduler 按会话跑 ✓ 与压缩无关 ✓
+    """
+
+    def _seed(self, cats, sid, n=40):
+        now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(n):
+                t = now - 400 * 86400 - i * 60
+                rid = "m%02d" % i
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    (rid, sid, "user", t, t, "旧内容 %d" % i, "旧内容 %d" % i,
+                     json.dumps(["u-1"]), i + 1, now, "session"))
+                db.execute("INSERT INTO migration_items VALUES(?,?,?,?,?,?,?,?)",
+                           ("old", "k%d" % i, "d%d" % i, rid, "imported", "fh", "{}", now))
+                db.execute(
+                    "INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,"
+                    "relations,sources,fingerprint,deleted,revision,audited,importance,"
+                    "merge_pending,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,1,0,5,0,?)",
+                    ("f%d" % i, sid, cats[i % len(cats)], "u-1", "知识 %d" % i, "", "", "[]",
+                     "[]", json.dumps([rid]), "fp%d" % i, now))
+            db.commit()
+
+    def _run(self, sid):
+        calls = []
+
+        async def model(*a, **k):
+            calls.append(1)
+            return json.dumps({"summary": "摘要", "facts": []})
+
+        cfg = contracts.Settings()
+        engine._BOOST_AT.pop(sid, None)
+        loop = asyncio.new_event_loop()
+
+        async def flow():
+            eng = engine.Engine(self.store, lambda: cfg, model, None, None)
+            await eng.start()
+            await eng.compress(sid)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            ac = dict(db.execute("SELECT active,count(*) FROM records WHERE sid=? GROUP BY active",
+                                 (sid,)).fetchall())
+            nf = db.execute("SELECT count(*) FROM facts WHERE sid=? AND deleted=0", (sid,)).fetchone()[0]
+        return calls, ac, nf
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = storage.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_knowledge_categories_skip_model_and_archive(self):
+        sid = "legacy:know:1"
+        self._seed(["fact", "preference", "profile"], sid)
+        calls, ac, nf = self._run(sid)
+        self.assertEqual(calls, [], "还在调模型 ✗ ⇒ 没省到钱（方案 B 失效 ✓）")
+        self.assertEqual(ac.get(1, 0), 0, "记录没退出活跃上下文 ✗")
+        self.assertEqual(nf, 40, "事实被动了 ✗（必须一条不丢 ✓）")
+
+    def test_event_category_still_compresses(self):
+        """经历类（event）**不跳** ✓ —— 它还需要模型做叙事摘要 ✓"""
+        sid = "legacy:event:1"
+        self._seed(["event"], sid)
+        calls, ac, nf = self._run(sid)
+        self.assertTrue(calls, "event 类也被跳过了 ✗ ⇒ 经历类会失去摘要 ✓")
+
+    def test_non_migrated_session_unaffected(self):
+        """普通会话（不在 migration_items 里）行为**完全不变** ✓"""
+        sid = "qq:gm:5"
+        now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(20):
+                t = now - 10 * 86400 - i * 60
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("n%02d" % i, sid, ("user", "assistant")[i % 2], t, t, "对话 %d" % i,
+                     "对话 %d" % i, json.dumps(["u-1"]), i + 1, now, "session"))
+            db.commit()
+        calls, ac, nf = self._run(sid)
+        self.assertTrue(calls, "普通会话也应正常压缩 ✗（不能被我改坏 ✓）")

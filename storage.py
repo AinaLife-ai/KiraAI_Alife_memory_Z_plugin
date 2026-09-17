@@ -1960,6 +1960,52 @@ class Store:
             ).fetchone()
             return row["real"] if row else value
 
+    def distilled_only(self, sid, ids):
+        """这批记录是否**全部**属于「迁移导入 + 已提炼过知识」✓（方案 B 的判据 ✓）
+
+        判据（对**存量用户**同样有效 ✗✓ 不依赖任何新列 ✓）：
+          · 记录在 `migration_items` 里（= 迁移来的 ✓）
+          · 它已经有来源事实（`json_each(facts.sources)` ✓）
+          · 那条事实的 category **不是 event** ✗
+            （event = 经历类 ✓ 仍需要模型做叙事摘要 ✓ 不能跳 ✓）
+        三条都满足 ⇒ 知识已经在事实层 ✓ 再压一遍纯属重复花钱 ✗
+        """
+        if not ids:
+            return False
+        marks = ",".join("?" * len(ids))
+        with self.connect() as db:
+            hit = db.execute(
+                "SELECT count(DISTINCT r.id) FROM records r "
+                " JOIN migration_items mi ON mi.record_id = r.id "
+                " JOIN facts f ON f.deleted = 0 AND f.category != 'event' "
+                " JOIN json_each(f.sources) s ON s.value = r.id "
+                " WHERE r.sid = ? AND r.id IN (%s)" % marks,
+                [sid, *ids],
+            ).fetchone()[0]
+        return int(hit) == len(set(ids))
+
+    def archive_distilled(self, sid, candidates):
+        """只归档（active=0）**不调模型** ✗✓ —— 知识已在事实层 ✓ 原文仍可按 ID 检索 ✓
+
+        ⚠️ 不创建上层摘要 ✓（这正是省掉的那次模型调用 ✓）
+        合并 / 审计**不受影响** ✗：合并由 job 包装层（`queue_fact_merges` ✓）
+        与召回路径触发 ✓ 审计由 scheduler 按会话跑 ✓ 都与本路径无关 ✓✓
+        """
+        if not candidates:
+            return 0
+        changed = 0
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in candidates:
+                cur = db.execute(
+                    "UPDATE records SET active=0, revision=revision+1 "
+                    " WHERE id=? AND sid=? AND active=1 AND deleted=0",
+                    (row["id"], sid),
+                )
+                changed += cur.rowcount or 0
+            db.commit()
+        return changed
+
     def compress(self, sid, candidates, level, output):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
