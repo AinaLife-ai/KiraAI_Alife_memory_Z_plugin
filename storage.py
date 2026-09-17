@@ -1965,9 +1965,10 @@ class Store:
 
         判据（对**存量用户**同样有效 ✗✓ 不依赖任何新列 ✓）：
           · 记录在 `migration_items` 里（= 迁移来的 ✓）
-          · 它已经有来源事实（`json_each(facts.sources)` ✓）
-          · 那条事实的 category **不是 event** ✗
-            （event = 经历类 ✓ 仍需要模型做叙事摘要 ✓ 不能跳 ✓）
+          · **同一个来源 key** 已经产生过一条非 event 事实
+            （按 key 而不是 record_id ✗✓：重复导入时**首次那条**才写了事实 ✓
+             而重复项**记录照写、事实不写** ✗ 按 record_id 判会漏掉它们 ⇒ 白走压缩 ✓）
+          · 那条事实的 category **不是 event** ✗（经历类仍需模型做叙事摘要 ✓）
         三条都满足 ⇒ 知识已经在事实层 ✓ 再压一遍纯属重复花钱 ✗
         """
         if not ids:
@@ -1977,9 +1978,12 @@ class Store:
             hit = db.execute(
                 "SELECT count(DISTINCT r.id) FROM records r "
                 " JOIN migration_items mi ON mi.record_id = r.id "
-                " JOIN facts f ON f.deleted = 0 AND f.category != 'event' "
-                " JOIN json_each(f.sources) s ON s.value = r.id "
-                " WHERE r.sid = ? AND r.id IN (%s)" % marks,
+                " WHERE r.sid = ? AND r.id IN (%s) "
+                "   AND EXISTS ("
+                "     SELECT 1 FROM migration_items mi2 "
+                "       JOIN facts f ON f.deleted = 0 AND f.category != 'event' "
+                "       JOIN json_each(f.sources) s ON s.value = mi2.record_id "
+                "      WHERE mi2.source_key = mi.source_key)" % marks,
                 [sid, *ids],
             ).fetchone()[0]
         return int(hit) == len(set(ids))

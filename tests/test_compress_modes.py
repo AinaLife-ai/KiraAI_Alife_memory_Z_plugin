@@ -298,3 +298,56 @@ class MigratedDistilledCase(unittest.TestCase):
             db.commit()
         calls, ac, nf = self._run(sid)
         self.assertTrue(calls, "普通会话也应正常压缩 ✗（不能被我改坏 ✓）")
+
+
+class DuplicateImportCase(unittest.TestCase):
+    """重复导入的记录（同一 key 第二次导入）也要被判为「已提炼」✓
+
+    迁移时重复项**记录照写、事实不写** ✗（fact 只在首次写 ✓）
+    ⇒ 按 record_id 判会漏掉它们 ⇒ 白走一次模型压缩 ✗（成本泄漏 ✓）
+    ⇒ 改成按**来源 key** 判：同 key 只要有一条被提炼过 ✓ 整组都算已提炼 ✓
+    """
+
+    def test_duplicate_key_record_is_distilled(self):
+        now = time.time()
+        st = storage.Store(Path(tempfile.mkdtemp()) / "db")
+        st.initialize()
+        sid = "legacy:dup:1"
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            # 首次导入：记录 + 事实 ✓
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('r1',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "内容", "内容", "[]", 1, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','same-key','d1','r1','',?, '{}',?)", ("fh", now))
+            db.execute("INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,sources,"
+                       "fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                       " VALUES('f1',?,'preference','u-1','知识','','','[]','[]',?,'fp1',0,1,0,5,0,?)",
+                       (sid, json.dumps(["r1"]), now))
+            # 二次导入：同 key，记录照写 ✓ 但**没有事实** ✗
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('r2',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "内容", "内容", "[]", 2, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','same-key','d2','r2','',?, '{}',?)", ("fh", now))
+            db.commit()
+        self.assertTrue(st.distilled_only(sid, ["r1"]), "首次导入应判为已提炼 ✓")
+        self.assertTrue(st.distilled_only(sid, ["r2"]), "重复导入（无事实 ✗）也必须判为已提炼 ✓")
+        self.assertTrue(st.distilled_only(sid, ["r1", "r2"]), "整批都要判为已提炼 ✓")
+
+    def test_event_category_is_not_distilled(self):
+        now = time.time()
+        st = storage.Store(Path(tempfile.mkdtemp()) / "db")
+        st.initialize()
+        sid = "legacy:dup:2"
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            db.execute("INSERT INTO records(id,sid,role,level,start,end,summary,content,users,position,created,visibility,active,deleted)"
+                       " VALUES('e1',?,'user',0,?,?,?,?,?,?,?,?,1,0)",
+                       (sid, now, now, "经历", "经历", "[]", 1, now, "session"))
+            db.execute("INSERT INTO migration_items VALUES('old','ev-key','d1','e1','',?, '{}',?)", ("fh", now))
+            db.execute("INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,relations,sources,"
+                       "fingerprint,deleted,revision,audited,importance,merge_pending,created)"
+                       " VALUES('f2',?,'event','u-1','经历','','','[]','[]',?,'fp2',0,1,0,5,0,?)",
+                       (sid, json.dumps(["e1"]), now))
+            db.commit()
+        self.assertFalse(st.distilled_only(sid, ["e1"]), "event 类不许判为已提炼 ✗（仍需要摘要 ✓）")
