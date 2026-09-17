@@ -928,6 +928,11 @@ class AlifeMemoryPlugin(BasePlugin):
         ⇒ 只把**真的有得压**的会话排出去 ✓ 不会刷一屏"本次没有需要压缩的内容" ✓
         """
         cfg = self.runtime_settings()
+        # ⚠️ 尊重「自动压缩概率 = 0」= **仅手动** ✗（前端帮助文案的原话 ✓）
+        # 启动扫描是 scheduler 的**确定性兜底** ✓ 不是绕过用户选择的第二条路 ✓
+        # （2026-09-17 用户问"这玩意是啥"时发现的 ✓）
+        if not cfg.probability:
+            return []
         now = time.time()
         pending = []
         for sid in sorted(await self.store.call("sessions")):

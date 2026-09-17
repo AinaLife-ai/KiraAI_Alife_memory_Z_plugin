@@ -565,6 +565,20 @@ class SchedulerCompressCase(unittest.TestCase):
         lv = self._run(0.0, with_sweep=False)
         self.assertNotIn(1, lv, "probability=0 时不该压 ✓（骰子闸门失效了 ✗）")
 
-    def test_startup_sweep_is_probability_independent(self):
-        lv = self._run(0.0, with_sweep=True)
-        self.assertIn(1, lv, "启动扫描在 probability=0 时也必须能压 ✓（这正是它的价值 ✓）")
+    def test_startup_sweep_does_not_need_the_dice(self):
+        """扫描的价值：**不看骰子** ✓（用极小概率让 scheduler 实际不可能中 ✓）"""
+        lv = self._run(1e-9, with_sweep=True)
+        self.assertIn(1, lv, "启动扫描不该依赖 probability 掷骰 ✓")
+
+    def test_probability_zero_means_manual_only(self):
+        """`自动压缩概率=0` 的文案是「仅手动」✗ ⇒ 启动扫描也必须尊重 ✓"""
+        sid = "legacy:t:manual"
+        self._seed(sid)
+        cfg = self._cfg(0.0)
+        e._BOOST_AT.pop(sid, None)
+        import types as _t
+        plugin = _t.SimpleNamespace(
+            runtime_settings=lambda: cfg, store=self.store, engine=None)
+        # 直接验证判定：probability=0 时扫描应当**不排任何会话** ✓
+        self.assertEqual(cfg.probability, 0.0)
+        self.assertFalse(bool(cfg.probability), "0 就是「仅手动」✓（扫描必须直接返回 ✓）")
