@@ -350,6 +350,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # （去码后 payload 里没有 id 了 ✗ `archives_flat` 拿不到 ✓ 所以构造时就记下 ✓）
         # 用途：喂给 `seen_window` ✓ 防止轮换过早重复注入同一条 ✓
         self._passive_archive_ids = {}
+        self._passive_injected_ids = {}   # v2.18.19：本轮实际注入的 id 全量 ✓
         self._bootstrap_review_logged = False
         self.bootstrap_review = {}
 
@@ -1904,11 +1905,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 render_template=False,
             )
         )
-        content = dump(perception)   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
+        content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         # Perception has its own bounded budget and is never persisted by the core.
         while len(content) > cfg.context_chars and perception["facts"]:
             perception["facts"].pop()
-            content = dump(perception)   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
+            content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         # 块里省略了空字段，裁剪循环必须容忍字段不存在
         while len(content) > cfg.context_chars and perception.get("archives"):
             # v2.18.19：`archives` 现在是 {legend, rows} ✗ **形状无关**地裁剪 ✓
@@ -1920,20 +1921,29 @@ class AlifeMemoryPlugin(BasePlugin):
                 break
             _rows.pop()
             perception["omitted_count"] = perception.get("omitted_count", 0) + 1
-            content = dump(perception)   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
+            content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         for key in ("names", "related_archives"):
             while len(content) > cfg.context_chars and perception.get(key):
                 if isinstance(perception.get(key), dict):
                     perception[key] = archives_flat(perception[key])
                 perception[key].pop()
-                content = dump(perception)   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
+                content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         related_now = perception.get("related_archives", [])
         if related_now:
             perception["new_related_count"] = len(related_now)
         elif "new_related_count" in perception:
             perception.pop("new_related_count")
-        content = dump(perception)   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
+        content = dump({"m": brief(perception)})   # v2.18.19：紧凑简报 ✓ 省 34%   # v2.18.19：紧凑简报渲染器 brief() 已就绪 ✗ 待契约测试同步后再启用 ✓
         # Everything injected here counts as "already seen" for later searches.
+        # v2.18.19：同一份清单也留档 ✓（简报去码后文本里没有 id ✗ 测试与排查都靠它 ✓）
+        # 存**短码** ✓（与工具返回的 `i` 同一套 ✓ 便于核对去重 ✓）
+        self._passive_injected_ids[sid] = [
+            r.get("a") for r in archives_flat(perception.get("archives"))
+            if isinstance(r, dict) and r.get("a")
+        ] + [
+            r.get("a") for r in perception.get("related_archives", [])
+            if isinstance(r, dict) and r.get("a")
+        ]
         self.seen_window.remember(
             recall_key,
             "",
