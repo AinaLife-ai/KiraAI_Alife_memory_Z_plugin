@@ -1884,7 +1884,8 @@ async def test_quiet_migrated_sessions_get_compressed_by_sweep(tmp_path, monkeyp
         persona_mgr=types.SimpleNamespace(get_persona=persona),
     )
     plugin = module.AlifeMemoryPlugin(
-        ctx, {"alife": {"probability": 0.0, "audit_enabled": False}}
+        ctx, # probability 必须 > 0 ✗✓ —— 启动扫描尊重「0=仅手动」✓
+        {"alife": {"probability": 0.8, "audit_enabled": False}}
     )
     await plugin.initialize()
     try:
@@ -1944,7 +1945,8 @@ async def test_global_bucket_sessions_also_get_swept_and_yield_facts(tmp_path, m
         get_default_fast_llm_client=lambda: types.SimpleNamespace(chat=None),
         persona_mgr=types.SimpleNamespace(get_persona=lambda: types.SimpleNamespace(content="p")),
     )
-    plugin = module.AlifeMemoryPlugin(ctx, {"alife": {"probability": 0.0, "audit_enabled": False}})
+    plugin = module.AlifeMemoryPlugin(ctx, # probability 必须 > 0 ✗✓ —— 启动扫描尊重「0=仅手动」✓
+        {"alife": {"probability": 0.8, "audit_enabled": False}})
     await plugin.initialize()
     try:
         bucket = "legacy:unscoped"
