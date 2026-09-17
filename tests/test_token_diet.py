@@ -331,3 +331,55 @@ class AuditStatsTests(unittest.TestCase):
         self.assertEqual(counts["merge"], 0)
         left = [f["id"] for f in self.store.facts("qq:gm:1")]
         self.assertEqual(left, [a])
+
+
+class EmptyLexicalQueryCase(unittest.TestCase):
+    """空/纯符号查询**不得**让词面召回崩 ✗✓（2026-09-17 生产事故复现 ✓）
+
+    `_lexical_sql` 无词元时曾返回裸 ``"0"`` ✗ → 拼进 ``ORDER BY`` 被 SQLite
+    当成**列位置** → ``1st ORDER BY term out of range - should be between 1 and 21`` ✓
+    触发：群里一条纯表情消息（「🤔」）经被动召回传进 ``facts(lexical=...)`` ✓
+    同源问题也在 records 的 ``{lexical_sql}`` 上 ✓ 故两处一起守 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.cfg = c.Settings()
+        with self.store.connect() as db:
+            db.execute(
+                """INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,
+                   relations,sources,fingerprint,deleted,revision,audited,importance,
+                   merge_pending,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,0,?)""",
+                ("f-1", "qq:gm:1", "event", "qq:u", "内容", "理由", "", "[]", "[]",
+                 "[]", "fp-1", 5, 1000.0),
+            )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_facts_with_tokenless_lexical_does_not_crash(self):
+        for text in ("", " ", "!!!", "🤔", "、、。"):
+            with self.subTest(text=text):
+                rows = self.store.facts("qq:gm:1", lexical=text, limit=5)
+                self.assertIsInstance(rows, list)  # 不崩即通过 ✓（行数无所谓 ✓）
+
+    def test_records_with_tokenless_lexical_does_not_crash(self):
+        for text in ("", " ", "!!!", "🤔"):
+            with self.subTest(text=text):
+                res = self.store.search("qq:gm:1", lexical=text, limit=5)
+                self.assertIsInstance(res, dict)  # 不崩即通过 ✓（search 返回 {total,items} ✓）
+                self.assertIn("items", res)
+
+    def test_lexical_sql_never_returns_bare_integer(self):
+        """判据本身 ✓：无词元时返回的必须是**表达式**而不是裸整数 ✗"""
+        for empty in ((), []):
+            sql = s._lexical_sql("lower(content)", empty)
+            self.assertFalse(
+                sql.strip().isdigit(),
+                "_lexical_sql 无词元时返回了裸整数 %r ✗ —— ORDER BY 会把它当列位置 ✓" % sql,
+            )
+            # 真跑一遍 SQLite 才算数 ✓
+            with self.store.connect() as db:
+                db.execute("SELECT * FROM facts ORDER BY %s DESC LIMIT 1" % sql).fetchall()
