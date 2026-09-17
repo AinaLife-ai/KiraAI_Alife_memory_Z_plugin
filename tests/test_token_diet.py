@@ -485,3 +485,86 @@ class BoostGateCase(unittest.TestCase):
         self.assertTrue(e._boost_ok(sid, cfg))
         # 冷却期内闸门不再放行 ✓（避免重复排任务 ✓）
         self.assertFalse(e._boost_ok(sid, cfg, stamp=False), "冷却没生效 ✗")
+
+
+class SchedulerCompressCase(unittest.TestCase):
+    """scheduler 真的能把**安静的迁移会话**压掉吗 ✓（对照组 ✓ 2026-09-17 用户提问 ✓）
+
+    两个事实必须同时成立 ✓：
+      ① `probability` 是**骰子闸门** ✗ —— 默认 1.0 时 scheduler 会中 ✓
+         =0（从不主动回复）时 **永远不会中** ✗ ⇒ 迁移会话压不动 ✓
+      ② 即便中了 ✗ —— 修复前 `_boost_ok` 的盖章会让任务 100% 空转 ✓
+
+    所以 `queue_compress_all()`（启动扫描 / 迁移后扫描）是有意义的：
+    它**不看骰子** ✓ 确定性兜底 ✓
+    """
+
+    def _seed(self, sid):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in range(20):
+                t = now - 400 * 86400 - i * 180
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0)",
+                    ("m-%d" % i, sid, "user", t, t, "旧 %d" % i, "旧 %d" % i,
+                     "[]", i + 1, now, "session"))
+            db.commit()
+
+    def _levels(self, sid):
+        with self.store.connect() as db:
+            return dict(db.execute(
+                "SELECT level, count(*) FROM records WHERE sid=? AND deleted=0 GROUP BY level",
+                (sid,)).fetchall())
+
+    def _cfg(self, probability):
+        return c.Settings(compress_batch_mode="rounds", compress_rounds=12,
+                          batch_size=8, threshold=40, probability=probability)
+
+    def _run(self, probability, with_sweep):
+        sid = "legacy:t:%s:%s" % (probability, with_sweep)
+        self._seed(sid)
+        cfg = self._cfg(probability)
+        e._BOOST_AT.pop(sid, None)
+        loop = asyncio.new_event_loop()
+        try:
+            model = lambda *a, **k: asyncio.sleep(0, result=json.dumps(
+                {"summary": "迁移摘要", "facts": []}))
+
+            async def flow():
+                eng = e.Engine(self.store, lambda: cfg, model, None, None)
+                if with_sweep:
+                    rows = await self.store.call("active", sid)
+                    if e.compression_plan(rows, cfg, now=time.time(),
+                                        boost_allowed=e._boost_ok(sid, cfg, stamp=False)):
+                        await eng.enqueue("compress", sid, automatic=True)
+                    await eng.start()
+                    await asyncio.sleep(2.0)
+                else:
+                    await eng.start()          # 起 worker + scheduler ✓
+                    await asyncio.sleep(3.5)
+                await eng.stop()
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+        return self._levels(sid)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_scheduler_can_compress_quiet_migrated_when_dice_allows(self):
+        lv = self._run(1.0, with_sweep=False)
+        self.assertIn(1, lv, "scheduler 掷中骰子也没压成 ✗（boost 盖章问题回归了 ✓）")
+
+    def test_scheduler_starves_when_probability_zero(self):
+        lv = self._run(0.0, with_sweep=False)
+        self.assertNotIn(1, lv, "probability=0 时不该压 ✓（骰子闸门失效了 ✗）")
+
+    def test_startup_sweep_is_probability_independent(self):
+        lv = self._run(0.0, with_sweep=True)
+        self.assertIn(1, lv, "启动扫描在 probability=0 时也必须能压 ✓（这正是它的价值 ✓）")
