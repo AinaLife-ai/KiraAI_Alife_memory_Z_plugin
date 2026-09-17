@@ -933,7 +933,9 @@ class AlifeMemoryPlugin(BasePlugin):
         for sid in sorted(await self.store.call("sessions")):
             try:
                 rows = await self.store.call("active", sid)
-                if compression_plan(rows, cfg, now=now, boost_allowed=True):
+                # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
+                if compression_plan(rows, cfg, now=now,
+                                    boost_allowed=_boost_ok(sid, cfg, now=now, stamp=False)):
                     pending.append(sid)
             except Exception:
                 logger.exception("[记忆·Z] 扫描待压缩会话失败：%s", sid)
@@ -2146,7 +2148,7 @@ class AlifeMemoryPlugin(BasePlugin):
             rows = await self.store.call("active", sid)
             if compression_plan(
                 rows, self.settings, now=time.time(),
-                boost_allowed=_boost_ok(sid, self.settings),
+                boost_allowed=_boost_ok(sid, self.settings, stamp=False),
             ):
                 await self.engine.enqueue("compress", sid, automatic=True)
 

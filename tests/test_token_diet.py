@@ -439,3 +439,49 @@ class CompressionTriggerCase(unittest.TestCase):
         plan = e.compression_plan(rows, self._cfg(), now=time.time(), boost_allowed=True)
         self.assertIsNotNone(plan, "迁移数据压不动 ✗（B4 退回按条没生效 ✗）")
         self.assertLessEqual(len(plan[0]), 8, "退回按条时不得超过 batch_size ✗")
+
+
+class BoostGateCase(unittest.TestCase):
+    """闸门（scheduler / on_request / 启动扫描）**不得消耗降门槛资格** ✗✓
+
+    2026-09-17 生产实测的真实故障 ✓：
+      · 闸门 `compression_plan(..., boost_allowed=_boost_ok(sid, cfg))` ✗
+        —— `_boost_ok` 会**盖章**（写冷却时间戳 ✓）
+      · 于是任务真正跑起来再问一次 ✗ 已经在冷却里 ⇒ 必然 False ✗
+      · ⇒ **每一个排出去的压缩任务都空转** ✓ 日志刷屏"本次没有需要压缩的内容" ✓
+        迁移来的 L0 **永远压不掉** ⇒ 永远提炼不出事实 ✓
+
+    判据：闸门用 `stamp=False` ✓ 只有真正要压的那个调用点才盖章 ✓
+    """
+
+    def _rows(self, n=20):
+        now = time.time()
+        out = []
+        for i in range(n):
+            t = now - 400 * 86400 - i * 180
+            out.append(dict(id="r%d" % i, start=t, end=t, created=t, summary="s%d" % i,
+                            permanent=0, tier="active", importance=5, level=0,
+                            position=i + 1, sid="s:gate", visibility="session", role="user"))
+        return out
+
+    def _cfg(self):
+        return c.Settings(compress_batch_mode="rounds", compress_rounds=12,
+                          batch_size=8, threshold=40)
+
+    def test_gate_does_not_consume_boost(self):
+        sid, cfg = "s:gate:1", self._cfg()
+        e._BOOST_AT.pop(sid, None)
+        self.assertTrue(e._boost_ok(sid, cfg, stamp=False), "闸门该放行 ✓")
+        self.assertNotIn(sid, e._BOOST_AT, "闸门盖了戳 ✗ ⇒ 任务必然空转 ✓")
+        # 闸门排得出任务 ✓
+        self.assertIsNotNone(e.compression_plan(self._rows(), cfg, boost_allowed=True))
+        # 任务里再问一次，仍须拿到降门槛 ✓（这才是能真压的前提 ✓）
+        self.assertTrue(e._boost_ok(sid, cfg), "任务拿不到降门槛 ✗ ⇒ 排了也白排 ✓")
+        self.assertIn(sid, e._BOOST_AT, "任务该盖戳（冷却从这里开始算 ✓）")
+
+    def test_job_stamp_still_enforces_cooldown(self):
+        sid, cfg = "s:gate:2", self._cfg()
+        e._BOOST_AT.pop(sid, None)
+        self.assertTrue(e._boost_ok(sid, cfg))
+        # 冷却期内闸门不再放行 ✓（避免重复排任务 ✓）
+        self.assertFalse(e._boost_ok(sid, cfg, stamp=False), "冷却没生效 ✗")

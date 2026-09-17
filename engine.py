@@ -420,10 +420,16 @@ def permanent_clusters(rows, threshold, size=5, cross_threshold=0.0):
 _BOOST_AT: dict = {}
 
 
-def _boost_ok(sid, cfg, now=None):
-    """现在允许对这个会话做一次「降门槛」吗 ✓（并顺手打上冷却时间戳 ✓）
+def _boost_ok(sid, cfg, now=None, stamp=True):
+    """现在允许对这个会话做一次「降门槛」吗 ✓（`stamp=True` 时顺手打上冷却时间戳 ✓）
 
     返回 False 时 `compression_plan` 会退回**正常门槛** ✓ —— 也就是"这次先不抽" ✓
+
+    ⚠️ **闸门必须用 `stamp=False`** ✗✓ —— 排任务的闸门只是"决定要不要排" ✗
+    不该把这次资格用掉 ✗ 否则任务真正跑起来再问一次必然 False ✗
+    ⇒ **每一个排出去的压缩任务都空转** ✗✓（日志里"本次没有需要压缩的内容"刷屏 ✓
+      迁移进来的 L0 永远压不动 ⇒ **永远提炼不出事实** ✓）
+    2026-09-17 生产实测：scheduler 每 30 秒把所有会话排一遍 ✓ 全部空转 ✓
     """
     now = now or time.time()
     cooldown = int(getattr(cfg, "compress_idle_cooldown_min", 30) or 0) * 60
@@ -432,7 +438,8 @@ def _boost_ok(sid, cfg, now=None):
     #    （时间戳小于冷却秒数时会被误判成"冷却中" ✗ 单测里就撞到过 ✓）
     if cooldown and last is not None and now - last < cooldown:
         return False
-    _BOOST_AT[sid] = now
+    if stamp:
+        _BOOST_AT[sid] = now
     return True
 
 
@@ -2039,7 +2046,7 @@ class Engine:
                     if random.random() < cfg.probability:
                         rows = await self.store.call("active", sid)
                         if compression_plan(rows, cfg, now=time.time(),
-                                 boost_allowed=_boost_ok(sid, cfg)):
+                                 boost_allowed=_boost_ok(sid, cfg, stamp=False)):
                             await self.enqueue("compress", sid, automatic=True)
             if cfg.audit_enabled and now - self.last_audit >= cfg.audit_interval:
                 self.last_audit = now
