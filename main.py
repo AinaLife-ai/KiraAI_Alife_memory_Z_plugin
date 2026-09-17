@@ -567,6 +567,10 @@ class AlifeMemoryPlugin(BasePlugin):
         # 安静的会话（尤其迁移进来的旧会话）没有对话轮 ✗ 触发不到自动压缩 ✓
         # ⇒ 启动时补扫一次 ✓（2026-09-17 ✓）
         asyncio.create_task(self.queue_compress_all())
+        # ⚠️ 不能只靠"启动时扫一遍" ✗✓ —— 那样等于"**要重启才会安排**" ✓
+        # （2026-09-17 用户："为什么要重启才安排，你不觉得这个逻辑非常怪吗" ✓ 说得对 ✓）
+        # 改成常驻周期兜底 ✓：不问骰子 ✓ 每 15 分钟保证扫一次 ✓
+        asyncio.create_task(self._compress_sweep_loop())
         self.migration_task.add_done_callback(_log_migration_failure)
         try:
             await self.refresh_bootstrap_review()
@@ -953,6 +957,28 @@ class AlifeMemoryPlugin(BasePlugin):
                 len(pending), min(len(pending), cap),
             )
         return pending
+
+    async def _compress_sweep_loop(self, interval_min=15):
+        """常驻的兜底扫描 ✓（与 scheduler 互补，不是重复 ✓）
+
+        分工：
+          · **scheduler**（每 30 秒 ✓）负责"持续有机会" ✓ 但有**概率闸门** ✗
+            （「自动压缩概率」0.8 = 每次 80% ✓ 设 0 就永不自动压 ✓ 前端文档写明 ✓）
+          · **本循环**负责"**确定性**" ✓ 不看骰子 ✓ 每 15 分钟必扫一次 ✓
+            ⇒ 迁移进来的安静会话不会因为"骰子一直不中"而长期滞留 ✓
+
+        两者都用 `_boost_ok(..., stamp=False)` 做闸门 ✓ 不消耗降门槛资格 ✓
+        真正的压缩由排出去的 job 走 `_compress_cascade` ✓（一条任务追平一个会话 ✓）
+        """
+        interval = max(60, int(interval_min) * 60)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.queue_compress_all()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[记忆·Z] 周期压缩扫描失败（下一轮再试 ✓）")
 
     async def memo(self, key, factory):
         """进程内缓存：只缓存「不随消息变化」的查询，按 store revision 失效。
