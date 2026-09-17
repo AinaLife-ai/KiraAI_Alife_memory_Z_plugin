@@ -140,17 +140,35 @@ def brief(perception):
     scope_mark = {"linked": "·关联会话", "global": "·全局"}.get(
         str(perception.get("scope") or ""), ""
     )
-    head = "【记忆%s】%s" % (scope_mark, perception.get("session") or "")
-    # v2.18.19：说话人优先用**名字** ✓（档案图例里通常带名字 ✓ 否则退回 participants 的 id ✓）
-    archives0 = perception.get("archives")
-    legend0 = archives0.get("legend") if isinstance(archives0, dict) else ""
-    names_hint = ""
-    if legend0 and "说话人=" in legend0:
-        names_hint = legend0.split("说话人=", 1)[1].strip()
-    who = [names_hint] if names_hint and names_hint != "?" else list(perception.get("participants") or [])
-    if who:
-        head += "｜" + "、".join(str(w) for w in who)
-    lines = [head]
+    # v2.18.19：
+    # · `scope=session` 时**不写会话 id** ✗ —— 模型本来就知道当前会话 ✓（每轮省 16 字符 ✓）
+    #   跨会话（linked/global）才写 ✗ 那才是它需要知道的 ✓
+    # · 表头必须给**码→名字** ✗ 否则事实行里的 `n1`/`n2` 无人能解 ✓（这是语义缺失 ✗ 不只是浪费 ✓）
+    session = perception.get("session") or ""
+    head = "【记忆%s】%s" % (scope_mark, session if scope_mark else "")
+
+    names_map = perception.get("names") or {}
+    pairs = []
+    if isinstance(names_map, dict):
+        pairs = ["%s=%s" % (k, v) for k, v in names_map.items() if k and v]
+    elif isinstance(names_map, list):
+        pairs = [
+            "%s=%s" % (it.get("code") or it.get("a"), it.get("name") or it.get("s"))
+            for it in names_map
+            if isinstance(it, dict)
+        ]
+        pairs = [x for x in pairs if "None" not in x]
+    if pairs:
+        head += ("｜" if head.strip("【记忆】") else "") + "、".join(pairs)
+    else:
+        # 没有码表时退回"说话人名单"✓（至少让人知道这段记忆里有谁 ✓）
+        archives0 = perception.get("archives")
+        legend0 = archives0.get("legend") if isinstance(archives0, dict) else ""
+        names_hint = legend0.split("说话人=", 1)[1].strip() if "说话人=" in legend0 else ""
+        who = [names_hint] if names_hint and names_hint != "?" else list(perception.get("participants") or [])
+        if who:
+            head += "｜" + "、".join(str(w) for w in who)
+    lines = [head.rstrip("｜")]
 
     raw_facts = perception.get("facts")
     if raw_facts:
