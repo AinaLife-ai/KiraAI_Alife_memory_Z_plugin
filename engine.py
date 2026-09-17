@@ -498,7 +498,8 @@ def _fit_rows(rows, cap_chars):
         out.append(row)
         used += size
     if cut and out:
-        # v2.18.19：给压缩侧留个记号 ✓ —— 它会给这条例存档的摘要加「（续）」✓
+        # v2.18.19：给压缩侧留个记号 ✓ —— 它会给这条例存档的摘要尾部加 `…` ✓
+        # （**仓库既有约定就是省略号** ✗ 不是「（续）」✓ 见 storage.py 写入快照处 ✓）
         # 只在**真的截断**时打 ✗（正常情况一个字不加 ✓）
         # ⚠️ 用 `dict(...)` 复制 ✗ 不要原地改传入的行 ✓
         out[-1] = dict(out[-1], _partial=True)
@@ -571,7 +572,24 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
                     #   （subset 里可能挂着"还没回复的半轮" ✗ 它不许进批次 ✓
                     #     单测 test_dangling_turn_is_not_counted_or_included 守着这条 ✓）
                     _end = rounds[-1][1]
-                    return _fit_rows(subset[:_end], _cap), level + 1
+                    _rows = subset[:_end]
+                    _fit = _fit_rows(_rows, _cap)
+                    # ★★ 绝不切半轮 ✗✓（原设计的铁律 ✓ 我 v2.18.19 的字符截断破坏了它 ✓）
+                    # `_fit_rows` 按**字符预算**截断 ⇒ 可能切在轮中间 ✗
+                    # ⇒ 这里**退回到上一个整轮边界** ✓（宁可少压一轮 ✓ 也不留半轮 ✓）
+                    # 唯一例外：**单个轮本身就超预算** ✗ ⇒ 退了就啥也不剩 ⇒ 保留并打 `…` 记号 ✓
+                    if _fit and _fit[-1].get("_partial"):
+                        _last_id = _fit[-1]["id"]
+                        _pos = next((i for i, r in enumerate(_rows) if r["id"] == _last_id), None)
+                        _backoff = 0
+                        for start, end in rounds:
+                            if _pos is not None and end <= _pos + 1:
+                                _backoff = end
+                            else:
+                                break
+                        if _backoff:
+                            _fit = _rows[:_backoff]
+                    return _fit, level + 1
                 if boost and not rounds:
                     # v2.18.19（B4）：**一个完整轮都算不出** ✓（迁移 / 同角色堆叠 ✓）
                     # 这类数据没有"轮"这个概念 ✗ 硬按轮只会**永远压不动**
