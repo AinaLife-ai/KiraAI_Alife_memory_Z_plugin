@@ -233,7 +233,12 @@ def build_instruction(purpose, cfg):
                 cfg.record_merge_soft_reason_chars,
             )
         return DEDUPE_CONSERVATIVE_INSTRUCTION
-    return AUDIT_INSTRUCTION
+    if purpose == "audit":
+        return AUDIT_INSTRUCTION
+    # ⚠️ 原来是"兜底 return AUDIT_INSTRUCTION" ✗✓（2026-09-17 加的守卫当场抓到 audit 也没显式分支 ✓）
+    # 隐患：将来新增用途忘加分支 ⇒ **静默**套用审计指令 ⇒ 模型按错的规矩干活还不报错 ✗
+    # 改成**显式报错** ✓：新用途必须补分支 ✓ 忘了就当场炸（可见 ✓）而不是悄悄错 ✓
+    raise ValueError("unknown purpose for instruction: %s" % purpose)
 
 
 def compress_records(candidates, aliases, names=None, keep=()):
