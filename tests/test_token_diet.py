@@ -2007,10 +2007,8 @@ class ToolResultNotRotatedCase(unittest.TestCase):
     def test_rotation_pools_filter_it(self):
         """两处轮换池都必须过滤 ✓（源级钉住，防止有人改回去 ✗）"""
         src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
-        self.assertIn('fact_pool = [x for x in fact_pool if not is_tool_result(x.get("content"))]',
-                      src, "事实池没过滤工具结果 ✗")
-        self.assertIn('if r.get("id") and not is_tool_result(r.get("summary"))',
-                      src, "档案池没过滤工具结果 ✗")
+        self.assertIn('is_tool_result(x.get("content"))', src, "轮换·事实池没过滤 ✗")
+        self.assertIn('is_tool_result(r.get("summary"))', src, "轮换·档案池没过滤 ✗")
 
     def test_all_recall_paths_exclude_it(self):
         """**主被动召回也都要排除** ✓（2026-09-18 用户确认 ✓ 原先只有渲染层剥标签 ✗）"""
@@ -2019,5 +2017,7 @@ class ToolResultNotRotatedCase(unittest.TestCase):
                       src, "被动召回的**事实**没排除工具结果 ✗")
         self.assertIn('not is_tool_result(r.get("summary"))', src,
                       "被动召回的**档案**没排除工具结果 ✗")
-        self.assertIn('if is_tool_result(r.get("summary")):', src,
+        self.assertIn('if is_tool_result(r.get("summary")) or is_tool_step(r):', src,
                       "**主动检索**没排除工具结果 ✗")
+        # 既有约定（v2.18.19：`category='tool'` 的工具步也要全链路过滤 ✓）在档案路径上也要在 ✓
+        self.assertIn('and not is_tool_step(r)', src, "档案路径没装**既有**的工具步过滤 ✗")

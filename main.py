@@ -68,6 +68,7 @@ from .retrieval import (
     media_only,
     short_day,
     is_tool_result,
+    is_tool_step,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -1857,14 +1858,19 @@ class AlifeMemoryPlugin(BasePlugin):
             local_ids = {r["id"] for r in rows}
             fresh = [
                 r for r in matches["items"]
-                if r["id"] not in local_ids and not is_tool_result(r.get("summary"))
+                # 与既有约定一致：`category='tool'` 的工具步也要排除 ✓（v2.18.19 全链路 ✓）
+                if r["id"] not in local_ids
+                and not is_tool_result(r.get("summary"))
+                and not is_tool_step(r)
             ]
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
             # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
             archive_pool = [
                 r for r in fresh[reach:]
-                if r.get("id") and not is_tool_result(r.get("summary"))
+                if r.get("id")
+                and not is_tool_result(r.get("summary"))
+                and not is_tool_step(r)
             ]
             if archive_pool:
                 related_rows = related_rows + await self.rotation_extras(
@@ -2889,7 +2895,7 @@ class AlifeMemoryPlugin(BasePlugin):
             for r in raw_items:
                 # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主动侧也排除 ✓）
                 #   （它们只是"模型抓回来的工具输出" ✗ 不是记忆 ✓）
-                if is_tool_result(r.get("summary")):
+                if is_tool_result(r.get("summary")) or is_tool_step(r):
                     continue
                 # 紧凑形态：i=短码(证据编码) t=时间 s=内容 u=参与者
                 # 默认值全部省略（archived/permanent/role/level/revision 之前占了两成字符）
