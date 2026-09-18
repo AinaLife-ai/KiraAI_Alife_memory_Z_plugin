@@ -518,6 +518,14 @@ class AlifeMemoryPlugin(BasePlugin):
         return changed
 
     async def initialize(self):
+        # ★ 2026-09-18：启动时**自报版本与加载目录** ✓
+        #   用户反馈"明明装了新版，日志却还是旧文案" ⇒ 绝大多数是**安装目录里是旧文件**
+        #   或"只同步了一部分文件"（manifest 新、main.py 旧 ◀ 这种最难发现 ✗）
+        #   有了这一行，就能直接对比"日志里的版本 vs 工作台显示的版本" ✓
+        logger.info(
+            "[记忆·Z] 启动中：版本 %s · 加载自 %s",
+            self._plugin_version() or "未知", Path(__file__).parent,
+        )
         try:
             await self.apply_config_migrations()
         except Exception:
