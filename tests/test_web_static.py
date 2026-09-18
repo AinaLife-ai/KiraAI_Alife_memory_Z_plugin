@@ -204,3 +204,23 @@ def test_config_conflict_ui():
     # 两条出路都要**真的能用** ✓
     assert "config.revision = fresh.revision" in js, "覆盖=借最新版本号，不能直接放弃 ✓"
     assert "await loadConfig()" in js, "丢弃=重新载入并渲染 ✓"
+
+
+def test_every_tab_has_a_title_entry():
+    """每个页签都必须在 `titles` 表里有标题 ✓（2026-09-18 用户实测 ✗）
+
+    现象：切到「事实体检」时报 `Cannot read properties of undefined (reading '0')`
+    根因：加了页签按钮（`data-tab="health"`）却没在 `selectTab` 的 `titles` 表里加条目 ✗
+          ⇒ `titles[name][0]` 读到 undefined 的索引 ✗
+    ⇒ 这条守卫把"页签 ↔ 标题表"钉死 ✓（web_audit 当初没覆盖这个面 ✗）
+    """
+    root = Path(__file__).resolve().parent.parent
+    html = (root / "web/index.html").read_text(encoding="utf-8")
+    js = (root / "web/app.js").read_text(encoding="utf-8")
+    tabs = sorted(set(re.findall(r'data-tab="([a-z_]+)"', html)))
+    assert tabs, "没找到任何页签 ✗"
+    block = js[js.find("const titles = {"):]
+    block = block[:block.find("};")]
+    for tab in tabs:
+        assert re.search(r'\b%s:\s*\["' % tab, block), (
+            "页签 %s 没有 titles 条目 ✗ ⇒ 一点它就报 reading '0' ✓" % tab)

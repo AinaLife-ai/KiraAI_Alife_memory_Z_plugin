@@ -826,7 +826,7 @@ class AlifeMemoryPlugin(BasePlugin):
 
     # ---- 给模型看的紧凑表示 ------------------------------------------------
     @staticmethod
-    def model_text(text, keep=(), reply_chars=40, desc_chars=100):
+    def model_text(text, keep=(), reply_chars=40, desc_chars=30):
         """剥思考块 + 剥包裹 + 压空白 + 截断嵌套的长描述（只影响模型看到的样子）。
 
         ``keep`` 传「含空格的已登记名字」：这些是真实昵称，不能被空白归一合并。
@@ -1821,7 +1821,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   ⇒ 于是它**也会流进轮换槽** ⇒ 用户看到"轮换槽被动召回到工具步" ✗
                 #   ⇒ 轮换槽（"相关但还没召回过的**记忆**" ✓）把它排除 ✓
                 #   注意：**主召回不动** ✓（工具结果是对话史的一部分 ✓ 该能被想起来 ✓）
-                fact_pool = [x for x in fact_pool if not is_tool_result(x.get("content"))]
+                fact_pool = [
+                    x for x in fact_pool
+                    if not is_tool_result(x.get("content"))
+                    and not media_only(x.get("content") or "", keep_names)
+                ]
             # ★ 2026-09-18 批次 2：**下沉** ✓
             #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
             #   **不删不藏**：它们仍在下面的轮换候选池里（那是独立查询 ✓）
@@ -1862,6 +1866,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 if r["id"] not in local_ids
                 and not is_tool_result(r.get("summary"))
                 and not is_tool_step(r)
+                # ★ 2026-09-18（用户实测）：**只有壳的（[Reply ID: -13 / 只看 @）不算内容** ✗
+                #   这条规则项目里早就有（`media_only` ✓ v2.18.14）但没装在档案/轮换池上 ✓
+                #   ⇒ 轮换槽曾注入「[Reply ID: -13」这种废条目 ✓
+                #   （`archive_pool` 由 `fresh` 派生 ⇒ 这里一处同时覆盖主召回与轮换 ✓）
+                and not media_only(r.get("summary") or "", keep_names)
             ]
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
@@ -2896,6 +2905,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主动侧也排除 ✓）
                 #   （它们只是"模型抓回来的工具输出" ✗ 不是记忆 ✓）
                 if is_tool_result(r.get("summary")) or is_tool_step(r):
+                    continue
+                if media_only(r.get("summary") or "", keep_names):
                     continue
                 # 紧凑形态：i=短码(证据编码) t=时间 s=内容 u=参与者
                 # 默认值全部省略（archived/permanent/role/level/revision 之前占了两成字符）
