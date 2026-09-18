@@ -1500,7 +1500,9 @@ class AlifeMemoryPlugin(BasePlugin):
         description=(
             "看记忆的入口。给 subject（实体 ID 或名字）→ 这个人的画像、名字历史、按类别事实与关系；"
             "给 query（只查称呼）→ 现名与曾用名；都不给 → 总体统计 + 一批未见过的画像/偏好/约定事实。"
-            "结果里的 id 是稳定实体 ID，可回传给其它工具。"
+            "结果以紧凑文本给出：`实体ID=名字 [rN]`（`[rN]` 是版本号，"
+            "改名等改动要把它一并回传，避免覆盖别人的修改）；"
+            "画像行为 `类别 说话人｜内容 ★重要度 日期 [来源短码]`。"
         ),
         params={
             "type": "object",
@@ -2676,6 +2678,9 @@ class AlifeMemoryPlugin(BasePlugin):
             "include_content=true 读完整原文）；给 keyword/prompt/时间/层级 → 搜索，"
             "默认只返回本会话还没给过的新内容，可用 next_batch=true 继续找。"
             "默认连已归档的旧记忆一起搜；若设置里开了「检索默认只搜常驻」，则需 include_archived=true。"
+            "结果以紧凑文本给出（与注入的记忆同一种形态）：行首是短码（可回传给本工具或 CorrectMemory），"
+            "记号含 ★重要度、L 层号、bot（我自己说过的）、mem（永久记忆）、"
+            "arch（已归档）、@会话（跨会话）；expand=[序号] 或 allow_seen=true 可重看已给过的内容。"
         ),
         params={
             "type": "object",

@@ -2511,3 +2511,39 @@ class ShortTimeCrossYearCase(unittest.TestCase):
         src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
         self.assertIn('"%s@%s" % (name, short_day(at) if at else "?")', src,
                       "曾用名必须用 short_day ✓（跨年带年 ✓ 与事实侧一致 ✓）")
+
+
+class ToolDescriptionComplianceCase(unittest.TestCase):
+    """工具描述必须**跟得上实际输出** ✓（2026-09-18 用户要求 ✓）
+
+    这次就是这么抓到两处不合规 ✓：
+    · `GetProfile` 改成紧凑文本后，描述还写着"结果里的 id 是稳定实体 ID"
+      ⇒ 模型看到 `[r3]` 却**没人告诉它要回传** ✗（而 `CorrectMemory` 明确要求带 revision ✓）
+    · `SearchMemoryArchive` 的输出记号（★/L/bot/mem/arch/@）**没在描述里解释** ✗
+    ⇒ 立成常驻守卫 ✓（描述与输出一起改 ✓ 否则报红 ✓）
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def _desc(self, tool):
+        i = self.src.find('name="%s"' % tool)
+        self.assertGreater(i, 0, "找不到工具 %s ✗" % tool)
+        return self.src[i:i + 2200]
+
+    def test_search_explains_marks(self):
+        seg = self._desc("SearchMemoryArchive")
+        for mark in ("★", "L 层号", "bot", "mem", "arch", "@会话"):
+            self.assertIn(mark, seg, "搜索工具描述没解释输出记号 ✗：%s" % mark)
+        self.assertIn("expand", seg, "描述要提到 expand ✓")
+        self.assertIn("allow_seen", seg, "描述要提到 allow_seen ✓")
+
+    def test_profile_explains_revision(self):
+        seg = self._desc("GetProfile")
+        self.assertIn("[rN]", seg, "画像描述要解释 [rN] 记号 ✓")
+        self.assertIn("回传", seg, "画像描述要说清 revision 要**回传** ✓（改名要用 ✓）")
+        self.assertIn("紧凑文本", seg, "画像描述要说清输出形态 ✓")
+
+    def test_correct_memory_requires_revision(self):
+        seg = self._desc("CorrectMemory")
+        self.assertIn("revision", seg, "改名/更新必须要求带 revision ✓")
