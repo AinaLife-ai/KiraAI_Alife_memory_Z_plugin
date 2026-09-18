@@ -1237,7 +1237,7 @@ class Store:
         return ids[:20]
 
     # ── 身份绑定（2026-09-18 批次 3）────────────────────────────────
-    def fact_health(self, threshold=12, now=None, limit=300):
+    def fact_health(self, threshold=12, now=None, limit=50, offset=0):
         from . import retrieval
 
         now = float(now or time.time())
@@ -1255,10 +1255,18 @@ class Store:
                 c for c in ("tags", "reason", "scenario", "sources", "rewrite_pending")
                 if c in cols
             ]
+            # ★ 2026-09-18（用户实测"加载太久"）：
+            #   原来一次回 **300 行 = 189.5 KB** ✗ 而页面一次只显示 50 条
+            #   ⇒ **84% 的流量白传白解析**（手机端传输 + JSON.parse + 内存 ✓）
+            #   ⇒ 改成**服务端分页**：每页只回 50 行（≈32 KB ✓ 6 倍小 ✓）
+            #   总条数用 `count` 单独回 ✓ 前端翻页器照常工作 ✓
+            total = db.execute(
+                "SELECT COUNT(*) FROM facts WHERE deleted=0"
+            ).fetchone()[0]
             rows = db.execute(
                 "SELECT " + ", ".join(sel_cols) + " FROM facts"
-                " WHERE deleted=0 ORDER BY importance ASC, created ASC LIMIT ?",
-                (max(1, int(limit)),),
+                " WHERE deleted=0 ORDER BY importance ASC, created ASC LIMIT ? OFFSET ?",
+                (max(1, int(limit or 50)), max(0, int(offset or 0))),
             ).fetchall()
         out = []
         for row in rows:
@@ -1280,7 +1288,8 @@ class Store:
             fact["relation_warnings"] = []
             out.append(fact)
         out.sort(key=lambda f: (f["score"], f["importance"], f["created"] or 0))
-        return {"threshold": int(threshold), "count": len(out),
+        # `count` = **总数** ✓（前端翻页器要用它）；`rows` = 本页 ✓
+        return {"threshold": int(threshold), "count": int(total), "offset": int(offset),
                 "now": now, "rows": out}
 
     def has_active_job(self, kind, sid):

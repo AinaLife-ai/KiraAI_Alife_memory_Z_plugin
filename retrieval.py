@@ -411,6 +411,24 @@ def _strip_wrappers(text):
     return _INLINE_BARE.sub("", out)
 
 
+# ⚠️ 2026-09-19（用户真机日志实测）：`[At 3991867505]` 这种**数字 id** 会原样进注入 ✗
+#   模型拿这个号**什么都做不了** ⇒ 纯噪声 ✓
+#   有昵称就用 `@昵称` ✓ 没昵称就整个去掉（周围文字本来就点了人名 ✓）
+# ⚠️ 2026-09-19：`[At 123]` 这种**结构化** at 壳，过去**没有任何地方剥过** ✗
+#   ⇒ 用户日志里 `[At 3991867505]` 原样进注入 ✓
+#   **结构化壳不依赖名单表** ✓（与 [Reply]/[CQ:at]/<at> 同档 ✓ —— 仓库既有约定 ✓）
+_AT_SHELL = re.compile(r"\[At\s*-?\d+[^\]]*\]", re.I)
+_AT_WITH_NAME = re.compile(r"\[At\s*-?\d+\s*\(\s*nickname:\s*([^)]*?)\s*\)\s*\]", re.I)
+_AT_BARE = re.compile(r"\[At\s*-?\d+\s*\]", re.I)
+
+
+def strip_at_ids(text):
+    """`[At id(nickname: 名字)]` → `@名字`；`[At id]` → 去掉 ✓（id 对模型无用 ✗）"""
+    if not text or "[At" not in text:
+        return text
+    return _AT_BARE.sub("", _AT_WITH_NAME.sub(lambda m: "@" + m.group(1), text))
+
+
 def clean_text(text, keep=()):
     """剥掉最外层包裹 + 归一空白。孤立的 ``<``、正文里的字面标签都原样保留。
 
@@ -517,7 +535,8 @@ def model_text(text, keep=(), reply_chars=40, desc_chars=DESC_CHARS_RECALL):
     这里**比落库多剥一层思考块**：落库要保原文（用户可能真的引用了 Bot 的思考块），
     但发给模型的东西不该带内部推理——存量清理万一没跑到，模型也不会被污染。
     """
-    return trim_nested(clean_text(strip_reasoning(text), keep), reply_chars, desc_chars)
+    # At 归一也在这一层 ✓ ⇒ 所有渲染路径（注入/召回/画像/工具）一次覆盖 ✓
+    return strip_at_ids(trim_nested(clean_text(strip_reasoning(text), keep), reply_chars, desc_chars))
 
 
 def _scan_bracket(text, start):
@@ -533,7 +552,10 @@ def _scan_bracket(text, start):
     return -1
 
 
-_REPLY_HEAD = re.compile(r"\[Reply ID:\s*(\d+)\s*content:\s*")
+# ⚠️ 2026-09-19（用户真机日志）：id **可能是负数** ✗
+#   实测 archive 槽注入 `[Reply ID: -19 content: …]` 原样穿透（旧正则只认 \d+ ✗）
+#   ⇒ 必须 `-?\d+`，否则负 id 的引用永远走不到新格式 ✓
+_REPLY_HEAD = re.compile(r"\[Reply ID:\s*(-?\d+)\s*content:\s*")
 # v2.18.18：**媒体占位符开头**就算媒体 ✓
 # ⚠️ 注意它**本来就不要求闭合的 ]** ✓ —— 用户日志里漏掉的那条
 # `[Image 这张图片展示了…`（描述被截断/省略号收尾 ✗）正是靠这一点被接住的 ✓
@@ -1163,6 +1185,9 @@ def media_only(content, names=()):
     #    注意**不包含**引用壳 ✓ 所以 `[Reply x] 你好呀` 不会被误杀 ✓
     if _MEDIA_HEAD_ANY.match(raw):
         return True
+    # ★ 2026-09-19：结构化 at 壳先剥掉 ✓（**不依赖名单** ✓）
+    #   ⇒ `[At 123]` 这种"只有 at"的消息才判得出来 ✓
+    raw = _AT_SHELL.sub(" ", raw)
     text = _ENVELOPE_OPEN.sub(" ", raw)          # 先剥"行尾未闭合"的壳 ✓（截断残留 ✓）
     text = _ENVELOPE.sub(" ", text)
     text = _MEDIA_BLOCK.sub(" ", text)

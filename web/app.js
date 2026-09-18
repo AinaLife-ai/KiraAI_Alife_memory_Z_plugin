@@ -929,24 +929,28 @@ function askPurge(kind, target, summary) {
 const HEALTH_PAGE = 50;
 let healthRows = [];
 let healthPage = 0;
+let healthTotal = 0;
 
-async function loadHealth() {
+async function loadHealth(page) {
   const meta = $("#healthMeta"), box = $("#healthList");
   if (!meta || !box) return;
+  const p = Math.max(0, Number(page) || 0);
   meta.textContent = "正在加载…";
   let d;
   try {
-    d = await api("/fact_health");
+    // ★ 服务端分页：只拉**本页 50 条**（原来一次 300 行 = 189.5 KB ✗ 用户实测"加载太久"）
+    d = await api("/fact_health?limit=" + HEALTH_PAGE + "&offset=" + p * HEALTH_PAGE);
   } catch (e) {
     meta.textContent = "加载失败：" + e.message;
     return;
   }
   healthRows = (d && d.rows) || [];
-  healthPage = 0;
+  healthTotal = d && d.count != null ? d.count : healthRows.length;
+  healthPage = p;
   const thr = d && d.threshold != null ? d.threshold : 12;
   const sunk = healthRows.filter((f) => f.sunk).length;
   meta.textContent =
-    "共 " + healthRows.length + " 条事实；阈值 " + thr + "，本轮会下沉 " + sunk + " 条。" +
+    "共 " + healthTotal + " 条事实；阈值 " + thr + "，本页 " + sunk + " 条会下沉。" +
     "分数低的排在前面；点卡片即可编辑（内容 / 重要度 / 标签 / 删除），重要度 ±1 是上浮手段。" +
     "每页 " + HEALTH_PAGE + " 条。";
   paintHealth();
@@ -955,11 +959,10 @@ async function loadHealth() {
 function paintHealth() {
   const box = $("#healthList");
   if (!box) return;
-  const pages = Math.max(1, Math.ceil(healthRows.length / HEALTH_PAGE));
-  healthPage = Math.max(0, Math.min(pages - 1, healthPage));
-  const slice = healthRows.slice(healthPage * HEALTH_PAGE, (healthPage + 1) * HEALTH_PAGE);
-  box.innerHTML = slice.length
-    ? slice.map((f, i) => healthCard(f, healthPage * HEALTH_PAGE + i)).join("") +
+  const pages = Math.max(1, Math.ceil(healthTotal / HEALTH_PAGE));
+  const start = healthPage * HEALTH_PAGE;
+  box.innerHTML = healthRows.length
+    ? healthRows.map((f, i) => healthCard(f, start + i)).join("") +
       '<div class="pager"><button data-hpage="prev">上一页</button>' +
       "<small>" + (healthPage + 1) + " / " + pages + "</small>" +
       '<button data-hpage="next">下一页</button></div>'
@@ -967,15 +970,12 @@ function paintHealth() {
   $$("#healthList [data-hidx]").forEach((e) => {
     e.onclick = (ev) => {
       if (ev.target.closest("button")) return;
-      const row = healthRows[Number(e.dataset.hidx)];
+      const row = healthRows[Number(e.dataset.hidx) - start];
       if (row) guard(() => openFact(row));
     };
   });
   $$("#healthList [data-hpage]").forEach((e) => {
-    e.onclick = () => {
-      healthPage += e.dataset.hpage === "next" ? 1 : -1;
-      paintHealth();
-    };
+    e.onclick = () => guard(() => loadHealth(healthPage + (e.dataset.hpage === "next" ? 1 : -1)));
   });
 }
 

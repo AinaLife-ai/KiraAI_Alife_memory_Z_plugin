@@ -44,6 +44,7 @@ from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime, source_roots
 from .retrieval import (
+    strip_at_ids,
     CATEGORY_RANK,
     archives_flat,
     FACT_VIEW_GROUPED,
@@ -835,7 +836,7 @@ class AlifeMemoryPlugin(BasePlugin):
         思考块，那是他说过的话），但发给模型的内容不该带任何内部推理——
         即使存量清理没跑到，模型也不会被思考块污染。
         """
-        return trim_nested(clean_text(strip_reasoning(text), keep), reply_chars, desc_chars)
+        return strip_at_ids(trim_nested(clean_text(strip_reasoning(text), keep), reply_chars, desc_chars))
 
     def _mark_access(self, ids):
         """注入即算「被使用」一次；同一小时内同一只记一次，避免每轮都写库。"""
@@ -3518,13 +3519,17 @@ class AlifeMemoryPlugin(BasePlugin):
         return {**rows[0], "versions": versions}
 
     @register.api(method="GET", path="/fact_health", auth=True)
-    async def api_fact_health(self):
+    async def api_fact_health(self, offset: int = 0):
+        if offset < 0:
+            raise HTTPException(422, "invalid fact_health query")
         """事实体检：按分数从低到高列出，标明"是否该下沉"及**为什么** ✓（只读 ✓）"""
         # ⚠️ 用 getattr 兜底：用户配置里可能**还没有**这个新字段（面板没存过 ✓）
         #   否则这里 AttributeError ⇒ 接口 500 ⇒ 前端就报 "
         #   Cannot read properties of undefined (reading '0')" ✗（用户实测 ✓）
         _thr = int(getattr(self.settings, "fact_sink_threshold", 12) or 12)
-        return await self.store.call("fact_health", _thr)
+        # ⚠️ 服务端分页：每页只回 50 行（原来一次 300 行 = 189.5 KB ✗ 用户实测"加载太久"）
+        #    位置参数与 storage.fact_health(threshold, now, limit, offset) 对应 ✓
+        return await self.store.call("fact_health", _thr, None, 50, offset)
 
     @register.api(method="GET", path="/facts", auth=True)
     async def api_facts(

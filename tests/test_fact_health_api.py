@@ -82,3 +82,18 @@ def test_fact_health_sorted_by_score(tmp_path):
     assert scores == sorted(scores), "必须分数低的在前（最该处理的先看到）：%r" % (scores,)
     assert rows[0]["id"] == "low"
     assert any(r["never_sink"] for r in rows), "重要度 9 必须标成永不沉"
+
+
+def test_fact_health_server_side_paging(tmp_path):
+    """★ 用户实测"加载太久"的修复：服务端分页（一次只回 50 行，count 给总数）✓"""
+    st = _store(tmp_path)
+    for i in range(120):
+        _insert(st, id="f%03d" % i, importance=1 + i % 10, created=time.time() - i)
+    first = st.fact_health()
+    assert first["count"] == 120, "count 必须是**总数**（前端翻页器要用）：%r" % first["count"]
+    assert len(first["rows"]) == 50, "一页只回 50 行（原来 300 行 = 189.5 KB ✗）"
+    assert first["offset"] == 0
+    second = st.fact_health(offset=50)
+    assert second["count"] == 120 and second["offset"] == 50
+    assert len(second["rows"]) == 50
+    assert {r["id"] for r in first["rows"]} & {r["id"] for r in second["rows"]} == set(), "两页不许重叠"
