@@ -1176,3 +1176,85 @@ class ManualJobsStayVisibleCase(unittest.TestCase):
             temp.cleanup()
         finally:
             loop.close()
+
+
+class JobLogNoiseCase(unittest.TestCase):
+    """后台任务的日志噪音分界 ✓（2026-09-18 用户实测："待压缩扫描说 3 个有内容，
+    结果 3 个任务全说没有需要压缩的内容" ✗ 而且这行**开始时**就打出来了 ✓）
+
+    · **自动 + 空转** ⇒ **一行都不打** ✓（"开始"行开始时打了就收不回 ✗ ⇒ 干脆不打 ✓）
+    · **自动 + 真干活** ⇒ 打"完成"行 ✓
+    · **手动** ⇒ 保留"开始"行 ✓（用户点了在等 ✓ 需要即时反馈 ✓）
+    """
+
+    def _mk(self, sid, rows=1, age_days=5):
+        temp = tempfile.TemporaryDirectory()
+        st = s.Store(Path(temp.name) / "db")
+        st.initialize()
+        now = time.time()
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            for i in range(rows):
+                t = now - 86400 * age_days - i * 60
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold) "
+                    "VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("r%d" % i, sid, ("user", "assistant")[i % 2], t, t, "对话 %d" % i,
+                     "对话 %d" % i, json.dumps(["u-1"]), i + 1, now, "session"))
+            db.commit()
+        return temp, st
+
+    def _run(self, st, automatic):
+        import logging
+        lines = []
+        handler = logging.Handler()
+        handler.emit = lambda rec: lines.append(rec.getMessage())
+        # ⚠️ 必须挂到**插件自己的 logger** 上 ✗✓ —— 它未必向 root 传播
+        #（2026-09-18 实测：KIRA_CORE 环境下 root 抓不到 ✓ 日志其实打出来了 ✓）
+        targets = [logging.getLogger(), logging.getLogger("alife_memory_z")]
+        old_levels = [(lg, lg.level) for lg in targets]
+        for lg in targets:
+            lg.addHandler(handler)
+            lg.setLevel(logging.INFO)
+        loop = asyncio.new_event_loop()
+
+        async def model(*a, **k):
+            return json.dumps({"summary": "s", "facts": []})
+
+        async def flow():
+            eng = e.Engine(st, lambda: c.Settings(), model, None, None)
+            st.enqueue("compress", "qq:gm:1", "", automatic)
+            await eng.start()
+            await asyncio.sleep(2.5)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+            for lg, lvl in old_levels:
+                lg.removeHandler(handler)
+                lg.setLevel(lvl)
+        return [l for l in lines if "分层压缩" in l or "没有需要压缩" in l]
+
+    def test_automatic_noop_prints_nothing(self):
+        # ⚠️ 必须用**新鲜且不足轮**的数据 ✓（5 天前 + 1 条会走 B4 真压 ✗ 那就不是空转了 ✓）
+        temp, st = self._mk("qq:gm:1", rows=1, age_days=0)
+        try:
+            self.assertEqual(self._run(st, True), [], "自动空转任务不该打任何日志 ✗")
+            with st.connect() as db:
+                n = db.execute("SELECT count(*) FROM jobs WHERE kind='compress'").fetchone()[0]
+            self.assertEqual(n, 0, "自动空转任务不该留在工作台 ✗")
+        finally:
+            temp.cleanup()
+
+    def test_manual_noop_logs_start_and_finish(self):
+        temp, st = self._mk("qq:gm:1", rows=1, age_days=0)
+        try:
+            lines = self._run(st, False)
+            self.assertTrue(any("开始后台任务" in l for l in lines),
+                            "手动任务必须有「开始」行 ✓（用户点了在等 ✓）")
+            self.assertTrue(any("没有需要压缩的内容" in l for l in lines),
+                            "手动任务的结果必须可见 ✓")
+        finally:
+            temp.cleanup()

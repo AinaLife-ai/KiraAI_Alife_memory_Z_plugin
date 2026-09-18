@@ -2007,11 +2007,16 @@ class Engine:
                 continue
             started = time.monotonic()
             job_started = time.time()
-            logger.info(
-                "[记忆·Z] 开始后台任务 %s · %s",
-                JOB_LABELS.get(job["kind"], job["kind"]),
-                await self.store.call("short_id", job["id"]),
-            )
+            # ⚠️ **自动任务不打"开始"行** ✗✓（2026-09-18 用户实测：空转的自动任务只剩这一行刷屏 ✓）
+            # 原因：**开始时还不知道会不会空转** ✗ ⇒ 打了就收不回 ✓
+            # ⇒ 自动任务只在**完成**时打一行：真干活可见 ✓ 空转被静默规则删掉 ✓✓
+            # ⇒ 手动任务保留"开始"行 ✓（用户点了在等，需要立即反馈 ✓）
+            if not job.get("automatic"):
+                logger.info(
+                    "[记忆·Z] 开始后台任务 %s · %s",
+                    JOB_LABELS.get(job["kind"], job["kind"]),
+                    await self.store.call("short_id", job["id"]),
+                )
             detail = ""
             try:
                 if job["kind"] == "compress":
