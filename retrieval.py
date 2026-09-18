@@ -871,7 +871,7 @@ def _grouped_row(fact, codes, current_sid, self_id=""):
     return row
 
 
-def bot_facts_grouped(facts, current_sid="", codes=None, self_id=""):
+def bot_facts_grouped(facts, current_sid="", codes=None, self_id="", links=None):
     """按主体分组渲染事实（v2.17.0 默认视图）。
 
     形如::
@@ -890,7 +890,10 @@ def bot_facts_grouped(facts, current_sid="", codes=None, self_id=""):
         subject = str(fact.get("subject") or "")
         if not subject:
             continue
-        key = codes.get(subject, subject)
+        # 身份绑定（批次 3）：先把写法归一到规范键 ✓ 同一人不再分成两组 ✓
+        #   `links` 由后端一处算好（含结构化归一 + 人工绑定）✓ 这里只查表 ✓
+        _base = codes.get(subject, subject)
+        key = (links or {}).get(_base, _base)
         groups.setdefault(key, []).append((CATEGORY_RANK.get(fact.get("category") or "", 99), _grouped_row(fact, codes, current_sid, self_id=self_id)))
         ranks[key] = min(ranks.get(key, 99), CATEGORY_RANK.get(fact.get("category") or "", 99))
     out = {}
@@ -971,12 +974,13 @@ def self_only_last(facts, self_id=""):
     return others + selves
 
 
-def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None, self_id=""):
+def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None,
+               self_id="", links=None):
     facts = self_only_last(facts, self_id)      # ★ 自述降序（不删不藏）✓
     """事实渲染入口：grouped=分组视图（默认 ✓）/ flat=旧的扁平视图（逐字节不变 ✓）。"""
     if view == FACT_VIEW_FLAT:
         return bot_facts(facts, current_sid, short=short, self_id=self_id)
-    return bot_facts_grouped(facts, current_sid, codes=codes, self_id=self_id)
+    return bot_facts_grouped(facts, current_sid, codes=codes, links=links, self_id=self_id)
 
 
 def short_names(names, codes):

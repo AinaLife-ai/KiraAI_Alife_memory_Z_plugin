@@ -2142,3 +2142,39 @@ class IdentityInferenceCase(unittest.TestCase):
         rep2 = self.store.infer_links(self_id=self.SELF)
         self.assertEqual(rep2["added"], 0, "重复跑不该重复加 ✓")
         self.assertGreaterEqual(rep2["skipped"], 1)
+
+
+class IdentityGroupingCase(unittest.TestCase):
+    """事实分组要按**规范键** ✓（2026-09-18 批次 3 第四步）
+
+    同一人的不同写法（名字「周武」与 `qq:7696`）在简报里应当**合成一组** ✓
+    ⚠️ 没绑定 ⇒ 行为与改造前**完全一致**（两组）✓ —— 这就是"失败/未接线也安全" ✓
+    """
+
+    def _facts(self):
+        return [
+            {"id": "f1", "sid": "s", "subject": "周武", "category": "profile",
+             "content": "爱喝美式", "importance": 6, "created": time.time()},
+            {"id": "f2", "sid": "s", "subject": "qq:7696", "category": "profile",
+             "content": "养了只猫", "importance": 6, "created": time.time()},
+        ]
+
+    def _group_count(self, links):
+        packed = r.pack_facts(self._facts(), current_sid="s", view="grouped",
+                              codes={}, self_id="qq:9", links=links)
+        return len(packed or {})
+
+    def test_bound_subjects_share_one_group(self):
+        self.assertEqual(self._group_count({"周武": "qq:7696"}), 1,
+                         "绑定之后同一人应当合成一组 ✓")
+
+    def test_unbound_keeps_original_behavior(self):
+        self.assertEqual(self._group_count(None), 2, "没绑定 ⇒ 与改造前一致（两组）✓")
+        self.assertEqual(self._group_count({}), 2, "空映射 ⇒ 同上 ✓")
+
+    def test_content_not_lost(self):
+        packed = r.pack_facts(self._facts(), current_sid="s", view="grouped",
+                             codes={}, self_id="qq:9", links={"周武": "qq:7696"})
+        text = json.dumps(packed, ensure_ascii=False)
+        self.assertIn("爱喝美式", text)
+        self.assertIn("养了只猫", text)

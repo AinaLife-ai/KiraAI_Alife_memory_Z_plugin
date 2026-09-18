@@ -526,6 +526,10 @@ class AlifeMemoryPlugin(BasePlugin):
         if data_dir is None:
             raise RuntimeError("KiraAI did not associate plugin data directory")
         self.store = Store(Path(data_dir) / "alife-v2.sqlite3")
+        # 身份绑定映射的**短缓存** ✓（2026-09-18 批次 3 ✓ 60 秒 TTL ✓）
+        #   `identity_map()` 要扫实体表与事实主体 ✓ 不该每条消息都跑 ✓
+        self._links_cache = {}
+        self._links_at = 0.0
         await self.store.call("initialize")
         try:
             # v2.13.0 之前拼接出来的事实没有待重做标记，这里回填一次（幂等）
@@ -932,6 +936,23 @@ class AlifeMemoryPlugin(BasePlugin):
         for owner in sorted(owners):
             await self.engine.enqueue("tidy", owner, automatic=automatic, detail=detail)
         return sorted(owners)
+
+    async def identity_links(self):
+        """身份绑定映射（raw → 规范键）✓ **60 秒缓存** ✓
+
+        只用于"显示 / 归类" ✓ —— 慢一点没关系 ✓ 变旧一点也没关系 ✓
+        ⇒ 所以缓存是安全的 ✓；**失败就当作没有绑定** ✓（显示与改造前完全一致 ✓）
+        """
+        now = time.time()
+        if self._links_cache and now - self._links_at < 60:
+            return self._links_cache
+        try:
+            self._links_cache = await self.store.call("identity_map") or {}
+        except Exception:
+            logger.debug("[记忆·Z] 身份映射读取失败（按未绑定处理）", exc_info=True)
+            self._links_cache = {}
+        self._links_at = now
+        return self._links_cache
 
     async def queue_compress_all(self, limit=2):
         """排"该压但还没压"的会话 ✓（**确定性**兜底 ✓ 不看骰子 ✓）
@@ -1655,6 +1676,7 @@ class AlifeMemoryPlugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def on_request(self, event, req: LLMRequest, *_):
+        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         cfg = self.runtime_settings()
         if not cfg.enabled:
             return
@@ -2041,6 +2063,7 @@ class AlifeMemoryPlugin(BasePlugin):
             codes=fact_shorts,
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
+            links=_links,
         ),
         }
         if users:
@@ -2744,6 +2767,7 @@ class AlifeMemoryPlugin(BasePlugin):
             return dump({"ok": False, "error": "not_accessible_or_not_permanent"})
 
     async def overview(self, event, subject="", offset=0):
+        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         if not self.runtime_settings().enabled:
             return self.recall_result(event, {"ok": False, "error": "memory_paused"})
         if type(offset) != int or offset < 0:
@@ -2786,6 +2810,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     ),
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
+                    links=_links,
                 ),
                 "next_offset": offset + len(rows),
             },
