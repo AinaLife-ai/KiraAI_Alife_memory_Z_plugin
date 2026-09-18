@@ -1917,3 +1917,72 @@ class TidyAuditContractCase(unittest.TestCase):
             ("与用户冲突以用户为准", "提取的冲突规则 ✓"),
         ):
             self.assertIn(needle, src, "tidy/audit 的关键约定消失了 ✗：%s" % why)
+
+
+class EntityLinksCleanupCase(unittest.TestCase):
+    """老库里的废弃 `entity_links` 表**要清掉**，但不能误伤 ✓（用户要求："不会误伤、安全即可"）
+
+    背景：身份绑定功能已整体摘除（判据站不住 ✗ 用户决定不要 ✓）
+    ⇒ 老库里会留下这张表（只剩死数据 ✓ 没有任何代码读它 ✓）⇒ 升级时清掉 ✓
+    四道保险：① 不存在就不动 ✓ ② **列结构一致才删** ✓ ③ try/except 不炸启动 ✓ ④ 只动这一张表 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "db"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _tables(self, store):
+        with store.connect() as c:
+            return {
+                r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+
+    def test_废弃表被清掉(self):
+        st = s.Store(self.db)
+        st.initialize()
+        with st.connect() as c:
+            c.execute(
+                "CREATE TABLE entity_links (raw TEXT PRIMARY KEY, canonical TEXT NOT NULL,"
+                " source TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL)"
+            )
+            c.execute("INSERT INTO entity_links VALUES('周武','qq:1','manual','',1.0)")
+            c.commit()
+        s.Store(self.db).initialize()
+        self.assertNotIn("entity_links", self._tables(st), "废弃表没被清掉 ✗")
+
+    def test_同名但列不同不许动(self):
+        """**误伤保护** ✓：万一以后有别的表叫这名 ⇒ 绝不 DROP ✗"""
+        st = s.Store(self.db)
+        st.initialize()
+        with st.connect() as c:
+            c.execute("CREATE TABLE entity_links (other TEXT)")
+            c.execute("INSERT INTO entity_links VALUES('keepme')")
+            c.commit()
+        s.Store(self.db).initialize()
+        with st.connect() as c:
+            rows = c.execute("SELECT other FROM entity_links").fetchall()
+        self.assertEqual([r[0] for r in rows], ["keepme"],
+                         "同名不同列的表被误删了 ✗（这就是『误伤』✓）")
+
+    def test_数据不受影响(self):
+        st = s.Store(self.db)
+        st.initialize()
+        with st.connect() as c:
+            st._ensure_entities(c, "qq:gm:1", ["周武"])
+            st._add_fact(c, "qq:gm:1", {"category": "profile", "subject": "周武",
+                                        "content": "爱喝美式", "reason": "t", "scenario": "",
+                                        "relations": [], "tags": [], "source_ids": [],
+                                        "importance": 7})
+            c.execute(
+                "CREATE TABLE entity_links (raw TEXT PRIMARY KEY, canonical TEXT NOT NULL,"
+                " source TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL)"
+            )
+            c.commit()
+        s.Store(self.db).initialize()
+        self.assertEqual(len(st.facts("qq:gm:1", limit=10)), 1, "清表影响了事实 ✗")
+        self.assertGreaterEqual(len(self._tables(st)), 5, "其它表被误删 ✗")

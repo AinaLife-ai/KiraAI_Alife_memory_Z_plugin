@@ -306,6 +306,29 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS record_probe ON records("
                 "sid, active, deleted, permanent, end)"
             )
+
+            # ★ 2026-09-18：清理「身份绑定」撤除后**留在老库里的废弃表** ✓
+            #   该功能已整体摘除（判据站不住 ✗ 用户决定不要 ✓）⇒ 表里只剩死数据 ✓
+            #   用户要求："不会误伤、安全即可" ✓ ⇒ **四道保险**：
+            #     ① 表不存在 ⇒ 什么都不做 ✓（新库/已清过 ⇒ 幂等 ✓）
+            #     ② **列结构必须与当年创建的一模一样**才删 ✓
+            #        （万一以后有别的表叫这名 ✗ ⇒ **跳过**并只记一行 warning ✓）
+            #     ③ 全程 try/except ⇒ **绝不影响启动** ✓
+            #     ④ 只 DROP 这一张表 ✓ 不碰任何其它表/数据 ✓
+            try:
+                cols = [r[1] for r in db.execute("PRAGMA table_info(entity_links)")]
+                if cols:
+                    if cols == ["raw", "canonical", "source", "evidence", "created"]:
+                        db.execute("DROP TABLE entity_links")
+                        logger.info(
+                            "[记忆·Z] 已清理废弃的 entity_links 表（身份绑定功能已撤除 ✓）"
+                        )
+                    else:
+                        logger.warning(
+                            "[记忆·Z] 同名表 entity_links 列结构不符（%s）⇒ 跳过不动 ✓", cols
+                        )
+            except Exception:
+                logger.debug("[记忆·Z] 清理废弃表失败（已忽略 ✓）", exc_info=True)
             _jcols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
             if "automatic" not in _jcols:
                 # 给旧库补列 ✓（默认 0 = 手动 ⇒ 老任务照旧显示 ✓ 不改变历史行为 ✓）
