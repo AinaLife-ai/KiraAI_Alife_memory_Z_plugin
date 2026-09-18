@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import random
 import json
 import re
 import sys
@@ -1457,3 +1458,200 @@ class NoOpDoesNotBurnBoostCase(unittest.TestCase):
             boost_allowed=e._boost_ok(self.SID, self.cfg, stamp=False),
         )
         self.assertIsNotNone(again, "空转把资格吃掉后，群里安静了也降不了门槛 ✗")
+
+
+class CompressProbeSoundnessCase(unittest.TestCase):
+    """压缩预检必须**绝不误杀** ✓（2026-09-18 性能审计 ✓）
+
+    背景：`active(sid)` 要把整表可用行搬进 Python ✓（3000 条 ≈ 65 ms ✓），
+    而"这条消息要不要排压缩任务"只要 3 个数 ✓ ⇒ 加了 `compress_probe` 预检 ✓
+    风险：预检的口径一旦与 `compression_plan` 不同（尤其"陈旧/闲置用全部行 ✓
+    而候选集只用非永久行" ✓）就会**误杀**真正该压的会话 ✓
+    ⇒ 本测试用**真实 store** 随机造场景对拍 ✓（口径天然一致 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.cfg = c.Settings()
+        self.rnd = random.Random(20260918)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _build(self, sid, now):
+        """随机造一个会话：条数/时间跨度/永久记忆比例/**层级**都随机 ✓
+
+        ⚠️ 2026-09-18：第一版**只造 level=0** ✗ ⇒ 漏掉了"上层摘要分支门槛只有 4" ✓
+        ⇒ 预检误杀 5 条上层摘要的会话却全绿 ✓ 现在必须覆盖 level>0 ✓
+        """
+        n = self.rnd.choice([0, 1, 2, 3, 5, 12, 13, 25])
+        level = self.rnd.choice([0, 1, 2])          # ★ 关键补强 ✓
+        newest_off = self.rnd.choice([30, 3600, 6 * 3600 + 60, 86400, 5 * 86400])
+        span = self.rnd.choice([0, 3600, 86400, 5 * 86400])
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(n):
+                off = newest_off + (span * i / max(1, n - 1) if n > 1 else 0)
+                t = now - off
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,0)",
+                    ("%s-%d" % (sid, i), sid, ("user", "assistant")[i % 2], level, t, t,
+                     "摘要", "内容", json.dumps(["u-1"]), i + 1, now, "session",
+                     1 if self.rnd.random() < 0.3 else 0),
+                )
+            db.commit()
+
+    def test_probe_never_rejects_what_plan_accepts(self):
+        now = time.time()
+        rejected = 0
+        accepted_by_probe = 0
+        for case in range(120):
+            sid = "s:%d" % case
+            self._build(sid, now)
+            boost = self.rnd.choice([True, False])
+            _thr = self.rnd.choice([10, 50, 200])
+            cfg = c.Settings(
+                compress_batch_mode=self.rnd.choice(["rounds", "records"]),
+                compress_rounds=self.rnd.choice([1, 12, 30]),
+                threshold=_thr,
+                batch_size=min(40, _thr - 1),     # 契约：batch_size 必须小于 threshold ✓
+            )
+            rows = self.store.active(sid)
+            plan = e.compression_plan(rows, cfg, now=now, boost_allowed=boost)
+            probe = self.store.compress_probe(sid)
+            worth = e.worth_checking_probe(probe, cfg, now=now, boost_allowed=boost)
+            if worth:
+                accepted_by_probe += 1
+            if not worth:
+                self.assertIsNone(
+                    plan,
+                    "预检误杀 ✗：probe=%s 但 plan 非空（case %d, boost=%s, 行数=%d,"
+                    " mode=%s rounds=%s threshold=%s）"
+                    % (probe, case, boost, len(rows), cfg.compress_batch_mode,
+                       cfg.compress_rounds, cfg.threshold),
+                )
+                rejected += 1
+        # 上面每条 assert 已经证明"被否掉的 case 计划都是空的" ✓（102 例命中过 ✓）
+        self.assertGreater(rejected, 0, "没有 case 被否掉 ⇒ 优化没生效 ✓ 测试白跑 ✓")
+        self.assertGreater(accepted_by_probe, 0, "预检把什么都否了 ✓ 那等于没优化 ✓")
+
+    def test_probe_matches_store_semantics(self):
+        """口径钉死：行数只数非永久 ✓；时间用**全部可用行** ✓"""
+        now = time.time()
+        sid = "s:fixed"
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i, (perm, off) in enumerate([(1, 10 * 86400), (0, 5 * 86400)]):
+                t = now - off
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,?,0)",
+                    ("fx-%d" % i, sid, "user", t, t, "s", "c", json.dumps(["u-1"]),
+                     i + 1, now, "session", perm),
+                )
+            db.commit()
+        count, upper, oldest, newest = self.store.compress_probe(sid)
+        self.assertEqual(count, 1, "行数必须只数**非永久** ✓（候选集口径 ✓）")
+        self.assertAlmostEqual(oldest, now - 10 * 86400, delta=2,
+                               msg="时间必须用**全部可用行** ✓ —— 只取非永久会把"
+                                   "「永久记忆 + 一条旧记录」的会话误杀 ✗")
+        self.assertAlmostEqual(newest, now - 5 * 86400, delta=2)
+
+
+class ActiveCacheCase(unittest.TestCase):
+    """`active(sid)` 的短 TTL 缓存必须**写入即失效** ✓（2026-09-18 性能审计 ✓）
+
+    实测（3000 条记录的群）：`active(sid)` 要 ~65 ms，而**同一条消息**里
+    `on_request` 开头与回复后的压缩闸各要一次 ⇒ 每轮白付 ~130 ms ✓（关键路径 ✓）
+    ⇒ 加缓存 ✓ 但缓存最大的风险是**读到过期数据** ✗
+    ⇒ 失效判据用 `connect()` 的 `total_changes`（任何写路径都覆盖 ✓ 不靠人工登记 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.sid = "s:cache"
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, self.sid, ["u-1"])
+            for i in range(20):
+                t = time.time()
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("c-%d" % i, self.sid, "user", t, t, "s", "c",
+                     json.dumps(["u-1"]), i + 1, t, "session"),
+                )
+            db.commit()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_read_populates_and_reads_do_not_clear(self):
+        self.store.active(self.sid)
+        self.assertEqual(len(self.store._active_cache), 1, "读一次应当填充缓存 ✓")
+        before = self.store._active_cache[self.sid][1]
+        again = self.store.active(self.sid)
+        self.assertEqual(len(self.store._active_cache), 1, "纯读不该清缓存 ✓")
+        self.assertIs(self.store._active_cache[self.sid][1], before, "应当命中同一份行 ✓")
+        self.assertEqual(len(again), 20)
+
+    def test_write_invalidates_immediately(self):
+        self.store.active(self.sid)
+        self.assertTrue(self.store._active_cache, "前置：缓存应当已填充 ✓")
+        with self.store.connect() as db:                       # 直接写库 ✓
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted,permanent,cold)"
+                " VALUES('cX',?,'user',0,1,1,'s','c',?,'99',1,'session',1,0,0,0)",
+                (self.sid, json.dumps(["u-1"])),
+            )
+        self.assertEqual(self.store._active_cache, {},
+                         "写入后没失效 ✗ ⇒ 会读到过期行 ✓（实测过：行数停在 20 ✓）")
+        self.assertEqual(len(self.store.active(self.sid)), 21, "必须读到新写入的行 ✓")
+
+    def test_other_write_paths_also_invalidate(self):
+        self.store.active(self.sid)
+        self.store.touch_accessed(["c-0"])                     # 另一个写方法 ✓
+        self.assertEqual(self.store._active_cache, {},
+                         "其它写路径也要能失效 ✗（靠 total_changes ✓ 不该漏 ✓）")
+
+
+class ScanDedupCase(unittest.TestCase):
+    """扫描不该把"已在排队"的会话重复计数/重复入队 ✓（2026-09-18 用户日志 ✓）
+
+    现象：启动扫描与迁移后扫描相隔 2 秒 ✓ 日志里**同两行出现两遍**
+    「待压缩扫描：2 个会话…本次排 2 个」✗（用户实测 ✓）
+    根因：扫描每轮都重新判所有会话 ✓ 已有排队任务的会话也被算进 pending ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_only_queued_or_running_counts_as_active(self):
+        self.assertFalse(self.store.has_active_job("compress", "s:1"), "没有任务 ⇒ False ✓")
+        jid = self.store.enqueue("compress", "s:1", "", True)
+        self.assertTrue(self.store.has_active_job("compress", "s:1"), "排队中 ⇒ True ✓")
+        self.store.finish(jid, "completed", "压缩 3 条 → L1")
+        self.assertFalse(self.store.has_active_job("compress", "s:1"), "已完成 ⇒ False ✓")
+        self.assertFalse(self.store.has_active_job("tidy", "s:1"), "不同 kind 互不影响 ✓")
+
+    def test_second_scan_does_not_recount(self):
+        """端到端：同一会话连排两次 ⇒ 只有一行任务 ✓（计数不会重复 ✓）"""
+        for _ in range(2):
+            if not self.store.has_active_job("compress", "s:2"):
+                self.store.enqueue("compress", "s:2", "", True)
+        with self.store.connect() as db:
+            n = db.execute("SELECT count(*) FROM jobs WHERE kind='compress' AND sid='s:2'").fetchone()[0]
+        self.assertEqual(n, 1, "同一会话同时只该有一行压缩任务 ✓")
