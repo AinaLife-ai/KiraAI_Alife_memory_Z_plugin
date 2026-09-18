@@ -755,14 +755,14 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
     def test_queue_tidy_all_accepts_automatic_flag(self):
         import inspect
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
-        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True)", src)
-        self.assertIn('enqueue("tidy", owner, automatic=automatic)', src)
+        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True, force=False, ids=None)", src)
+        self.assertIn('enqueue("tidy", owner, automatic=automatic', src)
 
     def test_bot_and_workbench_call_it_as_manual(self):
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
         code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
-        self.assertIn("automatic=False,  # bot 发起的", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
-        self.assertIn("automatic=False  # 工作台按钮", code, "工作台按钮没标成手动 ✗")
+        self.assertIn("automatic=False,", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
+        self.assertIn("automatic=False,        # 工作台按钮", code, "工作台按钮没标成手动 ✗")
         self.assertIn('enqueue("tidy", value.sid, automatic=False)', code,
                       "bot 写永久记忆后的整理没标成手动 ✗")
 
@@ -950,3 +950,46 @@ class ActiveBySessionEquivalenceCase(unittest.TestCase):
                 (now, now, "归档", "归档", "[]", 1, now, "session"))
             db.commit()
         self.assertNotIn("s:x", self.store.active_by_session(), "归档记录不该被带出来 ✗")
+
+
+class TidyForceWiringCase(unittest.TestCase):
+    """「无视冷却」必须真正传到引擎 ✓（2026-09-17 用户实测：三条链路都没生效 ✓）
+
+    实际故障：给 `queue_tidy_all` 加 `automatic` 时**把 `force` / `ids` 弄丢了** ✗
+    ⇒ bot 主动链路 + 工作台「全部重新整理」直接 **TypeError** ✗
+    ⇒ 而 `api_job` 又**没把** `value.force` 传下去 ✗ ⇒ 前端发的 force 被丢掉 ✓
+    ⇒ 用户看到的就成了"点全部重新整理也没有无视冷却" ✗
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_queue_tidy_all_accepts_force_and_ids(self):
+        code = self._code("main.py")
+        self.assertIn("force=False, ids=None", code,
+                      "queue_tidy_all 又丢了 force/ids ✗ ⇒ 调用方会 TypeError ✓")
+
+    def test_force_and_ids_go_into_job_detail(self):
+        code = self._code("main.py")
+        self.assertIn('"force": bool(force)', code, "force 没进任务 detail ✗（引擎就看不到 ✓）")
+        self.assertIn('"ids": list(ids or [])', code, "ids 没进任务 detail ✗")
+
+    def test_api_job_forwards_force(self):
+        code = self._code("main.py")
+        self.assertIn("force=value.force", code, "api_job 没把前端 force 传下去 ✗")
+        self.assertIn("ids=(value.ids or None)", code, "api_job 没把前端 ids 传下去 ✗")
+
+    def test_bot_path_forwards_force(self):
+        code = self._code("main.py")
+        self.assertIn("force=bool(force)", code, "bot 主动链路没传 force ✗")
+
+    def test_per_item_reextract_sends_force(self):
+        js = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("force: true", js, "单条「重新提取事实」没发 force ✗")
+
+    def test_engine_reads_force_from_detail(self):
+        code = self._code("engine.py")
+        self.assertIn('_force = bool(_d.get("force"))', code, "引擎没解析 force ✗")
+        self.assertIn("0 if force else cfg.permanent_tidy_days", code,
+                      "force 没被换成 0 天（=没无视冷却）✗")
