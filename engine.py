@@ -166,6 +166,16 @@ COMPACT_SCHEMAS = {
         '常见错误（会被拒）：action=merge 但 content 为空；source_ids 里没有要并掉的 id；\n'
         '编造不存在的 id。'
     ),
+    "dedupe": (
+        '返回 JSON（无 markdown、无额外字段）：\n'
+        '{"action": "keep|merge", "content": str?, "reason": str, "source_ids": [str]}\n'
+        '**只有这四个键** —— 不要回写输入里的 latest/records/names 等字段 ✗\n'
+        '必填：action、reason、source_ids（逐字复制输入 records[].id 的 d1/d2… 别名 ✓ 不要编 ✗）。\n'
+        'merge 时 content 必填（合并后那一条的正文，≤16000 字，简洁完整）；keep 时**不要**给 content。\n'
+        '上限：reason ≤60 字。字段白名单：只允许上面这些键，多任何一个都会被拒。\n'
+        '常见错误（会被拒）：编造不存在的 id（source_ids 必须在输入里出现过 ✓）；\n'
+        'action=merge 却不给 content；把**不该合并**的两条硬并（宁可 keep ✓ 合并不可逆 ✓）。'
+    ),
     "audit": (
         '返回 JSON（无 markdown、无额外字段）：\n'
         '{"actions": [{"action": "keep|correct|merge|retract", "target_id": str,\n'
@@ -1756,6 +1766,7 @@ class Engine:
                 await asyncio.sleep(1)
                 continue
             started = time.monotonic()
+            _wall = time.time()          # 墙钟 ✗ 给 queue_fact_merges 当 since 用（monotonic 不能比 ✓）
             try:
                 _force, _ids = False, None
                 _raw = (job.get("detail") or "").strip()
@@ -1770,6 +1781,11 @@ class Engine:
                 applied = await self.tidy_permanents(
                     job["sid"], job["id"], force=_force, ids=_ids
                 )
+                if applied:
+                    # ★ 整理会**提炼出事实**（extract/split ✓）⇒ 这些新事实要照常参与去重合并 ✓
+                    # 原来只 `add_facts` ✗ **没排合并** ⇒ 提炼出来的重复事实要等下一个触发点
+                    # （用户 2026-09-17 要求核查"提取永久记忆事实"链路 ✓ 这是缺口 ✓）
+                    await self.queue_fact_merges(job["sid"], _wall)
                 detail = (
                     "整理 %s 条永久记忆" % applied
                     if applied

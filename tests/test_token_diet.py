@@ -1053,3 +1053,32 @@ class TidyUnknownTargetCase(unittest.TestCase):
             self.eng.apply_tidy("s:1", cands, {"p1": "r1"}, {},
                                 {"items": [{"id": "zzz", "action": "archive", "reason": "x"}]}))
         self.assertEqual(applied, 0, "全是坏目标时应当**安静跳过**而不是抛错 ✗")
+
+
+class TidyExtractMergesCase(unittest.TestCase):
+    """整理**提炼出的事实**必须照常参与去重合并 ✓（2026-09-17 用户要求核查 ✓）
+
+    缺口：`apply_tidy` 提炼事实后只 `add_facts` ✗ 没排合并 ✗
+    ⇒ 提炼出来的重复事实要一直等下一个触发点（压缩/分类/召回 ✓）才可能被并 ✓
+    ⇒ 对照：compress 的 job 包装层是会排的（`queue_fact_merges(sid, started_at)` ✓）
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_tidy_worker_queues_merges_after_extract(self):
+        code = self._code("engine.py")
+        self.assertIn('await self.queue_fact_merges(job["sid"], _wall)', code,
+                      "整理提炼出的事实没排合并 ✗（重复事实会一直躺着 ✓）")
+
+    def test_uses_wall_clock_not_monotonic(self):
+        """`since` 必须是**墙钟** ✗ —— monotonic 与事实的 created 不同源 ✓"""
+        code = self._code("engine.py")
+        self.assertIn("_wall = time.time()", code, "没取墙钟 ⇒ since 不可比 ✓")
+
+    def test_compact_schemas_cover_tidy_and_dedupe(self):
+        """两条**模型必经**的输出都要有紧凑声明 ✓（否则每次多带完整 schema ✓）"""
+        code = self._code("engine.py")
+        for purpose in ('"tidy"', '"dedupe"'):
+            self.assertIn(purpose + ":", code, "COMPACT_SCHEMAS 缺 %s ✗" % purpose)
