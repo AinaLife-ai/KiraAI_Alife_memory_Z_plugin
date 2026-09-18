@@ -696,7 +696,10 @@ class Engine:
         self.last_audit = 0.0
         self.last_dedupe = 0.0
         # 主动感知：首轮要等一个完整间隔，避免每次重启都立刻主动一轮。
-        self.last_tidy_note = ""
+        # 整理结论**按会话**存放 ✓（原来是引擎级单变量 ✗ —— 两个会话的整理任务
+        # 是**并发**跑的 ✓ 后跑的会覆盖前一个 ✓ 于是"标题说 A、正文是 B" ✓
+        # 用户 2026-09-18 点「全部重新整理」时同时起了两个任务 ⇒ 当场复现 ✓）
+        self.last_tidy_notes = {}
         self.proactive_due = None
         self.proactive_last = {}
         self.audit_day = ""
@@ -1610,6 +1613,18 @@ class Engine:
             )
         return done
 
+    def _note_tidy(self, sid, text):
+        """记下**某个会话**这一轮整理给出的说明 ✓（会被写进任务明细 ✓）
+
+        ⚠️ 2026-09-18 用户反馈："永久记忆整理"的明细里标题写着
+        "该会话还没有永久记忆" ✗ 正文却列出两条「保留」的永久记忆 ✓。
+        根因：原来是 `self.last_tidy_note` —— **引擎级单变量** ✗，
+        而 `tidy_worker` 是**并发**跑多个会话的 ✓，且在 `await` **之后**才读它 ✓
+        ⇒ 两个任务一起跑时**互相覆盖** ⇒ A 的结论显示到 B 的任务上 ✓（张冠李戴 ✓）
+        现改为**按 sid** 保存 ✓ —— 同一会话同时只会有 1 个整理任务 ✓（UNIQUE ✓）不会自撞 ✓
+        """
+        self.last_tidy_notes[sid] = text
+
     async def tidy_permanents(self, sid, job_id=None, force=False, ids=None):
         """整理永久记忆：逐条 keep / extract / archive / split（只归档不删除）✓
 
@@ -1627,7 +1642,7 @@ class Engine:
             now = time.time()
             last = self._tidy_forced_at.get(sid)
             if last is not None and now - last < 10:
-                self.last_tidy_note = "刚整理过（10 秒防抖），稍后再试"
+                self._note_tidy(sid, "刚整理过（10 秒防抖），稍后再试")
                 return 0
             self._tidy_forced_at[sid] = now
         live = await self.store.call("permanent_records", sid)
@@ -1635,7 +1650,7 @@ class Engine:
         # （注入侧/定时器超上限才排队）；被 Bot 或人手动叫起来的这一次，
         # 不管有没有超上限都要真的看一遍——否则会出现"日志说整理完成、其实什么都没做"。
         if not live:
-            self.last_tidy_note = "该会话还没有永久记忆"
+            self._note_tidy(sid, "该会话还没有永久记忆")
             return 0
         over_cap = len(live) > cfg.permanent_cap
         wanted = len(live) if over_cap else cfg.permanent_tidy_batch
@@ -1647,12 +1662,12 @@ class Engine:
             ids,
         )
         if not candidates:
-            self.last_tidy_note = (
+            self._note_tidy(sid, (
                 "指定的永久记忆不在可整理集合里，本次跳过" if ids else
                 "已强制整理过（无视 %d 天冷却），但没有任何可整理的条目" % cfg.permanent_tidy_days if force else
                 "%d 条永久记忆都在 %d 天整理间隔内，本次跳过"
                 % (len(live), cfg.permanent_tidy_days)
-            )
+            ))
             return 0
         candidates = candidates[:wanted]
         aliases = {"p%d" % (i + 1): row["id"] for i, row in enumerate(candidates)}
@@ -1755,9 +1770,9 @@ class Engine:
             await self.store.call("touch_tidy", touched)
         if skipped:
             # 让任务提示能说清"有几条被跳过了" ✓（否则用户只看到条数对不上 ✓）
-            self.last_tidy_note = "整理 %d 条永久记忆（另有 %d 条因目标不存在被跳过）" % (
+            self._note_tidy(sid, "整理 %d 条永久记忆（另有 %d 条因目标不存在被跳过）" % (
                 applied, skipped
-            )
+            ))
         return applied
 
     async def tidy_worker(self):
@@ -1783,7 +1798,7 @@ class Engine:
                         _force = bool(_d.get("force"))
                         _ids = _d.get("ids") or None
                     except Exception:
-                        self.last_tidy_note = "任务参数无法解析，已按默认（按冷却）执行"
+                        self._note_tidy(job["sid"], "任务参数无法解析，已按默认（按冷却）执行")
                 applied = await self.tidy_permanents(
                     job["sid"], job["id"], force=_force, ids=_ids
                 )
@@ -1795,7 +1810,8 @@ class Engine:
                 detail = (
                     "整理 %s 条永久记忆" % applied
                     if applied
-                    else (self.last_tidy_note or "本次没有需要调整的永久记忆")
+                    else (self.last_tidy_notes.get(job["sid"])
+                          or "本次没有需要调整的永久记忆")
                 )
                 await self.store.call("finish", job["id"], "completed", detail)
                 logger.info(

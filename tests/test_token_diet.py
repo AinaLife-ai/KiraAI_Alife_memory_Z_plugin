@@ -1044,7 +1044,7 @@ class TidyUnknownTargetCase(unittest.TestCase):
             act = dict(db.execute(
                 "SELECT id, active FROM records WHERE id IN ('r1','r2')").fetchall())
         self.assertEqual(act, {"r1": 0, "r2": 1}, "应用结果不对 ✗（r1 归档 ✓ r2 保持 ✓）")
-        self.assertIn("跳过", self.eng.last_tidy_note or "",
+        self.assertIn("跳过", self.eng.last_tidy_notes.get("s:1", "") or "",
                       "跳过条数应当体现在提示里 ✓（否则用户看到条数对不上 ✓）")
 
     def test_all_bad_ids_does_not_raise(self):
@@ -1308,3 +1308,56 @@ class EnqueueReopenCase(unittest.TestCase):
         for _ in range(3):
             out = self.store.enqueue("tidy", "s:4")
             self.assertTrue(out and isinstance(out, str), "enqueue 返回了无效 id ✗：%r" % out)
+
+
+class JobDetailHygieneCase(unittest.TestCase):
+    """任务「明细」不能张冠李戴 ✓（2026-09-18 用户截图反馈的两处 ✓）
+
+    ① 重开后**上一轮的 items 没清** ✗ ⇒ 明细里"这一轮的结论"配"上一轮的条目" ✓
+    ② 整理结论存在**引擎级单变量**里 ✗ ⇒ 两个会话并发整理时**互相覆盖** ✓
+       （用户点「全部重新整理」正好同时起两个任务 ✓ 当场复现 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_reopen_clears_previous_items(self):
+        """重开任务行必须清掉上一轮的 items ✓（否则明细会混两次运行 ✓）"""
+        jid = self.store.enqueue("tidy", "s:q1")
+        self.store.add_job_items(jid, [
+            {"kind": "fact", "target": "f:1", "action": "keep", "note": "", "before": ""},
+            {"kind": "fact", "target": "f:2", "action": "keep", "note": "", "before": ""},
+        ])
+        self.assertEqual(len(self.store.job_items(jid)), 2)
+        self.store.finish(jid, "completed", "整理 2 条永久记忆")
+        self.store.enqueue("tidy", "s:q1")                 # 重开 ✓
+        self.assertEqual(
+            self.store.job_items(jid), [],
+            "重开后仍留着上一轮的条目 ✗ ⇒ 明细会把上一轮条目配这一轮结论 ✓（用户截图 ✓）",
+        )
+
+    def test_tidy_note_is_per_session(self):
+        """整理结论必须**按会话**可取 ✓（旧版是引擎级单变量 ⇒ 并发时互相覆盖 ✓）"""
+        engine = e                                          # 本文件已导入的引擎模块 ✓
+        eng = object.__new__(engine.Engine)                 # 不走 __init__ ✓ 只验这条链路 ✓
+        eng.last_tidy_notes = {}
+        eng._note_tidy("s:A", "A 的结论")
+        eng._note_tidy("s:B", "B 的结论")
+        self.assertEqual(eng.last_tidy_notes.get("s:A"), "A 的结论",
+                         "A 的结论被 B 覆盖了 ✗ ⇒ 明细会张冠李戴 ✓")
+        self.assertEqual(eng.last_tidy_notes.get("s:B"), "B 的结论")
+
+    def test_source_no_shared_tidy_note(self):
+        """静态判据：不许再有引擎级单变量 `self.last_tidy_note` 的赋值 ✗"""
+        src = (Path(__file__).resolve().parent.parent / "engine.py").read_text(encoding="utf-8")
+        self.assertNotRegex(
+            src, r"self\.last_tidy_note\s*=",
+            "又出现引擎级单变量 last_tidy_note ✗ ⇒ 并发整理会互相覆盖 ✓",
+        )
+        self.assertIn('self.last_tidy_notes.get(job["sid"])', src,
+                      "任务的结论必须按**该任务的会话**取 ✓")

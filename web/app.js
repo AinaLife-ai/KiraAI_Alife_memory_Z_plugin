@@ -314,7 +314,7 @@ function tasksHtml(jobs) {
             esc(
               j.detail === "TimeoutError"
                 ? "旧任务超时：可减小批次、提高超时或更换模型后重新排队。"
-                : j.detail || date(j.created),
+                : humanDetail(j.detail) || date(j.created),
             ) +
             '</small></div><div class="actions"><button data-jobdetail="' +
             esc(j.id) +
@@ -369,6 +369,24 @@ function bindJobButtons() {
     }),
   );
 }
+// 任务的 detail 有两种形态：**运行中/排队中**是参数 JSON（force/ids ✓），
+// **跑完后**是人话结论 ✓。直接显示原始 JSON 对用户没意义 ✗
+// （2026-09-18 用户反馈：排队中的「永久记忆整理」卡片显示 {"force": true, "ids": []} ✓）
+function humanDetail(detail) {
+  if (!detail) return "";
+  if (detail[0] !== "{") return detail;      // 已经是人话 ✓ 原样用 ✓
+  try {
+    const d = JSON.parse(detail);
+    const bits = [];
+    if (d.force) bits.push("无视冷却");
+    if (Array.isArray(d.ids) && d.ids.length) bits.push("指定 " + d.ids.length + " 条");
+    if (d.reason) bits.push(String(d.reason));
+    return bits.length ? bits.join(" · ") + " · 排队中" : "排队中";
+  } catch (e) {
+    return detail;      // 解析不了就原样显示 ✓（宁可难看，也别把信息吞掉 ✓）
+  }
+}
+
 async function openJob(id) {
   if (!id) {
     // 防御：属性名写错时曾经发出 GET /job/undefined 这种请求，只会换来一个 404
@@ -381,7 +399,7 @@ async function openJob(id) {
   const job = data.job;
   $("#jobTitle").textContent = "任务明细 · " + (JOB_KINDS[job.kind] || job.kind);
   $("#jobMeta").textContent =
-    [job.sid, job.detail, date(job.created)].filter(Boolean).join(" · ");
+    [job.sid, humanDetail(job.detail), date(job.created)].filter(Boolean).join(" · ");
   const byTarget = {};
   data.items.forEach((item) => {
     if (item.fact) byTarget[item.fact.id] = item.fact.content;
