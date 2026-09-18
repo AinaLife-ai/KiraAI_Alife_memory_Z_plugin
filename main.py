@@ -2678,9 +2678,9 @@ class AlifeMemoryPlugin(BasePlugin):
             "include_content=true 读完整原文）；给 keyword/prompt/时间/层级 → 搜索，"
             "默认只返回本会话还没给过的新内容，可用 next_batch=true 继续找。"
             "默认连已归档的旧记忆一起搜；若设置里开了「检索默认只搜常驻」，则需 include_archived=true。"
-            "结果以紧凑文本给出（与注入的记忆同一种形态）：行首是短码（可回传给本工具或 CorrectMemory），"
-            "记号含 ★重要度、L 层号、bot（我自己说过的）、mem（永久记忆）、"
-            "arch（已归档）、@会话（跨会话）；expand=[序号] 或 allow_seen=true 可重看已给过的内容。"
+            "结果与注入的记忆**同一种紧凑文本**：行首是短码（可回传本工具或 CorrectMemory），"
+            "记号沿用注入那份说明（★重要度 / L 层级 / *永久 / @跨会话），"
+            "本工具另有 bot=我自己说过的、arch=已归档；expand=[序号] 或 allow_seen=true 可重看。"
         ),
         params={
             "type": "object",

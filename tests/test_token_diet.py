@@ -2533,7 +2533,7 @@ class ToolDescriptionComplianceCase(unittest.TestCase):
 
     def test_search_explains_marks(self):
         seg = self._desc("SearchMemoryArchive")
-        for mark in ("★", "L 层号", "bot", "mem", "arch", "@会话"):
+        for mark in ("同一种紧凑文本", "★重要度", "L 层级", "bot", "arch", "@跨会话"):
             self.assertIn(mark, seg, "搜索工具描述没解释输出记号 ✗：%s" % mark)
         self.assertIn("expand", seg, "描述要提到 expand ✓")
         self.assertIn("allow_seen", seg, "描述要提到 allow_seen ✓")
