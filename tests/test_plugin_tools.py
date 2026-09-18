@@ -91,17 +91,22 @@ async def test_search_returns_only_new_memories(tmp_path):
                 }
             ],
         )
-    first = json.loads(await plugin.search_archive(event, keyword="喵梓"))
-    assert len(first["items"]) == 3 and first["already_seen"] == 0
+    # 2026-09-18（用户要求）：召回返回改成**与被动侧同一种紧凑文本** ✓
+    #   ⇒ 断言从 json.loads 改成**文本形态** ✓（短码/记号仍在 ✓ 见 RecallTextKeepsIds）
+    first = await plugin.search_archive(event, keyword="喵梓")
+    assert first.startswith("【召回】"), first[:40]
+    assert "命中 3" in first and "关于喵梓的记忆0" in first and "关于喵梓的记忆2" in first
 
-    second = json.loads(await plugin.search_archive(event, keyword="喵梓"))
-    assert second["items"] == [] and second["already_seen"] == 3
-    assert "ReadMemoryArchive" in second["hint"]
+    second = await plugin.search_archive(event, keyword="喵梓")
+    assert "没有新的命中" in second and "已见过 3" in second
+    # 2026-09-18：这里原来断言 hint 里含 **ReadMemoryArchive** ✗ —— 那是**幽灵工具名** ✗
+    # （该工具从未注册 ✓ 真实名字是 SearchMemoryArchive ✓；test_tidy_29 里它本来就被列在"已删除"里 ✓）
+    # ⇒ 当年改名时漏改了这句 hint ✓ 现已修正 ⇒ 断言跟着改成真实工具名 ✓
+    assert "SearchMemoryArchive" in second
 
-    again = json.loads(
-        await plugin.search_archive(event, keyword="喵梓", allow_seen=True)
-    )
-    assert len(again["items"]) == 3
+    again = await plugin.search_archive(event, keyword="喵梓", allow_seen=True)
+    for i in range(3):
+        assert "关于喵梓的记忆%d" % i in again, "allow_seen 后三条都该回来 ✓"
 
 
 class _Sender:
@@ -157,8 +162,9 @@ async def test_memory_names_returns_lean_entities(tmp_path):
     plugin.engine = _Engine()
     store.observe_name("qq:1", "小明", kind="user", observed=1.0)
     store.observe_name("qq:1", "明哥", kind="user", observed=2.0)
-    out = json.loads(await plugin.memory_names(_event(), query="小明"))
-    entity = out["entities"][0]
-    assert set(entity) <= {"id", "kind", "name", "revision", "aliases", "lookup_id"}
-    assert entity["name"] == "明哥" and "小明" in entity["aliases"]
-    assert "identity_note" not in entity and "label" not in entity
+    out = await plugin.memory_names(_event(), query="小明")
+    assert out.startswith("【人物与群名】"), out[:40]
+    assert "qq:1=明哥" in out, "当前名字要在 ✓"
+    assert "小明" in out, "**曾用名**要带上 ✓（用户要求：真换过才给 ✓ 这里确实换过 ✓）"
+    for gone in ("identity_note", "label", "revision", "lookup_id", "observed", "history"):
+        assert gone not in out, "内部物不许出现在召回文本里 ✗：%s" % gone

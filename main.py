@@ -39,6 +39,7 @@ from .contracts import (
 )
 from . import identity
 from .engine import Engine, compression_plan
+from .identity import subject_variants
 from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
@@ -64,13 +65,15 @@ from .retrieval import (
     tool_call_summary,
     tool_preview,
     RecallWindow,
+    sink_filter,
+    media_only,
+    short_day,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
 
 PLUGIN_ID = "alife_memory_z"
 
-from .retrieval import media_only
 from .retrieval import recall_text   # v2.18.12：媒体判定统一放 retrieval ✓
 from .retrieval import _MEDIA_HEAD as _MEDIA_HEAD_PAT   # v2.18.18 绊线用同一份判据 ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
@@ -80,7 +83,7 @@ _GROUPED_FACT_DOC = (
     "记忆简报（alife_memory.m）的格式：\n"
     "  第 1 行是表头，形如【记忆·范围】会话｜主体码=名字。\n"
     "  常驻事实每行形如 <主体码> <类别码> <内容> ★重要度 <关系> <时间>，后三项可能缺。\n"
-    "  相关存档每行形如 <序号>|<角色>|<时间>|<说话人>|<内容>，角色 A=助手 U=用户。\n"
+    "  相关存档每行形如 <序号>|<角色>|<时间>|<说话人>|<内容>；角色 A=助手 U=用户，L 后数字=摘要层级（越高越概括），*=永久记忆，@=来自别的会话。\n"
     "  跨会话条目形如 - 内容　来自 会话，要核对来源会话。\n"
     "  结尾「另有 N 条未展示」表示还有没给你的，用 next_batch=true 继续找。\n"
     "下面是示例。\n"
@@ -516,6 +519,14 @@ class AlifeMemoryPlugin(BasePlugin):
         return changed
 
     async def initialize(self):
+        # ★ 2026-09-18：启动时**自报版本与加载目录** ✓
+        #   用户反馈"明明装了新版，日志却还是旧文案" ⇒ 绝大多数是**安装目录里是旧文件**
+        #   或"只同步了一部分文件"（manifest 新、main.py 旧 ◀ 这种最难发现 ✗）
+        #   有了这一行，就能直接对比"日志里的版本 vs 工作台显示的版本" ✓
+        logger.info(
+            "[记忆·Z] 启动中：版本 %s · 加载自 %s",
+            self._plugin_version() or "未知", Path(__file__).parent,
+        )
         try:
             await self.apply_config_migrations()
         except Exception:
@@ -525,6 +536,10 @@ class AlifeMemoryPlugin(BasePlugin):
         if data_dir is None:
             raise RuntimeError("KiraAI did not associate plugin data directory")
         self.store = Store(Path(data_dir) / "alife-v2.sqlite3")
+        # 身份绑定映射的**短缓存** ✓（2026-09-18 批次 3 ✓ 60 秒 TTL ✓）
+        #   `identity_map()` 要扫实体表与事实主体 ✓ 不该每条消息都跑 ✓
+        self._links_cache = {}
+        self._links_at = 0.0
         await self.store.call("initialize")
         try:
             # v2.13.0 之前拼接出来的事实没有待重做标记，这里回填一次（幂等）
@@ -932,6 +947,23 @@ class AlifeMemoryPlugin(BasePlugin):
             await self.engine.enqueue("tidy", owner, automatic=automatic, detail=detail)
         return sorted(owners)
 
+    async def identity_links(self):
+        """身份绑定映射（raw → 规范键）✓ **60 秒缓存** ✓
+
+        只用于"显示 / 归类" ✓ —— 慢一点没关系 ✓ 变旧一点也没关系 ✓
+        ⇒ 所以缓存是安全的 ✓；**失败就当作没有绑定** ✓（显示与改造前完全一致 ✓）
+        """
+        now = time.time()
+        if self._links_cache and now - self._links_at < 60:
+            return self._links_cache
+        try:
+            self._links_cache = await self.store.call("identity_map") or {}
+        except Exception:
+            logger.debug("[记忆·Z] 身份映射读取失败（按未绑定处理）", exc_info=True)
+            self._links_cache = {}
+        self._links_at = now
+        return self._links_cache
+
     async def queue_compress_all(self, limit=2):
         """排"该压但还没压"的会话 ✓（**确定性**兜底 ✓ 不看骰子 ✓）
 
@@ -1138,7 +1170,7 @@ class AlifeMemoryPlugin(BasePlugin):
             return []
         holder.setdefault("used", {})
         if holder.get("shown") is None:  # 每会话只查一次（有轮换记录的通常很少）
-            snapshot = await self.store.call("rotation_stats")
+            snapshot = await self.store.call("rotation_stats", kind)
             holder["shown"] = {rid: stat[0] for rid, stat in snapshot.items()}
             holder["used"] = {rid: stat[1] for rid, stat in snapshot.items()}
         ids = rotation_order(
@@ -1164,7 +1196,7 @@ class AlifeMemoryPlugin(BasePlugin):
             holder["shown"][row["id"]] = int(holder["shown"].get(row["id"], 0)) + 1
         # 进 seen：下一轮它们就不再算"没给过"，也不会被当成主召回的重复项
         self.seen_window.remember(seen_key, "", [row["id"] for row in chosen])
-        await self.store.call("mark_rotation", [row["id"] for row in chosen], [])
+        await self.store.call("mark_rotation", [row["id"] for row in chosen], [], kind)
         # v2.18.18 绊线 ✓：真出现"以媒体标记开头"的文本被注入 ✗ 就打完整文本 ✓
         # （日志里只显示 14 字 ✗ 上次就是因为看不出结尾才排查困难 ✓）
         for row in chosen:
@@ -1203,7 +1235,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 if overlap_hit(text, reply, cfg.rotate_min_hits)
             ]
             if hits:
-                await self.store.call("mark_rotation", [], hits)
+                await self.store.call("mark_rotation", [], hits, kind)
                 state["hit_turn"] = state.get("turn")
                 for rid in hits:
                     holder["used"][rid] = int(holder["used"].get(rid, 0)) + 1
@@ -1440,19 +1472,26 @@ class AlifeMemoryPlugin(BasePlugin):
         rows = await self.store.call("entities", query, ids=ids, offset=offset)
         entities = []
         for row in rows:
-            item = {
-                "id": row["id"],
-                "kind": row["kind"],
-                "name": row["name"],
-                "revision": row["revision"],
-                "aliases": list(
-                    dict.fromkeys(
-                        h["name"] for h in row["history"] if h["name"] != row["name"]
-                    )
-                )[:5],
-            }
-            if row.get("lookup_id") and row["lookup_id"] != row["id"]:
-                item["lookup_id"] = row["lookup_id"]
+            # ⚠️ `revision` **必须留着** ✗✓ —— 用户提醒"别忘了 bot 的全编辑能力" ✓
+            #   改名工具签名是 `correct_name(entity_id, name, revision, reason)` ✓
+            #   ⇒ 没有 revision，bot 就**改不了名** ✓（乐观并发令牌 ✓）
+            item = {"i": row["id"], "n": row["name"], "r": int(row["revision"] or 0)}
+            # ★ 2026-09-18：曾用名**只在真换过时**给 ✓ 并带**绝对日期** ✓
+            #   （`observed` 是内部时间戳 ✗ ⇒ 换成人能读的 date ✓ 用户要求 ✓）
+            olds = {}
+            for h in (row.get("history") or []):
+                old_name = str(h.get("name") or "").strip()
+                if not old_name or old_name == row["name"]:
+                    continue
+                at = h.get("observed") or 0
+                if old_name not in olds or at > olds[old_name]:
+                    olds[old_name] = at
+            if olds:
+                item["h"] = [
+                    "%s@%s" % (name, short_day(at) if at else "?")
+                    for name, at in sorted(olds.items(), key=lambda kv: kv[1],
+                                           reverse=True)[:3]
+                ]
             entities.append(item)
         return self.recall_result(event, {"ok": True, "entities": entities})
 
@@ -1461,7 +1500,9 @@ class AlifeMemoryPlugin(BasePlugin):
         description=(
             "看记忆的入口。给 subject（实体 ID 或名字）→ 这个人的画像、名字历史、按类别事实与关系；"
             "给 query（只查称呼）→ 现名与曾用名；都不给 → 总体统计 + 一批未见过的画像/偏好/约定事实。"
-            "结果里的 id 是稳定实体 ID，可回传给其它工具。"
+            "结果以紧凑文本给出：`实体ID=名字 [rN]`（`[rN]` 是版本号，"
+            "改名等改动要把它一并回传，避免覆盖别人的修改）；"
+            "画像行为 `类别 说话人｜内容 ★重要度 日期 [来源短码]`。"
         ),
         params={
             "type": "object",
@@ -1654,6 +1695,7 @@ class AlifeMemoryPlugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def on_request(self, event, req: LLMRequest, *_):
+        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         cfg = self.runtime_settings()
         if not cfg.enabled:
             return
@@ -1795,6 +1837,11 @@ class AlifeMemoryPlugin(BasePlugin):
                     min_score=cfg.fact_recall_min_score,
                     **prefer,
                 )
+            # ★ 2026-09-18 批次 2：**下沉** ✓
+            #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
+            #   **不删不藏**：它们仍在下面的轮换候选池里（那是独立查询 ✓）
+            #   一旦被轮换带进来并被**用上**（rotate_used ↑）⇒ 分数回升 ⇒ 自动回常驻 ✓
+            facts = sink_filter(facts, cfg.fact_sink_threshold, now=time.time())
             facts = facts + await self.rotation_extras(
                 sid,
                 cfg,
@@ -1967,6 +2014,11 @@ class AlifeMemoryPlugin(BasePlugin):
         lines, pick_ids = [], []
         for row in priority:
             marks = "A" if row["role"] == "assistant" else "U"
+            # v2.18.28：**层标** ✓ —— 摘要行看不出层级和"是摘要不是原文" ✗
+            #   （L1=一段对话的摘要 / L2=再上一层的概括 ✓ 模型据此判断细节量 ✓）
+            _lvl = int(row["level"] or 0)
+            if _lvl > 0:
+                marks += "L%d" % _lvl
             if row["permanent"]:
                 marks += "*"
             if row["sid"] and row["sid"] != sid:
@@ -2030,6 +2082,7 @@ class AlifeMemoryPlugin(BasePlugin):
             codes=fact_shorts,
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
+            links=_links,
         ),
         }
         if users:
@@ -2257,8 +2310,247 @@ class AlifeMemoryPlugin(BasePlugin):
         row["calls"] += 1
         row["chars"] += len(text)
 
+    def slim_payload(self, value):
+        """把**发给模型**的载荷里内部物去掉 ✓（2026-09-18 用户实测：工具返回泄漏内部字段 ✗）
+
+        定点清理，**不做递归通杀** ✗ —— 别的工具真的需要 `id` 才能做纠正/评分 ✓
+        · 同值冗余计数合一（excluded_count / already_seen ⇒ seen ✓ 用户批的第 ④ 项 ✓）
+        · 存档对象的空值/内部标记（sp / versions / legacy_sources / ci / next ✗）
+        · 画像实体压成 `{"i": id, "n": 名字}` ✓
+          （丢 revision / updated / label / identity_note / lookup_id / history ✓
+           其中 label 是常量 ✗ identity_note 是**同一句重复 N 遍** ✗ lookup_id 是 id 的复制 ✗
+           history 里带 `observed` 时间戳 ✗ —— 就是用户说的"ob 一串数字" ✓）
+        ⚠️ 存储层**一个字都不动** ✓（名字编辑页/历史记录照旧有这些字段 ✓）
+        """
+        if not isinstance(value, dict):
+            return value
+        out = dict(value)
+        if "excluded_count" in out or "already_seen" in out:
+            n = out.pop("excluded_count", None)
+            if n is None:
+                n = out.pop("already_seen", None)
+            else:
+                out.pop("already_seen", None)
+            # ⚠️ `seen: 0` 是**有意义**的值（"什么都没有被排除" ✓）⇒ 不能当空值滤掉 ✗
+            out["seen"] = int(n or 0)                # 合一 ✓ 省一个字段 ✓
+        arch = out.get("archive")
+        if isinstance(arch, dict):
+            arch = dict(arch)
+            for key in ("sp", "versions", "legacy_sources", "ci", "next"):
+                arch.pop(key, None)
+            out["archive"] = arch
+        ents = out.get("entities")
+        if isinstance(ents, list):
+            # entities 已在源头瘦身 ✓ ⇒ 这里只把残留的内部键再压一遍（保险 ✓）
+            out["entities"] = [
+                {k: v for k, v in e.items() if k in ("i", "n", "h", "r")}
+                for e in ents if isinstance(e, dict)
+            ]
+        # ⚠️ 不碰 `profiles` ✗（2026-09-18 教训：我臆测了它的形状 ⇒ 拍成 {c,i,n} 丢了结构 ✗
+        #    集成测试当场报 KeyError ✓ ⇒ **结构化的东西不许凭想象瘦身** ✓）
+        profs = out.get("profiles")
+        if isinstance(profs, list):
+            # ★ 2026-09-18（用户："肯定要"）：profiles 也瘦身 ✓
+            #   · `summary` 与 `categories` **完全重复** ✗ ⇒ 直接去掉（实测：同 3 句出现两遍 ✓）
+            #   · `entity` 只留 `id` + `revision` ✓✓ —— 改名工具要 revision ✓
+            #     （`kind`/`lookup_id`/`label:"名称待补全"`/`name:""`/`aliases:[]`/`history:[]` 全丢 ✗）
+            #   · 空值清掉：`relations: []` ✓ `stats.last_active: 0` ✓
+            slim_profs = []
+            for prof in profs:
+                if not isinstance(prof, dict):
+                    continue
+                ent = prof.get("entity") if isinstance(prof.get("entity"), dict) else {}
+                item = {"i": ent.get("id") or "", "r": int(ent.get("revision") or 0)}
+                if ent.get("name"):
+                    item["n"] = ent["name"]
+                cats = {}
+                for cat, rows in (prof.get("categories") or {}).items():
+                    kept = []
+                    for row in (rows or []):
+                        if isinstance(row, dict):
+                            one = {k: v for k, v in row.items() if v not in (None, "", [])}
+                            if one:
+                                kept.append(one)
+                    if kept:
+                        cats[cat] = kept
+                if cats:
+                    item["c"] = cats
+                if prof.get("relations"):
+                    item["rel"] = prof["relations"]
+                stats = prof.get("stats") if isinstance(prof.get("stats"), dict) else {}
+                short = {k: int(v or 0) for k, v in stats.items()
+                         if k != "last_active" and int(v or 0) > 0}
+                if short:
+                    item["st"] = short
+                slim_profs.append(item)
+            out["profiles"] = slim_profs
+        names = out.get("names")
+        if isinstance(names, list):
+            slim = []
+            for n in names:
+                if not isinstance(n, dict) or not n.get("name"):
+                    continue
+                item = {"i": n.get("id"), "n": n.get("name")}
+                # ★ 2026-09-18（用户要求）：**曾用名**可以留 ✓ 但要"只在真换过时"给 ✗
+                #   · `history` 里的 `observed` = 该名字**被观察到的时间** ✓
+                #     ⇒ 换算成**绝对日期**才有意义 ✓（形如 武哥@08-20 ✓）
+                #   · **同名不算曾用名** ✗（那是同一名字被反复确认 ✓）
+                olds = {}
+                for h in (n.get("history") or []):
+                    if not isinstance(h, dict):
+                        continue
+                    old_name = str(h.get("name") or "").strip()
+                    if not old_name or old_name == n.get("name"):
+                        continue
+                    at = h.get("observed")
+                    if old_name not in olds or (at and at > (olds[old_name] or 0)):
+                        olds[old_name] = at
+                if olds:
+                    item["h"] = [
+                        "%s@%s" % (name, short_day(at) if at else "?")
+                        for name, at in sorted(olds.items(), key=lambda kv: kv[1] or 0,
+                                               reverse=True)[:3]     # 最近 3 个 ✓ 防爆表
+                    ]
+                slim.append(item)
+            if slim:
+                out["names"] = slim
+            else:
+                out.pop("names", None)
+        return out
+
+    @staticmethod
+    def _marks_of(item):
+        """把"记号"按**被动侧同一套**拼出来 ✓（★重要度 L层 bot mem arch @会话 ✓）"""
+        mark = []
+        if item.get("k") is not None:
+            mark.append("★%s" % item["k"])
+        if item.get("l"):
+            mark.append("L%s" % item["l"])
+        for flag in ("bot", "mem", "arch"):
+            if item.get(flag):
+                mark.append(flag)
+        if item.get("from"):
+            mark.append("@%s" % item["from"])
+        return " ".join(mark)
+
+    def recall_text_view(self, value):
+        """把工具返回渲染成**与被动注入同一种紧凑文本** ✓（2026-09-18 用户要求 ✓）
+
+        ⚠️ 范围：**只转"召回形状"** ✓ —— 搜索 ✓ 档案(单/复) ✓ 人物与群名 ✓ 画像 ✓ 资料 ✓
+        写入类（记住/更正/遗忘 ✓）与失败回执**保持 JSON** ✗ —— 它们不是召回 ✓
+        而且它们在测试里被逐字段断言 ✓（转文本只增加脆性 ✗ 不增加价值 ✓）
+        ⇒ 对这 5 种召回形状，兜底**不该触发** ✓（有守卫 ✓）
+        记号与被动侧对齐 ✓：`★重要度` ✓ `L层号` ✓ `bot`=我自己说的 ✓ `mem`=永久 ✓
+        `arch`=已归档 ✓ `@会话`=跨会话 ✓ `n1=名字`=码表 ✓
+        """
+        if not isinstance(value, dict):
+            return None
+        items = value.get("items")
+        if isinstance(items, list):                        # ② 搜索
+            head = "【召回】命中 %s · 本次 %s" % (value.get("total", "?"), len(items))
+            if value.get("seen"):
+                head += " · 已见过 %s" % value["seen"]
+            lines = [head]
+            who = value.get("who")
+            if isinstance(who, dict) and who:
+                lines.append(" ".join("%s=%s" % (k, v) for k, v in who.items()))
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                speaker = (" " + str(it["sp"])) if it.get("sp") else ""
+                lines.append("%s %s %s%s｜%s" % (
+                    it.get("i", "?"), it.get("t", ""), self._marks_of(it),
+                    speaker, it.get("s", "")))
+            if not items:
+                lines.append("（没有新的命中 ✓ 可换词，或传 allow_seen=true 重看）")
+            if value.get("hint"):
+                lines.append("（%s）" % value["hint"])
+            return "\n".join(lines)
+        readings = value.get("archives")                   # ③ 查档案（复数）
+        single = value.get("archive")
+        blocks = []
+        if isinstance(readings, list):
+            for idx, one in enumerate(readings, 1):
+                inner = one.get("archive") if isinstance(one, dict) and "archive" in one else one
+                if isinstance(inner, dict):
+                    blocks.append(self._archive_block(inner, idx, len(readings)))
+        elif isinstance(single, dict):
+            blocks.append(self._archive_block(single, 0, 1))
+        if blocks:
+            who = value.get("who") or value.get("names")
+            if isinstance(who, list) and who:
+                blocks.append(" ".join(
+                    "%s=%s%s" % (n.get("i", "?"), n.get("n", "?"),
+                                 ("（曾用名 %s）" % "、".join(n["h"])) if n.get("h") else "")
+                    for n in who if isinstance(n, dict)))
+            return "\n".join(blocks)
+        profs = value.get("profiles")                       # ④ 画像（结构化的"人"视图 ✓）
+        if isinstance(profs, list):
+            out_lines = []
+            for prof in profs:
+                if not isinstance(prof, dict):
+                    continue
+                head = "【画像】%s%s" % (prof.get("n") or prof.get("i") or "?",
+                                        (" [r%s]" % prof["r"]) if prof.get("r") else "")
+                st = prof.get("st") or {}
+                if st:
+                    head += " · " + " · ".join("%s %s" % (k, v) for k, v in st.items())
+                out_lines.append(head)
+                for cat, rows in (prof.get("c") or {}).items():
+                    for row in (rows or []):
+                        if not isinstance(row, dict):
+                            continue
+                        who = row.get("u") or ""
+                        body = row.get("x") or row.get("s") or ""
+                        mark = ("★%s" % row["imp"]) if row.get("imp") is not None else ""
+                        when = row.get("t") or ""
+                        # `src` = 这条事实的**来源记录短码** ✓ ⇒ 用 [短码] 保留 ✓
+                        #   （bot 要能引用来源 ✓ 集成测试钉着这一点 ✓）
+                        src = ("[%s]" % row["src"]) if row.get("src") else ""
+                        out_lines.append(
+                            ("%s %s｜%s %s %s %s" % (cat, who, body, mark, when, src)
+                             ).replace("  ", " ").strip()
+                        )
+                if prof.get("rel"):
+                    out_lines.append("（关系 %d 条）" % len(prof["rel"]))
+            if out_lines:
+                return "\n".join(out_lines)
+        entities = value.get("entities")                   # ④ 人物与群名
+        if isinstance(entities, list):
+            # `r<数字>` = revision ✓（改名要回传 ✓ 用户强调的"全编辑能力" ✓）
+            return "【人物与群名】" + " · ".join(
+                "%s=%s%s%s" % (
+                    e.get("i", "?"), e.get("n", "?"),
+                    (" [r%s]" % e["r"]) if e.get("r") is not None else "",
+                    ("（曾用名 %s）" % "、".join(e["h"])) if e.get("h") else "")
+                for e in entities if isinstance(e, dict))
+        names = value.get("names")                          # ⑤ 画像
+        if isinstance(names, list):
+            return "【画像】" + " · ".join(
+                "%s=%s%s" % (n.get("i", "?"), n.get("n", "?"),
+                             ("（曾用名 %s）" % "、".join(n["h"])) if n.get("h") else "")
+                for n in names if isinstance(n, dict))
+        return None                                         # 兜底（新形状未适配 ✓ 安全网）
+
+    def _archive_block(self, arch, idx, total):
+        """单份档案的紧凑文本 ✓（头一行 + 内容逐条 ✓ 与被动侧存档行同构 ✓）"""
+        head = "【档案%s】%s · L%s · %s 条" % (
+            (" %d/%d" % (idx, total)) if total > 1 else "",
+            arch.get("t", ""), arch.get("lv", "?"), arch.get("kids", "?"))
+        if arch.get("s"):
+            head += "｜%s" % arch["s"]
+        lines = [head]
+        for row in (arch.get("content") or []):
+            if isinstance(row, dict):
+                lines.append("%s｜%s" % (row.get("r") or "?", row.get("s") or ""))
+            elif row:
+                lines.append(str(row))
+        return "\n".join(lines)
+
     def recall_result(self, event, value):
-        text = dump(value)
+        value = self.slim_payload(value)        # ★ 统一出口处瘦身 ✓ 所有工具一致 ✓
+        view = self.recall_text_view(value)     # ★ 与被动侧同一种紧凑文本 ✓
+        text = view if view else dump(value)    # 兜底：新形状未适配时回退 JSON（安全网 ✓）
         # v2.18 第6项：召回用量计数（工作台可见）——懒创建，避免动 __init__ ✓
         self.note_recall(event.sid, text)
         digest = hashlib.sha256(text.encode()).hexdigest()
@@ -2343,13 +2635,34 @@ class AlifeMemoryPlugin(BasePlugin):
             recall_key = (event.sid, tuple(user_ids(event)), self.settings.recall_scope)
             self.seen_window.remember(recall_key, "", [id])
             names = await self.store.call("entities", ids=[row["sid"], *row["users"]])
+            archive = archive_view(row, child_offset, child_count, include_content)
+            # ★ 2026-09-18：内容条目必须与**检索侧同一套口径** ✓（用户实测这条漏了 ✗）
+            #   · 只有壳（表情/图片描述）⇒ **整条丢** ✓ —— **已识别的也一样丢** ✓
+            #     （用户拍板 A：视觉描述是机器补的 ✓ "只有它一条"的消息不算有人在说话 ✓
+            #      人味由 L1 摘要承载 ✓ 不必把 400 字机器描述塞进召回 ✓）
+            #   · 真话走官方管线 `model_text`（剥思考块 ✓ 内联壳归一 ✓ 嵌套裁剪 40/100 ✓）
+            #   · 字段瘦身：内部主键 `id` ✗ 内部 `level` ✗ `role`→`r` ✓ `content`→`s` ✓
+            _rows = archive.get("content")
+            if isinstance(_rows, list):
+                _names = tuple(
+                    str(n.get("name") or "") for n in (names or []) if n.get("name")
+                )
+                _keep = tuple(n for n in _names if " " in n)
+                _clean = []
+                for _item in _rows:
+                    _raw = str(_item.get("content") or "")
+                    if not _raw.strip() or media_only(_raw, names=_names):
+                        continue                      # 只有壳 ⇒ 整条不发 ✓
+                    _clean.append({
+                        "r": "a" if _item.get("role") == "assistant" else "u",
+                        "s": self.model_text(_raw, _keep),
+                    })
+                archive["content"] = _clean
             return self.recall_result(
                 event,
                 {
                     "ok": True,
-                    "archive": archive_view(
-                        row, child_offset, child_count, include_content
-                    ),
+                    "archive": archive,
                     "names": names,
                 },
             )
@@ -2365,6 +2678,9 @@ class AlifeMemoryPlugin(BasePlugin):
             "include_content=true 读完整原文）；给 keyword/prompt/时间/层级 → 搜索，"
             "默认只返回本会话还没给过的新内容，可用 next_batch=true 继续找。"
             "默认连已归档的旧记忆一起搜；若设置里开了「检索默认只搜常驻」，则需 include_archived=true。"
+            "结果与注入的记忆**同一种紧凑文本**：行首是短码（可回传本工具或 CorrectMemory），"
+            "记号沿用注入那份说明（★重要度 / L 层级 / *永久 / @跨会话），"
+            "本工具另有 bot=我自己说过的、arch=已归档；expand=[序号] 或 allow_seen=true 可重看。"
         ),
         params={
             "type": "object",
@@ -2594,6 +2910,15 @@ class AlifeMemoryPlugin(BasePlugin):
                     item["arch"] = 1
                 if r["permanent"]:
                     item["mem"] = 1
+                # ★ 2026-09-18：与被动侧补齐最后两项（默认值照旧省略 ⇒ 几乎不花 token ✓）
+                #   k = 重要度（被动侧是 `★7` ✓）—— 让模型能按重要度挑 ✓
+                #   l = 层号（被动侧是 `L2` ✓）—— 跨层搜索时分得清"摘要 vs 原文" ✓
+                #   ⚠️ 只影响**读**（发给模型的载荷 ✓）；压缩 / 审计 / 合并 / 提取
+                #     走的是 engine 的提示词与写路径 ⇒ **一行都没碰** ✓
+                if int(r["importance"] or 5) != 5:
+                    item["k"] = int(r["importance"] or 5)
+                if int(r["level"] or 0) > 0:
+                    item["l"] = int(r["level"])
                 if r["users"]:
                     shown, extra = self.named(entities, r["users"])
                     item["u"] = shown
@@ -2614,7 +2939,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if not result["items"] and seen:
                 result["hint"] = (
                     "本轮没有新内容：相关记忆此前已经给过。"
-                    "如需重看，用 ReadMemoryArchive(id)，或传 allow_seen=true 重搜。"
+                    "如需重看，用 SearchMemoryArchive(ids=[短码]) 取回，或传 allow_seen=true 重搜。"
                 )
             else:
                 result["hint"] = (
@@ -2733,6 +3058,7 @@ class AlifeMemoryPlugin(BasePlugin):
             return dump({"ok": False, "error": "not_accessible_or_not_permanent"})
 
     async def overview(self, event, subject="", offset=0):
+        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         if not self.runtime_settings().enabled:
             return self.recall_result(event, {"ok": False, "error": "memory_paused"})
         if type(offset) != int or offset < 0:
@@ -2753,6 +3079,28 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
+        # ★ 身份绑定（批次 3 第四步）：同一人的**其它写法**也一起搜 ✓
+        #   例：问「周武」时，记成 `qq:7696` 的事实也要能找到 ✓
+        #   多跑的查询都在 try 里 ⇒ 扩展失败**绝不影响**主结果 ✓
+        _variants = subject_variants(subject, _links)
+        if len(_variants) > 1:
+            _seen_ids = {row["id"] for row in rows}
+            for _variant in _variants[1:]:
+                try:
+                    _more = await self.store.call(
+                        "facts", event.sid, subject=_variant, offset=0, limit=50,
+                        global_scope=self.settings.recall_scope == "global",
+                        users=user_ids(event), include_shared=True,
+                        exclude_ids=seen, hide_pending=self.settings.merge_pending_hide,
+                        importance_first=True,
+                    )
+                except Exception:
+                    logger.debug("[记忆·Z] 主体变体检索失败：%s", _variant, exc_info=True)
+                    continue
+                for _row in _more:
+                    if _row["id"] not in _seen_ids:
+                        _seen_ids.add(_row["id"])
+                        rows.append(_row)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(
@@ -2775,6 +3123,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     ),
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
+                    links=_links,
                 ),
                 "next_offset": offset + len(rows),
             },
@@ -3344,6 +3693,58 @@ class AlifeMemoryPlugin(BasePlugin):
         if result is None:
             raise HTTPException(404, "entity not found")
         return result
+
+    # ── 身份绑定（2026-09-18 批次 3）──────────────────────────────
+    #  ⚠️ tidy / audit / 合并 / 压缩的输入**一点没变** ✓
+    #     这里只新增"显示与人工指认"用的接口 ✓ 规则全在 storage.identity_map 一处 ✓
+    @register.api(method="GET", path="/fact_health", auth=True)
+    async def api_fact_health(self):
+        """事实体检：按分数从低到高列出，标明"是否该下沉"及**为什么** ✓（只读 ✓）"""
+        return await self.store.call("fact_health", self.settings.fact_sink_threshold)
+
+    @register.api(method="GET", path="/entity_links", auth=True)
+    async def api_entity_links(self):
+        """raw → canonical 的全量映射 ✓（含结构化归一：dm 会话归到人、群仍是群 ✓）"""
+        return {"links": await self.store.call("identity_map")}
+
+    @register.api(method="POST", path="/entity_link", auth=True)
+    async def api_entity_link(self, request: Request):
+        """人工指认：把某个写法绑到某个人 ✓（优先级最高 ✓ 随时可解绑 ✓）"""
+        payload = await request.json()
+        raw = str((payload or {}).get("raw") or "").strip()
+        canonical = str((payload or {}).get("canonical") or "").strip()
+        if not raw or not canonical or len(raw) > 200 or len(canonical) > 200:
+            raise HTTPException(422, "invalid link")
+        if raw == canonical:
+            raise HTTPException(422, "nothing to link")
+        ok = await self.store.call("link_entity", raw, canonical, "manual", "工作台人工指认")
+        return {"ok": bool(ok), "raw": raw, "canonical": canonical}
+
+    @register.api(method="POST", path="/entity_infer", auth=True)
+    async def api_entity_infer(self, request: Request):
+        """跑一次**自动推断**（同会话唯一说话人 ✓ 歧义一律不绑 ✓）"""
+        payload = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        self_id = str((payload or {}).get("self_id") or "")
+        report = await self.store.call("infer_links", self_id)
+        logger.info(
+            "[记忆·Z] 身份推断：新增 %s 条 · 歧义 %s 个 · 跳过 %s",
+            report.get("added"), len(report.get("ambiguous") or []), report.get("skipped"),
+        )
+        return {"report": report, "links": await self.store.call("identity_map")}
+
+    @register.api(method="POST", path="/entity_unlink", auth=True)
+    async def api_entity_unlink(self, request: Request):
+        """解绑 ✓（只删映射，**不动任何事实/记录** ✓）"""
+        payload = await request.json()
+        raw = str((payload or {}).get("raw") or "").strip()
+        if not raw:
+            raise HTTPException(422, "invalid raw")
+        ok = await self.store.call("unlink_entity", raw)
+        return {"ok": bool(ok), "raw": raw}
 
     @register.api(method="GET", path="/job/{job_id}", auth=True)
     async def api_job_detail(self, job_id: str):

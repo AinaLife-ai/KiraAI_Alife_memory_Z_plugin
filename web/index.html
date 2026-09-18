@@ -63,6 +63,7 @@
           ><button data-tab="archives"><span>▤</span><em>记忆存档</em></button
           ><button data-tab="profiles"><span>♧</span><em>画像与关系</em></button
           ><button data-tab="names"><span>◎</span><em>人物与群名</em></button
+          ><button data-tab="health"><span>♥</span><em>事实体检</em></button
           ><button data-tab="tasks"><span>◷</span><em>后台任务</em></button
           ><button data-tab="settings"><span>⚙</span><em>偏好设置</em></button
           ><button data-tab="trash"><span>♺</span><em>回收站</em></button>
@@ -251,6 +252,19 @@
           <div class="notice">
             ID始终不变，称呼可以更新。新消息会记录昵称和群名；同名不合并，曾用名可搜索。手动校正也会保留历史；后续较新的平台名称可继续更新。
           </div>
+          <div class="card" id="bindCard">
+            <h3>身份绑定：同一个人，多种写法</h3>
+            <p class="muted">
+              只按「同一会话里只有<b>一个 QQ</b> 说过这个名字」推断；说不准的一律不绑。
+              绑定只影响<b>显示与归类</b>，<b>不改动任何事实或记录</b>，随时可解绑。
+            </p>
+            <div class="filters">
+              <button id="bindInfer">自动推断一下</button
+              ><button id="bindRefresh">刷新绑定</button>
+            </div>
+            <div id="bindList" class="cards"></div>
+            <div id="bindPending"></div>
+          </div>
           <div class="filters">
             <input
               id="nameQuery"
@@ -263,6 +277,19 @@
           <div class="pager">
             <button id="namePrev">上一页</button><span id="namePage"></span
             ><button id="nameNext">下一页</button>
+          </div>
+        </section>
+        <section id="health" class="view hide">
+          <div class="card">
+            <h3>事实体检：谁会先被"下沉"</h3>
+            <p class="muted">
+              分数 = 重要度×2 + 被用次数×3 + 新鲜度（30 天内 +10 / 90 天内 +4）。
+              分数低于阈值且重要度 ≤7 的事实，本轮**不进常驻**，改由轮换槽位接力；
+              在轮换里被"用上"就会自己浮回来。重要度 8 及以上**永不沉**。
+              这里只做展示与调档，**上浮/下沉/软删都可逆**。
+            </p>
+            <p class="muted" id="healthMeta">正在加载…</p>
+            <div id="healthList" class="cards"></div>
           </div>
         </section>
         <section id="tasks" class="view hide">

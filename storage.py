@@ -297,6 +297,19 @@ class Store:
               observed REAL NOT NULL, reason TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS name_entity ON entity_names(entity_id,observed DESC);
             """)
+
+            # ★ 2026-09-18（批次 3）：身份绑定表 ✓
+            #   `raw` 是**主键** ⇒ 一个原始写法**最多只能绑一个**规范实体 ✓
+            #   ⇒ 有歧义（同名两个号都同现过）就**不建记录** ✓ 宁可"未绑定"也不赌 ✓
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS entity_links ("
+                " raw TEXT PRIMARY KEY, canonical TEXT NOT NULL,"
+                " source TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS entity_links_canonical"
+                " ON entity_links(canonical)"
+            )
             # ★ 2026-09-18 性能审计：压缩预检 `compress_probe` 的**覆盖索引** ✓
             #   预检只回 (非永久行数, 最早 end, 最新 end) ✓ 但没有覆盖索引时
             #   SQLite 仍要按 3000 行回表 ⇒ 实测 6.7 ms ✗（够用但不够快 ✓）
@@ -361,6 +374,19 @@ class Store:
                 )
                 db.execute(
                     "ALTER TABLE records ADD COLUMN rotate_used INTEGER NOT NULL DEFAULT 0"
+                )
+            # ★ 2026-09-18：**事实侧也要记账** ✓
+            #   原来 `mark_rotation` / `rotation_stats` / `rotation_pick` 只认 records ✗
+            #   而事实轮换的候选是 facts 的行 ✓ ⇒ 用事实 id 去 UPDATE records
+            #   ⇒ **匹配 0 行、静默无效果** ✗ ⇒ 事实轮换永远学不到"哪条被用过" ✓
+            #   （只剩内存里的冷却 + seen 窗口 ✓ 重启即忘 ⇒ 每次从同几条重新开始 ✓）
+            fact_columns = {r[1] for r in db.execute("PRAGMA table_info(facts)")}
+            if "rotate_shown" not in fact_columns:
+                db.execute(
+                    "ALTER TABLE facts ADD COLUMN rotate_shown INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execute(
+                    "ALTER TABLE facts ADD COLUMN rotate_used INTEGER NOT NULL DEFAULT 0"
                 )
             if "search_body" not in columns:
                 db.execute(
@@ -1198,6 +1224,190 @@ class Store:
                 continue
             ids.append(row[0])
         return ids[:20]
+
+    # ── 身份绑定（2026-09-18 批次 3）────────────────────────────────
+    def link_entity(self, raw, canonical, source="manual", evidence=""):
+        """建立一条绑定 ✓（人工优先 ⇒ 覆盖自动 ✓ 可撤销 ✓）"""
+        raw = str(raw or "").strip()
+        canonical = str(canonical or "").strip()
+        if not raw or not canonical or raw == canonical:
+            return False
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO entity_links(raw, canonical, source, evidence, created)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(raw) DO UPDATE SET"
+                " canonical=excluded.canonical, source=excluded.source,"
+                " evidence=excluded.evidence, created=excluded.created",
+                (raw, canonical, str(source or "manual"), str(evidence or ""), time.time()),
+            )
+        return True
+
+    def unlink_entity(self, raw):
+        """解除绑定 ✓ ⇒ 立刻回到"未绑定"（**不是**删数据 ✓ 只删这条映射 ✓）"""
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM entity_links WHERE raw=?", (str(raw or "").strip(),))
+        return bool(cur.rowcount)
+
+    def entity_links(self):
+        """raw -> canonical 的**全量映射** ✓（调用方一次取好 ✓ 传给纯函数解析器 ✓）"""
+        with self.connect() as db:
+            return {
+                r[0]: r[1]
+                for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
+            }
+
+    def fact_health(self, threshold=12, now=None, limit=300):
+        """事实体检数据 ✓（2026-09-18 批次 4）
+
+        给前端一页看清：**哪些事实该下沉、为什么** ✓
+        · 分数口径与下沉判定**完全一致**（复用 `retrieval.fact_sink_score/should_sink` ✓
+          一处定义 ⇒ 视图与实际行为不会漂移 ✓）
+        · 排序：**分数低的在前**（最该处理的先看到 ✓）
+        · ⚠️ 只读 ✓ 不改任何数据 ✓（动作由前端复用既有 `/edit` ✓）
+        """
+        from . import retrieval
+        now = float(now or time.time())
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, sid, subject, content, category, importance,"
+                " rotate_shown, rotate_used, created, event_at FROM facts"
+                " WHERE deleted=0 ORDER BY importance ASC, created ASC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            fact = {
+                "id": row[0], "sid": row[1], "subject": row[2], "content": row[3],
+                "category": row[4], "importance": row[5], "rotate_shown": row[6],
+                "rotate_used": row[7], "created": row[8], "event_at": row[9],
+            }
+            created = float(fact.get("created") or 0)
+            fact["age_days"] = max(0, int((now - created) / 86400)) if created else None
+            fact["score"] = retrieval.fact_sink_score(fact, now=now)
+            fact["sunk"] = retrieval.should_sink(fact, threshold, now=now)
+            fact["never_sink"] = int(fact.get("importance") or 5) >= retrieval.NEVER_SINK_IMPORTANCE
+            out.append(fact)
+        out.sort(key=lambda f: (f["score"], f["importance"], f["created"] or 0))
+        return {"threshold": int(threshold), "count": len(out),
+                "now": now, "rows": out}
+
+    def infer_links(self, self_id="", limit=4000):
+        """从事实里**自动推断**「名字 → QQ」绑定 ✓（2026-09-18 批次 3 第三步）
+
+        用户拍板的判据（**宁可少绑，不可绑错** ✓）：
+          · 只看"**同一会话里，这个名字只被一个 QQ 说过**" ✓ 出现第二个说话人 ⇒ **歧义 ⇒ 不绑** ✓
+          · 跨会话再核一次：不同会话给出的 QQ 必须**一致** ✓ 不一致 ⇒ 不绑 ✓
+          · 说话人必须是**人**（`adapter:数字` ✓）且**不是助手自己** ✗
+            （这点很关键：机器人说"周武喜欢猫"不能把"周武"绑到机器人头上 ✗）
+          · **人工绑定优先** ✓ 已有的 manual 一律不动 ✓
+        返回报告：新增 / 歧义（给人指认）/ 跳过 ✓
+        """
+        from . import identity                       # 局部导入（与 observe_name 等处一致 ✓）
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, sid, subject, sources FROM facts"
+                " WHERE deleted=0 AND subject<>'' AND subject NOT LIKE '%:%'"
+                " LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        facts = [
+            {"id": r[0], "sid": r[1], "subject": r[2],
+             "sources": json.loads(r[3] or "[]")}
+            for r in rows
+        ]
+        if not facts:
+            return {"added": 0, "considered": 0, "ambiguous": [], "skipped": 0}
+        self.attach_evidence(facts)                  # ← 复用既有口径（说话人 ✓）
+        per_session = {}                             # (sid, 名字) -> {说话人}
+        for fact in facts:
+            speaker = str(fact.get("src_user") or "")
+            adapter, number, session_type = (identity.split_adapter(speaker)
+                                              if speaker else ("", "", ""))
+            if not adapter or not number or not number.isdigit() or session_type:
+                continue                             # 不是"人"的 ID ⇒ 不作为证据 ✓
+            if self_id and speaker == self_id:
+                continue                             # 助手自己说的 ⇒ 不算证据 ✓
+            per_session.setdefault((fact["sid"], fact["subject"]), set()).add(speaker)
+        by_name = {}                                 # 名字 -> {候选 QQ} / 标记歧义
+        ambiguous = set()
+        for (_sid, name), speakers in per_session.items():
+            if len(speakers) > 1:
+                ambiguous.add(name)                  # 同一会话里两个说话人 ⇒ 歧义 ✓
+                continue
+            by_name.setdefault(name, set()).update(speakers)
+        existing = self.entity_links()
+        added = skipped = 0
+        for name, speakers in by_name.items():
+            if name in ambiguous or len(speakers) != 1:
+                ambiguous.add(name)                  # 跨会话不一致 ⇒ 歧义 ✓
+                continue
+            canonical = next(iter(speakers))
+            current = existing.get(name)
+            if current == canonical:
+                skipped += 1
+                continue
+            if current is not None and self.link_source(name) == "manual":
+                skipped += 1                          # 人工绑定**不许**被自动覆盖 ✓
+                continue
+            self.link_entity(name, canonical, "cooccur", "同会话唯一说话人")
+            added += 1
+        return {
+            "added": added,
+            "considered": len(by_name),
+            "ambiguous": sorted(ambiguous),
+            "skipped": skipped,
+        }
+
+    def link_source(self, raw):
+        """这条绑定的来源 ✓（manual / cooccur ✓；没有则空串 ✓）"""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT source FROM entity_links WHERE raw=?", (str(raw or "").strip(),)
+            ).fetchone()
+        return row[0] if row else ""
+
+    def identity_map(self, self_id="", legacy_adapter="qq"):
+        """**全量解析映射** raw → canonical ✓（2026-09-18 批次 3）
+
+        给"显示/分组"用 ✓：前端只要 `map[raw] || raw` 就能得到规范键 ✓
+        ⇒ 规则**只在后端一处**（`identity.canonical_key` ✓）不会前后端漂移 ✓
+
+        覆盖范围（够用即可 ✓）：
+          · 已登记的实体 id（`entities` ✓ 名字就是在这里学的 ✓）
+          · 事实里出现过的 subject ✓（没登记过的也算 ✓）
+          · 已有绑定记录的 raw ✓
+        **解析不了的键不会出现在映射里** ✓（前端拿不到就原样显示 ✓ 与"未绑定"一致 ✓）
+        """
+        from . import identity                       # 局部导入，避免任何循环风险 ✓
+        with self.connect() as db:
+            raws = {r[0] for r in db.execute("SELECT id FROM entities").fetchall()}
+            raws |= {r[0] for r in db.execute(
+                "SELECT DISTINCT subject FROM facts WHERE subject<>''"
+            ).fetchall()}
+            links = {r[0]: r[1] for r in db.execute(
+                "SELECT raw, canonical FROM entity_links"
+            ).fetchall()}
+        out = {}
+        for raw in raws:
+            if not raw or raw in links:
+                continue
+            key = identity.canonical_key(raw, self_id=self_id, legacy_adapter=legacy_adapter)
+            if key and key != raw:
+                out[raw] = key
+        out.update(links)
+        return out
+
+    def links_of_canonical(self, canonical):
+        """某个规范实体下**挂着的所有写法** ✓（图谱/画像用 ✓）"""
+        with self.connect() as db:
+            return [
+                {"raw": r[0], "source": r[1], "evidence": r[2], "created": r[3]}
+                for r in db.execute(
+                    "SELECT raw, source, evidence, created FROM entity_links"
+                    " WHERE canonical=? ORDER BY source, raw",
+                    (str(canonical or ""),),
+                ).fetchall()
+            ]
 
     def has_active_job(self, kind, sid):
         """该会话是否已有**排队中/在跑**的同类任务 ✓（2026-09-18）
@@ -3525,38 +3735,47 @@ class Store:
             )
             return int(cursor.rowcount or 0)
 
-    def mark_rotation(self, shown_ids=(), used_ids=()):
-        """轮换槽位记账：展示过 +N、被用过 +M（用于排序、冷却与观测）。"""
+    def mark_rotation(self, shown_ids=(), used_ids=(), kind="record"):
+        """轮换槽位记账：展示过 +N、被用过 +M（用于排序、冷却与观测）✓
+
+        ⚠️ 2026-09-18 修：原来**只写 records** ✗，而事实轮换的候选来自 `facts` ✓
+        ⇒ 用事实 id 调用时 `UPDATE records … WHERE id=?` **匹配 0 行** ✓
+        ⇒ 静默失效：事实槽位学不到"被用过" ✓（重启后从同几条重新开始 ✓）
+        ⇒ 现在按 ``kind`` 分派（``"fact"`` ⇒ facts 表 ✓ 其余 ⇒ records ✓）
+        """
+        table = "facts" if str(kind) == "fact" else "records"
         shown = [str(i) for i in (shown_ids or []) if i]
         used = [str(i) for i in (used_ids or []) if i]
         with self.connect() as db:
             if shown:
                 db.executemany(
-                    "UPDATE records SET rotate_shown=rotate_shown+1 WHERE id=?",
+                    "UPDATE " + table + " SET rotate_shown=rotate_shown+1 WHERE id=?",
                     [(i,) for i in shown],
                 )
             if used:
                 db.executemany(
-                    "UPDATE records SET rotate_used=rotate_used+1 WHERE id=?",
+                    "UPDATE " + table + " SET rotate_used=rotate_used+1 WHERE id=?",
                     [(i,) for i in used],
                 )
         return len(shown) + len(used)
 
-    def rotation_stats(self):
+    def rotation_stats(self, kind="record"):
         """一次性取回"有轮换记录"的计数（量很小）。
 
         热路径（每轮注入）再用它做**纯内存排序**，省掉每轮的两次 DB 往返 ✓
         """
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id,rotate_shown,rotate_used FROM records WHERE rotate_shown > 0"
+                "SELECT id,rotate_shown,rotate_used FROM "
+                + ("facts" if str(kind) == "fact" else "records")
+                + " WHERE rotate_shown > 0"
             ).fetchall()
         return {
             row["id"]: (int(row["rotate_shown"] or 0), int(row["rotate_used"] or 0))
             for row in rows
         }
 
-    def rotation_pick(self, ids, limit):
+    def rotation_pick(self, ids, limit, kind="record"):
         """从给定的候选 id 里挑下一批轮换条目（排序即"学习"）。
 
         优先级：
@@ -3569,7 +3788,9 @@ class Store:
             return []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id,rotate_shown,rotate_used FROM records WHERE id IN (%s)"
+                "SELECT id,rotate_shown,rotate_used FROM "
+                + ("facts" if str(kind) == "fact" else "records")
+                + " WHERE id IN (%s)"
                 % ",".join("?" * len(wanted)),
                 wanted,
             ).fetchall()

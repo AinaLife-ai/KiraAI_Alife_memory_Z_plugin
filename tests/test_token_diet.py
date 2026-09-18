@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import os
 import random
 import json
 import re
@@ -20,6 +21,7 @@ c = importlib.import_module("alife_diet_test.contracts")
 s = importlib.import_module("alife_diet_test.storage")
 e = importlib.import_module("alife_diet_test.engine")
 r = importlib.import_module("alife_diet_test.retrieval")
+i = importlib.import_module("alife_diet_test.identity")
 
 
 def fact(**overrides):
@@ -1655,3 +1657,893 @@ class ScanDedupCase(unittest.TestCase):
         with self.store.connect() as db:
             n = db.execute("SELECT count(*) FROM jobs WHERE kind='compress' AND sid='s:2'").fetchone()[0]
         self.assertEqual(n, 1, "同一会话同时只该有一行压缩任务 ✓")
+
+
+class FactRotationBookkeepingCase(unittest.TestCase):
+    """事实侧轮换必须真的记账 ✓（2026-09-18 查出的静默失效）
+
+    原来 `mark_rotation` / `rotation_stats` / `rotation_pick` **只认 records** ✗，
+    而事实轮换的候选来自 `facts` ⇒ 用事实 id 去 `UPDATE records … WHERE id=?`
+    **匹配 0 行** ⇒ 静默无效：事实槽位永远学不到"哪条被用过"
+    （只剩内存冷却 + seen 窗口，重启后从同几条重新开始）
+    ⇒ 这是"下沉/上浮"方案的地基 ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _seed(self):
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, "s:1", ["u-1"])
+            self.store._add_fact(db, "s:1", {
+                "category": "preference", "subject": "周武", "content": "爱喝美式",
+                "reason": "测试", "scenario": "", "relations": [], "tags": [],
+                "source_ids": [], "importance": 6,
+            })
+            fid = db.execute("SELECT id FROM facts LIMIT 1").fetchone()[0]
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted,permanent,cold)"
+                " VALUES('r1','s:1','user',0,1,1,'s','c',?,'1',1,'session',1,0,0,0)",
+                (json.dumps(["u-1"]),),
+            )
+        return fid
+
+    def test_fact_kind_writes_facts_table(self):
+        fid = self._seed()
+        self.store.mark_rotation([fid], [], "fact")
+        self.assertEqual(self.store.rotation_stats("fact").get(fid), (1, 0),
+                         "kind='fact' 没写进 facts 表 ✗ ⇒ 事实轮换学不到「被用过」✓")
+        self.store.mark_rotation([], [fid], "fact")
+        self.assertEqual(self.store.rotation_stats("fact").get(fid), (1, 1), "「用上」也要记 ✓")
+
+    def test_record_kind_unchanged(self):
+        """不能改坏档案侧 ✓（默认 kind 仍是 record ✓）"""
+        self._seed()
+        self.store.mark_rotation(["r1"], [], "record")
+        self.assertEqual(self.store.rotation_stats("record").get("r1"), (1, 0))
+        self.store.mark_rotation(["r1"], [])          # 老调用方式（不传 kind）✓
+        self.assertEqual(self.store.rotation_stats("record").get("r1"), (2, 0))
+
+    def test_kinds_are_isolated(self):
+        """两边的计数必须互不污染 ✓"""
+        fid = self._seed()
+        self.store.mark_rotation([fid, "r1"], [], "fact")
+        self.assertEqual(self.store.rotation_stats("fact").get("r1"), None,
+                         "事实口径不该写进 records 的 id ✓")
+        self.assertEqual(self.store.rotation_stats("record").get("r1"), None)
+
+
+class CompressRaceToleranceCase(unittest.TestCase):
+    """压缩遇到**竞态冲突**不该报失败 ✓（2026-09-18 查出并修）
+
+    `store.compress()` 用 `(revision, active, deleted)` 做 CAS ✓
+    若源记录在这期间被**别处**（同会话的另一个任务、或直调）压掉了 ⇒ 抛 Conflict ✓
+    而那时**目标已经达成** ✓ ⇒ 报失败会误导（工作台显示红、用户以为出问题）
+
+    实测来源：集成测试 `test_quiet_migrated_sessions_get_compressed_by_sweep`
+    （"扫描排任务 + 直调 compress" ⇒ 修复前在 KIRA_CORE 下 1/3 概率失败 ✓
+    修复后连跑 5 次全过 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.cfg = c.Settings(probability=0.0)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_conflict_does_not_raise(self):
+        """把 compress 换成必抛 Conflict ⇒ 层叠压缩必须**优雅收工** ✓"""
+        sid = "s:race"
+        now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, ["u-1"])
+            for i in range(40):
+                t = now - i * 60
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("rc-%d" % i, sid, ("user", "assistant")[i % 2], t, t, "s%d" % i,
+                     "c%d" % i, json.dumps(["u-1"]), i + 1, now, "session"),
+                )
+            db.commit()
+
+        async def model(*a, **k):
+            return json.dumps({"summary": "摘要", "facts": []})
+
+        engine = e.Engine(self.store, lambda: self.cfg, model, None, None)
+        real_call = self.store.call
+
+        async def racy_call(method, *args, **kwargs):
+            if method == "compress":
+                raise s.Conflict("source changed during compression")
+            return await real_call(method, *args, **kwargs)
+
+        self.store.call = racy_call
+        loop = asyncio.new_event_loop()
+        try:
+            steps = loop.run_until_complete(engine.compress(sid))
+        except s.Conflict:
+            self.fail("竞态冲突被抛出来了 ✗ ⇒ 任务会显示成失败 ✓（其实目标已达成 ✓）")
+        finally:
+            loop.close()
+            self.store.call = real_call
+        self.assertTrue(steps, "应当留一条说明 ✓ 而不是当成空转 ✓")
+        self.assertIn("已被其它任务压缩", json.dumps(steps, ensure_ascii=False))
+
+
+class SelfEchoDowngradeCase(unittest.TestCase):
+    """bot 自述的事实只**降序**，不删不藏 ✓（2026-09-18，用户担心的"自我误导"）
+
+    已有 `v2.18.9 回声防线` 在**渲染**时给这类事实打 `self` 旗标 ✓
+    但**排序没动** ⇒ 照样占常驻版面 ✓ ⇒ 这次补上排序侧 ✓
+    判据与渲染侧完全一致（`src_user == self_id`）✓
+    """
+
+    def test_stable_partition(self):
+        facts = [{"id": 1, "src_user": "u1"}, {"id": 2, "src_user": "bot"},
+                 {"id": 3, "src_user": "u2"}, {"id": 4, "src_user": "bot"}]
+        out = r.self_only_last(facts, "bot")
+        self.assertEqual([f["id"] for f in out], [1, 3, 2, 4], "必须是**稳定**分区 ✓")
+        self.assertEqual(len(out), len(facts), "不许删 ✓")
+
+    def test_no_self_id_is_noop(self):
+        facts = [{"id": 1}, {"id": 2}]
+        self.assertEqual([f["id"] for f in r.self_only_last(facts, "")], [1, 2])
+
+    def test_pack_facts_applies_downgrade(self):
+        facts = [
+            {"id": "s1", "sid": "s", "src_user": "bot", "category": "profile",
+             "content": "我说过我早睡", "importance": 5},
+            {"id": "s2", "sid": "s", "src_user": "u1", "category": "profile",
+             "content": "用户说他早睡", "importance": 5},
+        ]
+        packed = r.pack_facts(facts, current_sid="s", view="flat", self_id="bot")
+        text = json.dumps(packed, ensure_ascii=False)
+        self.assertIn("我说过我早睡", text, "自述事实**不能消失** ✓（仍要能被想起来 ✓）")
+        self.assertIn("用户说他早睡", text)
+        self.assertLess(text.index("用户说他早睡"), text.index("我说过我早睡"),
+                        "自述事实应当排在**后面** ✗（不主动占版面 ✓）")
+
+
+class ArchiveLayerMarkCase(unittest.TestCase):
+    """存档行必须能看出**层级** ✓（2026-09-18：D 项）
+
+    原来存档行只有 `序号|角色|时间|说话人|内容` ✗ —— 模型分不清"事实"和"摘要"、
+    也不知道是第几手概括 ✓ ⇒ 加 `L<n>` 层标（`A`/`U` 之后 ✓）并同步说明文案 ✓
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def test_archive_line_carries_level(self):
+        self.assertIn('marks += "L%d" % _lvl', self.src,
+                      "存档行没有层标 ✗ ⇒ 模型看不出摘要层级 ✓")
+
+    def test_doc_explains_the_marks(self):
+        self.assertIn("L 后数字=摘要层级", self.src,
+                      "说明文案没解释 L 标 ✗ ⇒ 模型不会用 ✓")
+        self.assertIn("*=永久记忆", self.src)
+        self.assertIn("@=来自别的会话", self.src)
+
+
+class FactSinkFloatCase(unittest.TestCase):
+    """事实的**下沉 / 上浮**（2026-09-18 批次 2）
+
+    设计（用户拍板 ✓ 沿用既有术语、不加新概念）：
+    · 「下沉」= 移出常驻 ⇒ 天然落进**轮换槽位**（轮换池是独立查询，不受这里影响）
+    · 「上浮」= 在轮换里被**「用上」**（`rotate_used` ↑）⇒ 分数回升 ⇒ 自动回常驻
+    · 分数 = 重要度×2 + min(被用次数,5)×3 + 新鲜度（30 天 +5 / 90 天 +2）
+    · **重要度 ≥ 8 永不沉**（硬规则 ✓）；阈值设 0 = 关闭下沉
+    """
+
+    NOW = 1_800_000_000.0
+
+    def _fact(self, importance=5, used=0, age_days=0):
+        return {
+            "id": "f1",
+            "importance": importance,
+            "rotate_used": used,
+            "created": self.NOW - age_days * 86400,
+        }
+
+    def test_score_formula(self):
+        self.assertEqual(r.fact_sink_score(self._fact(5, 0, 0), now=self.NOW), 20)
+        self.assertEqual(r.fact_sink_score(self._fact(5, 2, 0), now=self.NOW), 26)
+        self.assertEqual(r.fact_sink_score(self._fact(5, 99, 0), now=self.NOW), 35,
+                         "被用次数封顶 5 次（10 + 5×3 + 10 = 35 ✓ 避免刷分 ✓）")
+        self.assertEqual(r.fact_sink_score(self._fact(3, 0, 200), now=self.NOW), 6,
+                         "老事实没有新鲜度加分 ✓")
+
+    def test_never_sink_high_importance(self):
+        """硬规则：重要度 ≥8 **永不沉** ✓（哪怕很旧、没人用过 ✓）"""
+        for imp in (8, 9, 10):
+            self.assertFalse(r.should_sink(self._fact(imp, 0, 500), 20, now=self.NOW),
+                             "重要度 %d 被下沉了 ✗（用户拍板 ≥8 永不沉 ✓）" % imp)
+
+    def test_low_importance_sinks(self):
+        self.assertTrue(r.should_sink(self._fact(3, 0, 200), 20, now=self.NOW))
+
+    def test_threshold_zero_disables(self):
+        facts = [self._fact(2, 0, 500), self._fact(9, 0, 500)]
+        self.assertEqual(len(r.sink_filter(facts, 0, now=self.NOW)), 2, "0 = 关闭下沉 ✓")
+
+    def test_float_back_when_used(self):
+        """**上浮**：被轮换带进来并用上之后 ⇒ 分数回升 ⇒ 不再被下沉 ✓"""
+        sunk = self._fact(3, 0, 200)
+        self.assertTrue(r.should_sink(sunk, 20, now=self.NOW), "前置：先能沉 ✓")
+        # 3×2=6；用 1 次 +3 ⇒ 9 < 12 还沉 ✓；用 2 次 +6 ⇒ 12 ≥ 12 浮回 ✓
+        self.assertTrue(r.should_sink(self._fact(3, 1, 200), 12, now=self.NOW),
+                        "用 1 次（9 分）不该浮回 ✓ 阈值必须真的在拦 ✓")
+        used = self._fact(3, 2, 200)                      # 在轮换里被用上 2 次 ✓
+        self.assertFalse(r.should_sink(used, 12, now=self.NOW),
+                         "被用上了还沉 ✗ ⇒ 上浮转不起来 ✓")
+
+    def test_filter_keeps_order_and_no_mutation(self):
+        facts = [{"id": "a", "importance": 9, "rotate_used": 0, "created": self.NOW},
+                 {"id": "b", "importance": 2, "rotate_used": 0,
+                  "created": self.NOW - 400 * 86400},      # 老且没人用过 ⇒ 该沉 ✓
+                 {"id": "c", "importance": 6, "rotate_used": 5, "created": self.NOW}]
+        before = json.dumps(facts, ensure_ascii=False)
+        kept = r.sink_filter(facts, 20, now=self.NOW)
+        self.assertEqual([f["id"] for f in kept], ["a", "c"], "顺序要稳定、该留的要留 ✓")
+        self.assertEqual(json.dumps(facts, ensure_ascii=False), before,
+                         "不许就地修改（调用方可能还要用 ✓）")
+
+
+class EntityIdentityCase(unittest.TestCase):
+    """身份绑定（2026-09-18 批次 3）—— 反例守则，用户拍板的原则是**宁可少绑，不可绑错**
+
+    ① 结构化（确定性 ✓ 无需证据）：`qq:dm:<号>` ⇒ `qq:<号>`（私聊会话 ⇒ 归属人）
+    ② **群号 ≠ 人号**：`qq:gm:<号>` ⇒ 绝不归到 `qq:<号>`（群里那个数字是**群号**）
+    ③ `unresolved:*` ⇒ 不参与任何合并（不知道就别猜）
+    ④ 同名不同 QQ ⇒ **绝不绑**（绑定表按 raw 存 ⇒ 两个 raw 各自独立）
+    ⑤ 自身别名（我/自己/bot…）⇒ 归自身 ✓ 但**有其它归属时不抢** ✓
+    ⑥ 人工绑定**优先于**自动 ✓ 且**可解绑**（解绑后立刻回到未绑定）
+    ⑦ `legacy:self` ⇒ 自身 ✓（迁移遗留 ✓ 可撤销 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_structured_normalization(self):
+        self.assertEqual(i.canonical_key("qq:769690776", self_id="qq:9"), "qq:769690776")
+        self.assertEqual(i.canonical_key("qq:dm:769690776", self_id="qq:9"), "qq:769690776",
+                         "私聊会话要归到**归属人** ✓")
+        self.assertEqual(i.canonical_key("qq:gm:427674145", self_id="qq:9"),
+                         "qq:gm:427674145",
+                         "群**永远**不归到同号的人 ✗（群号≠人号 ✓）")
+        self.assertNotEqual(i.canonical_key("qq:gm:769690776", self_id="qq:9"), "qq:769690776",
+                            "群号与人号恰好相同也不许合 ✗")
+
+    def test_unknown_keys_are_left_alone(self):
+        for key in ("unresolved:qq:1", "u-3", "周武", "群里的匿名"):
+            self.assertEqual(i.canonical_key(key, self_id="qq:9"), key,
+                             "判不了就**原样返回**（未绑定）✓ 不许猜 ✓")
+
+    def test_self_alias_only_when_not_bound(self):
+        self.assertEqual(i.canonical_key("我", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("BOT", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("bot", self_id="qq:9"), "qq:9")
+        # ④ 但若它**已经归属别人**（绑定表里写着）⇒ 以绑定表为准 ✓ 不许抢 ✓
+        self.assertEqual(i.canonical_key("BOT", links={"BOT": "qq:123"}, self_id="qq:9"),
+                         "qq:123", "自身别名不许覆盖已有归属 ✓")
+
+    def test_legacy_keys(self):
+        self.assertEqual(i.canonical_key("legacy:self", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("legacy:user:769690776", self_id="qq:9"),
+                         "qq:769690776", "迁移的人按同号归一（适配器确定时）✓")
+        self.assertEqual(i.canonical_key("legacy:user:769690776", legacy_adapter=""),
+                         "legacy:user:769690776", "适配器不确定 ⇒ **保守不归** ✓")
+
+    def test_same_name_different_qq_never_merge(self):
+        """② 同名不同 QQ ⇒ 绑不绑是**两条独立记录** ✓ 绝不互相牵扯 ✓"""
+        self.store.link_entity("周武", "qq:7696", "cooccur", "群 A 同现")
+        self.store.link_entity("周武（猫）", "qq:1437", "cooccur", "群 B 同现")
+        links = self.store.entity_links()
+        self.assertEqual(links["周武"], "qq:7696")
+        self.assertEqual(links["周武（猫）"], "qq:1437")
+
+    def test_manual_beats_auto_and_can_unlink(self):
+        self.store.link_entity("周武", "qq:7696", "cooccur", "自动推断")
+        self.store.link_entity("周武", "qq:1437", "manual", "人工指认")     # 人工覆盖 ✓
+        self.assertEqual(self.store.entity_links()["周武"], "qq:1437")
+        self.assertTrue(self.store.unlink_entity("周武"))
+        self.assertNotIn("周武", self.store.entity_links(),
+                         "解绑后必须立刻回到未绑定 ✓")
+        self.assertEqual(i.canonical_key("周武", links=self.store.entity_links()), "周武")
+
+    def test_canonical_links_listing(self):
+        self.store.link_entity("周武", "qq:7696", "cooccur", "群 A")
+        self.store.link_entity("武哥", "qq:7696", "manual", "他自称")
+        raws = sorted(x["raw"] for x in self.store.links_of_canonical("qq:7696"))
+        self.assertEqual(raws, ["周武", "武哥"], "同一人挂着的所有写法要能列出来 ✓")
+
+    def test_link_requires_two_distinct_keys(self):
+        self.assertFalse(self.store.link_entity("qq:1", "qq:1"), "自己绑自己没意义 ✓")
+        self.assertFalse(self.store.link_entity("", "qq:1"), "空键不许绑 ✓")
+        self.assertEqual(self.store.entity_links(), {})
+
+
+class TidyAuditUntouchedCase(unittest.TestCase):
+    """**tidy / audit 不许被身份绑定搞失效** ✓（用户明确要求 ✓）
+
+    现阶段（批次 3 第一步）身份绑定**只新增**：
+    · `identity.normalize_structured()` / `canonical_key()`（纯函数，没人调用 ✓）
+    · `storage.entity_links` 表 + 4 个 API（没人调用 ✓）
+    ⇒ 所以 tidy / audit / 合并 / 压缩的**输入键一点没变** ✓
+
+    这条守卫把"**要接就得连测试一起接**"钉死 ✓：
+    `canonical_key` / `normalize_structured` 出现在 engine.py / main.py 时，
+    必须同时更新本守卫并补上"接了之后 tidy/audit 仍然正确"的专项测试 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+
+    def test_identity_not_wired_into_hot_paths_yet(self):
+        for name in ("engine.py", "main.py"):
+            src = (self.root / name).read_text(encoding="utf-8")
+            self.assertNotIn("canonical_key", src,
+                             "%s 里出现了 canonical_key ✗ ⇒ 接线时必须同步补 "
+                             "tidy/audit 的专项测试并更新本守卫 ✓" % name)
+            self.assertNotIn("normalize_structured", src,
+                             "%s 里出现了 normalize_structured ✗ ⇒ 同上 ✓" % name)
+            self.assertNotIn("subject_variants", src.replace(
+                'from .identity import subject_variants',
+                '').replace('subject_variants,', '').replace(
+                'subject_variants(subject, _links)', ''),
+                             "%s 里出现了 subject_variants ✗ ⇒ 接线必须连测试一起 ✓" % name)
+
+    def test_tidy_and_audit_prompts_still_intact(self):
+        """顺手钉住：tidy / audit 的关键约定**不许被改掉** ✓"""
+        src = (self.root / "engine.py").read_text(encoding="utf-8")
+        for needle, why in (
+            ("继续常驻", "tidy 的 keep 语义 ✓"),
+            ("移出常驻", "tidy 的 extract 语义 ✓"),
+            ("only_self=true", "审计里『不许据自述提重要度』的约定"),
+            ("与用户冲突以用户为准", "提取的冲突规则 ✓"),
+        ):
+            self.assertIn(needle, src, "tidy/audit 的关键约定消失了 ✗：%s" % why)
+
+
+class IdentityMapCase(unittest.TestCase):
+    """`identity_map()`：给显示/分组用的**全量解析映射** ✓（2026-09-18 批次 3 第二步）
+
+    规则**只在后端一处**（`identity.canonical_key`）✓ 前端只查表 ⇒ 不会前后端漂移 ✓
+    拿不到映射的键 ⇒ 前端原样显示 ✓（= 未绑定 ✓ 与改造前完全一致 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, "s:1", ["周武", "qq:dm:769690776", "qq:gm:427674145"])
+            self.store._add_fact(db, "s:1", {
+                "category": "profile", "subject": "周武", "content": "爱喝美式",
+                "reason": "测试", "scenario": "", "relations": [], "tags": [],
+                "source_ids": [], "importance": 6,
+            })
+            db.commit()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_structured_and_manual_resolution(self):
+        self.store.link_entity("周武", "qq:769690776", "cooccur", "群 A 同现")
+        m = self.store.identity_map()
+        self.assertEqual(m.get("周武"), "qq:769690776", "绑定表优先 ✓")
+        self.assertEqual(m.get("qq:dm:769690776"), "qq:769690776",
+                         "私聊会话要归到**归属人** ✓")
+        self.assertNotIn("qq:gm:427674145", m, "群**不许**归到同号的人 ✓（保持原样 ✓）")
+
+    def test_unbound_keys_absent_from_map(self):
+        m = self.store.identity_map()
+        self.assertNotIn("qq:gm:427674145", m)
+        self.assertNotIn("周武", m, "没绑定 ⇒ 不出现在映射里 ⇒ 前端原样显示 ✓")
+
+    def test_link_never_touches_data(self):
+        """用户强调：**不能让 tidy / audit 失效** ⇒ 绑定只增删**映射** ✓ 不动数据 ✓"""
+        def counts():
+            with self.store.connect() as db:
+                return (
+                    db.execute("SELECT count(*) FROM facts").fetchone()[0],
+                    db.execute("SELECT count(*) FROM records").fetchone()[0],
+                    db.execute("SELECT count(*) FROM entity_links").fetchone()[0],
+                )
+        before = counts()
+        self.store.link_entity("周武", "qq:769690776", "manual", "人工")
+        self.store.link_entity("武哥", "qq:769690776", "manual", "人工")
+        mid = counts()
+        self.assertEqual(mid[:2], before[:2], "绑定**不许**改动 facts / records ✓")
+        self.assertEqual(mid[2], before[2] + 2)
+        self.store.unlink_entity("周武")
+        self.store.unlink_entity("武哥")
+        after = counts()
+        self.assertEqual(after, before, "解绑后应完全回到原样 ✓")
+
+
+class IdentityInferenceCase(unittest.TestCase):
+    """`infer_links()`：从事实里自动推断「名字 → QQ」✓（2026-09-18 批次 3 第三步）
+
+    判据（用户拍板）：同会话里这个名字**只被一个 QQ 说过** ⇒ 才绑 ✓
+    歧义（两个说话人 / 跨会话不一致）⇒ **一律不绑** ✓
+    ⚠️ 且：**助手自己说的话不算证据** ✓（否则机器人说"周武喜欢猫"会把"周武"绑到机器人头上 ✗）
+    """
+
+    SELF = "qq:9000"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _fact(self, sid, subject, speaker, tag):
+        """造一条事实：**说话人**通过它的来源记录的 users[0] 体现 ✓（与 attach_evidence 口径一致 ✓）"""
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, [speaker])
+            rid = "rec-%s" % tag
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted,permanent,cold)"
+                " VALUES(?,?,'user',0,?,?,?,?,?,1,?, 'session',1,0,0,0)",
+                (rid, sid, time.time(), time.time(), "s", "c",
+                 json.dumps([speaker]), time.time()),
+            )
+            self.store._add_fact(db, sid, {
+                "category": "profile", "subject": subject, "content": "内容 " + tag,
+                "reason": "测试", "scenario": "", "relations": [], "tags": [],
+                "source_ids": [rid], "importance": 6,
+            })
+            db.commit()
+
+    def test_unique_speaker_gets_bound(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 1)
+        self.assertEqual(self.store.entity_links().get("周武"), "qq:7696")
+
+    def test_two_speakers_same_session_is_ambiguous(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self._fact("s:1", "周武", "qq:1437", "b")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 0, "同会话两个说话人 ⇒ 不许绑 ✗")
+        self.assertIn("周武", rep["ambiguous"], "要列进『待指认』清单 ✓")
+        self.assertEqual(self.store.entity_links(), {})
+
+    def test_assistant_speech_is_not_evidence(self):
+        """**助手自己说的话不算证据** ✓（用户最担心的"自我误导"在这一层的对应面 ✓）"""
+        self._fact("s:1", "周武", self.SELF, "a")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 0, "机器人的话不能当绑定证据 ✗")
+        self.assertEqual(self.store.entity_links(), {})
+
+    def test_manual_link_is_never_overwritten(self):
+        self.store.link_entity("周武", "qq:1437", "manual", "人工指认")
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(self.store.entity_links()["周武"], "qq:1437", "人工优先 ✓ 不许被覆盖 ✗")
+
+    def test_idempotent(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self.store.infer_links(self_id=self.SELF)
+        rep2 = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep2["added"], 0, "重复跑不该重复加 ✓")
+        self.assertGreaterEqual(rep2["skipped"], 1)
+
+
+class IdentityGroupingCase(unittest.TestCase):
+    """事实分组要按**规范键** ✓（2026-09-18 批次 3 第四步）
+
+    同一人的不同写法（名字「周武」与 `qq:7696`）在简报里应当**合成一组** ✓
+    ⚠️ 没绑定 ⇒ 行为与改造前**完全一致**（两组）✓ —— 这就是"失败/未接线也安全" ✓
+    """
+
+    def _facts(self):
+        return [
+            {"id": "f1", "sid": "s", "subject": "周武", "category": "profile",
+             "content": "爱喝美式", "importance": 6, "created": time.time()},
+            {"id": "f2", "sid": "s", "subject": "qq:7696", "category": "profile",
+             "content": "养了只猫", "importance": 6, "created": time.time()},
+        ]
+
+    def _group_count(self, links):
+        packed = r.pack_facts(self._facts(), current_sid="s", view="grouped",
+                              codes={}, self_id="qq:9", links=links)
+        return len(packed or {})
+
+    def test_bound_subjects_share_one_group(self):
+        self.assertEqual(self._group_count({"周武": "qq:7696"}), 1,
+                         "绑定之后同一人应当合成一组 ✓")
+
+    def test_unbound_keeps_original_behavior(self):
+        self.assertEqual(self._group_count(None), 2, "没绑定 ⇒ 与改造前一致（两组）✓")
+        self.assertEqual(self._group_count({}), 2, "空映射 ⇒ 同上 ✓")
+
+    def test_content_not_lost(self):
+        packed = r.pack_facts(self._facts(), current_sid="s", view="grouped",
+                             codes={}, self_id="qq:9", links={"周武": "qq:7696"})
+        text = json.dumps(packed, ensure_ascii=False)
+        self.assertIn("爱喝美式", text)
+        self.assertIn("养了只猫", text)
+
+
+class SubjectVariantsCase(unittest.TestCase):
+    """检索侧主体扩展 ✓（2026-09-18 批次 3 第四步）
+
+    动机：检索工具是按 `subject=` **精确查**的 ✓ ⇒ 问「周武」找不到记成 `qq:7696` 的事实 ✗
+    ⇒ 先归一，再把**所有写法**一起搜 ✓（两个方向都成立 ✓）
+    ⚠️ 没绑定 / 空提问 ⇒ **只有它自己** ⇒ 行为与改造前完全一致 ✓
+    """
+
+    def test_expands_both_directions(self):
+        links = {"周武": "qq:7696"}
+        self.assertEqual(sorted(i.subject_variants("周武", links)), ["qq:7696", "周武"])
+        self.assertEqual(sorted(i.subject_variants("qq:7696", links)), ["qq:7696", "周武"],
+                         "反过来问也要能找到名字写法的那些 ✓")
+
+    def test_unbound_keeps_original_behavior(self):
+        self.assertEqual(i.subject_variants("周武", {}), ["周武"])
+        self.assertEqual(i.subject_variants("周武", None), ["周武"])
+        self.assertEqual(i.subject_variants("", {"周武": "qq:7696"}), [],
+                         "空提问 ⇒ 不扩展（也不该乱查 ✓）")
+
+    def test_limit_guards_runaway(self):
+        links = {"n%d" % n: "qq:1" for n in range(50)}
+        self.assertLessEqual(len(i.subject_variants("n0", links, limit=6)), 6)
+
+    def test_unrelated_names_not_pulled_in(self):
+        links = {"周武": "qq:7696", "爱奈丽": "qq:1437"}
+        self.assertEqual(i.subject_variants("周武", links), ["周武", "qq:7696"],
+                         "不许把别人也拉进来 ✗")
+
+
+class FactHealthViewCase(unittest.TestCase):
+    """事实体检视图（2026-09-18 批次 4）
+
+    判据与下沉**同一份函数**（`fact_sink_score` / `should_sink`）⇒ 视图与实际行为不漂移 ✓
+    这里钉住三件事：① 分数低的排前面 ✓ ② 标注与实际判定一致 ✓ ③ ≥8 标"永不沉" ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, "s:1", ["周武"])
+            for tag, imp, age in (("low", 2, 400), ("mid", 5, 0), ("high", 9, 400)):
+                self.store._add_fact(db, "s:1", {
+                    "category": "profile", "subject": "周武", "content": "事实-" + tag,
+                    "reason": "t", "scenario": "", "relations": [], "tags": [],
+                    "source_ids": [], "importance": imp,
+                })
+            db.execute("UPDATE facts SET created=?", (self.now - 400 * 86400,))   # 全部变成老事实 ✓
+            db.commit()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_sorted_ascending_and_flags(self):
+        data = self.store.fact_health(threshold=12)
+        rows = data["rows"]
+        self.assertEqual([f["content"] for f in rows],
+                         ["事实-low", "事实-mid", "事实-high"],
+                         "分数应当升序（最该处理的在前 ✓）")
+        self.assertTrue(rows[0]["sunk"], "重要度 2 + 很旧 ⇒ 该下沉 ✓")
+        # 重要度 5 + 超过 90 天没用过 ⇒ 10 分 < 阈值 12 ⇒ **该沉** ✓
+        #（这正是设计意图："又旧又没被用过"才沉 ✓ 新鲜的一律留住 ✓）
+        self.assertTrue(rows[1]["sunk"], "重要度 5 且 400 天没被用过 ⇒ 该下沉 ✓")
+        self.assertTrue(rows[2]["never_sink"], "重要度 9 ⇒ 标永不沉 ✓")
+        self.assertFalse(rows[2]["sunk"], "永不沉的不许被判下沉 ✓")
+
+    def test_matches_sink_decisions(self):
+        """视图的 sunk 标必须与 `should_sink` **逐条一致** ✓（同一份函数 ✓）"""
+        data = self.store.fact_health(threshold=12)
+        for f in data["rows"]:
+            self.assertEqual(f["sunk"], r.should_sink(f, 12, now=data["now"]),
+                             "视图与判定漂移了 ✗：%s" % f["content"])
+
+    def test_threshold_zero_means_no_sink(self):
+        data = self.store.fact_health(threshold=0)
+        self.assertFalse(any(f["sunk"] for f in data["rows"]), "阈值 0 ⇒ 关闭下沉 ✓")
+
+
+class ToolNameConsistencyCase(unittest.TestCase):
+    """提示词/hint 里提到的**工具名必须真实存在** ✓（2026-09-18 用户日志审计发现）
+
+    实测：主动召回的 hint 里写着「用 **ReadMemoryArchive**(id)」✗ —— 而那个工具**从未注册** ✗
+    （真实名字是 `SearchMemoryArchive` ✓ ⇒ 模型照着念会调一个**不存在的工具** ✓）
+    这类"文案指到不存在的东西"在本项目里出现过多次 ⇒ 立成守卫 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.main = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def test_registered_tools(self):
+        self.assertIn('name="SearchMemoryArchive"', self.main)
+
+    def test_no_phantom_tool_names(self):
+        # 曾经出现过的幽灵名（一律不许再回来 ✓）
+        for ghost in ("ReadMemoryArchive", "GetMemoryArchive", "MemorySearch"):
+            self.assertNotIn(ghost, self.main,
+                             "提示词/hint 里又出现了不存在的工具名 ✗：%s" % ghost)
+
+    def test_hint_points_to_real_tool(self):
+        self.assertIn("SearchMemoryArchive(ids=[短码])", self.main,
+                      "hint 必须指向真实工具与真实参数 ✓")
+
+
+class RecallPayloadPurityCase(unittest.TestCase):
+    """发给模型的工具载荷必须**干净** ✓（2026-09-18 用户实测：内部物泄漏给模型 ✗）
+
+    规则（用户对齐后会写进规范 ✓）：
+    · 内部记账不许出现：`observed` 时间戳 ✓ `revision`/`updated` ✓ `lookup_id` ✓ `history` ✓
+    · 常量/重复话不许出现：`label`（常量 ✗）`identity_note`（同一句重复 N 遍 ✗）
+    · 空值/空数组/默认值不许出现：`sp:""` `versions:[]` `legacy_sources:[]` `ci` ✗
+    · 同值冗余计数合一：`excluded_count` + `already_seen` ⇒ `seen` ✓
+    · **32 位十六进制内部主键**不许出现在内容条目里 ✓
+    ⚠️ 只约束"发给模型的载荷" ✓ 存储层照旧保留这些字段 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.src = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def test_slim_payload_removes_internal_fields(self):
+        """行为验证：拿一份"最脏"的载荷喂进去 ⇒ 出来的必须是干净的 ✓
+
+        `main.py` 依赖宿主（`core.plugin` ✓）⇒ 没设 KIRA_CORE 时跳过 ✓
+        （我在全量轮次里带 KIRA_CORE 跑 ⇒ 这条会被真正执行 ✓）
+        """
+        if not os.environ.get("KIRA_CORE"):
+            self.skipTest("需要 KIRA_CORE（main.py 依赖宿主）")
+        module = importlib.import_module("alife_diet_test.main")
+        plugin = object.__new__(module.AlifeMemoryPlugin)      # 不走 __init__ ✓ 只测这个方法 ✓
+        dirty = {
+            "ok": True,
+            "excluded_count": 27, "already_seen": 27,
+            "archive": {
+                "s": "存档摘要", "t": "09-15 20:41", "sp": "", "lv": 1, "kids": 40,
+                "next": 20, "versions": [], "legacy_sources": [], "ci": True,
+            },
+            "names": [
+                {"id": "qq:769690776", "kind": "user", "name": "周武", "revision": 2,
+                 "updated": 1789726763.0, "label": "名称待补全",
+                 "identity_note": "使用稳定账号区分身份，昵称相同不会合并。",
+                 "lookup_id": "qq:769690776",
+                 "history": [{"name": "周武", "source": "onebot", "context": "",
+                              "observed": 1789398866.483097, "reason": "批量确认"}]},
+            ],
+        }
+        out = plugin.slim_payload(dirty)
+        text = json.dumps(out, ensure_ascii=False)
+        for gone in ("observed", "revision", "updated", "lookup_id", "history",
+                     "label", "identity_note", "versions", "legacy_sources",
+                     "already_seen", "excluded_count", 'sp"', "next", "ci"):
+            self.assertNotIn(gone, text, "内部物还在 ✗：%s" % gone)
+        self.assertEqual(out["seen"], 27, "同值计数要合一 ✓")
+        self.assertEqual(out["names"], [{"i": "qq:769690776", "n": "周武"}],
+                         "画像实体要压成 {i,n} ✓")
+
+    def test_purity_survives_storage_layer(self):
+        """存储层不许被牵连 ✓（名字编辑页/历史记录还要这些字段 ✓）"""
+        blob = (self.root / "storage.py").read_text(encoding="utf-8") + self.src
+        for keep in ("observed", "identity_note", "lookup_id", "history"):
+            self.assertIn(keep, blob,
+                          "这些字段是给**界面**用的 ✓ 不该在数据/接口层被删 ✗：%s" % keep)
+
+
+class RecallPipelineConsistencyCase(unittest.TestCase):
+    """两条召回路必须共用**同一套文本管线** ✓（2026-09-18 用户实测漏了一条 ✗）
+
+    既有三件套（检索侧一直用 ✓）：`media_only` / `clean_text` / `trim_nested`（官方封装 `model_text` ✓）
+    "取全文"那条**原来没接** ✗ ⇒ 表情包/图片的机器描述整段进了模型 ✓
+    ⇒ 这条守卫钉住：**内容条目必须同时过 `media_only` 与 `model_text`** ✓
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def test_content_view_uses_same_pipeline(self):
+        i = self.src.find("_rows = archive.get")
+        self.assertGreater(i, 0, "找不到内容视图那段 ✗")
+        seg = self.src[i:i + 1600]
+        self.assertIn("media_only(", seg, "内容视图没过滤媒体-only ✗")
+        self.assertIn("model_text(", seg, "内容视图没走官方管线 ✗")
+        self.assertIn('"r":', seg)
+        self.assertIn('"s":', seg)
+        self.assertNotIn('"id": _item', seg, "内部主键不许进载荷 ✗")
+
+    def test_search_path_still_uses_pipeline(self):
+        i = self.src.find('"i": shorts.get')
+        self.assertGreater(i, 0)
+        seg = self.src[i:i + 400]
+        self.assertIn("model_text(", seg, "搜索侧管线被谁动了 ✗")
+
+
+class RecallTextKeepsIdsCase(unittest.TestCase):
+    """召回文本**必须保留可引用的短码** ✓（用户明确提醒 ✓）
+
+    "别忘了 bot 的全编辑能力哦（除了 L0 不可修外的）" ✓
+    ⇒ bot 要"改"，就得能从召回结果里**指到那一条** ✓
+        修正事实 / 更正名字 / 归档，全靠返回里的**短码** ✓
+    ⇒ 这条守卫钉住：召回文本的行首**必须是短码** ✓（且短码不是内部长 id ✗）
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def test_search_line_starts_with_short_code(self):
+        i = self.src.find('lines.append("%s %s %s%s｜%s"')
+        self.assertGreater(i, 0, "找不到搜索行渲染 ✗")
+        seg = self.src[i:i + 220]
+        self.assertIn('it.get("i"', seg, "行首必须是短码 ✗ ⇒ bot 就没法指到那一条 ✓")
+
+    def test_no_long_internal_ids_in_text_view(self):
+        i = self.src.find("def recall_text_view")
+        seg = self.src[i:i + 4200]
+        for bad in ('it.get("id"', 'row.get("id"', 'n.get("id"'):
+            self.assertNotIn(bad, seg,
+                             "召回文本里出现了内部长 id ✗（短码才可引用 ✓）：%s" % bad)
+
+    def test_marks_align_with_passive(self):
+        """记号必须与被动侧同款 ✓（★重要度 / L层 / bot / mem / arch / @会话 ✓）"""
+        i = self.src.find("def _marks_of")
+        seg = self.src[i:i + 700]
+        for mark in ('"★%s"', '"L%s"', '"bot"', '"mem"', '"arch"', '"@%s"'):
+            self.assertIn(mark, seg, "记号与被动侧不一致 ✗：%s" % mark)
+
+
+class ProfilePayloadPurityCase(unittest.TestCase):
+    """`profiles`（GetProfile 的"人"视图）也必须瘦身 ✓（2026-09-18 用户："肯定要"）
+
+    实测问题（我造 3 条事实真跑得到的 ✓）：
+      · `summary` 与 `categories` **完全重复** ✗（同 3 句话出现两遍 ✓）
+      · `entity` 里全是内部物 ✗：`kind` / `name:""` / `lookup_id` / `label:"名称待补全"` /
+        `aliases:[]` / `history:[]`
+      · 空值 ✗：`relations: []` / `stats.last_active: 0` / `ok: true`
+    ⚠️ **必须保留** `id` 与 `revision` ✓✓ —— 改名 `correct_name(id, name, revision, reason)`
+       全靠它 ✓（用户强调"别忘了 bot 的全编辑能力" ✓）
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.src = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def _slim(self, payload):
+        if not os.environ.get("KIRA_CORE"):
+            self.skipTest("需要 KIRA_CORE（main.py 依赖宿主）")
+        module = importlib.import_module("alife_diet_test.main")
+        plugin = object.__new__(module.AlifeMemoryPlugin)
+        return plugin.slim_payload(payload)
+
+    def test_profiles_slimmed(self):
+        dirty = {
+            "ok": True,
+            "profiles": [{
+                "entity": {"id": "qq:1", "kind": "user", "name": "", "revision": 4,
+                           "lookup_id": "qq:1", "label": "名称待补全",
+                           "aliases": [], "history": []},
+                "summary": ["周武爱喝美式"],
+                "categories": {"preference": [
+                    {"c": "pr", "u": "周武", "x": "周武爱喝美式", "imp": 7, "t": "09-18",
+                     "src": "4khyio", "reason": "用户说的"}]},
+                "relations": [],
+                "stats": {"facts": 1, "relations": 0, "sessions": 1, "last_active": 0},
+            }],
+        }
+        out = self._slim(dirty)["profiles"][0]
+        self.assertNotIn("summary", out, "重复的 summary 必须去掉 ✗")
+        self.assertEqual(out["i"], "qq:1")
+        self.assertEqual(out["r"], 4, "revision 必须保留 ✓（改名要用 ✓）")
+        self.assertNotIn("kind", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("lookup_id", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("label", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("relations", out, "空 relations 必须去掉 ✗")
+        self.assertEqual(out["st"], {"facts": 1, "sessions": 1}, "空计数不许出现 ✓")
+        self.assertEqual(out["c"]["preference"][0]["src"], "4khyio",
+                         "来源短码 src 要留 ✓（bot 引用来源用 ✓）")
+
+    def test_text_view_keeps_ids_and_src(self):
+        i = self.src.find('profs = value.get("profiles")')
+        self.assertGreater(i, 0, "找不到画像文本分支 ✗")
+        seg = self.src[i:i + 2200]
+        self.assertIn("profile.get(\"i\")", seg.replace("prof.get(\"i\")", "profile.get(\"i\")"))
+        self.assertIn("[r%s]", seg, "revision 记号要输出 ✓")
+        self.assertIn('row["src"]', seg, "来源短码要渲染 ✓")
+
+
+class ShortTimeCrossYearCase(unittest.TestCase):
+    """日期短码的**跨年规则** ✓（2026-09-18 用户确认 ✓ 与被动召回口径一致 ✓）
+
+    规则（`retrieval.short_day` / `short_time` 同一套 ✓）：
+    · **同年** ⇒ `MM-DD`（省 token ✓）/ `MM-DD HH:MM`（记录用 ✓）
+    · **跨年** ⇒ **必须带年份** `YYYY-MM-DD` ✓✓
+      —— 否则模型会把去年的「11-16」当成今年 ✗（docstring 里写的就是这个理由 ✓）
+    · 非法/越界（0 / 负数 / 毫秒戳 / 2000 年前）⇒ **留空** ✓（绝不渲染 1970-01-01 ✗）
+    曾用名（本轮新加 ✓）用的是 **`short_day`** ✓ —— 与**事实侧**同口径 ✓（只要日期 ✓ 不要时分 ✓）
+    """
+
+    def test_same_year_has_no_year(self):
+        now = time.localtime()
+        same = time.mktime((now.tm_year, 3, 15, 10, 30, 0, 0, 0, -1))
+        out = r.short_day(same)
+        self.assertRegex(out, r"^\d{2}-\d{2}$", "同年应当 MM-DD ✓：%s" % out)
+
+    def test_cross_year_keeps_year(self):
+        now = time.localtime()
+        last_year = time.mktime((now.tm_year - 1, 11, 16, 10, 33, 0, 0, 0, -1))
+        out = r.short_day(last_year)
+        self.assertRegex(out, r"^\d{4}-\d{2}-\d{2}$",
+                         "跨年**必须带年份** ✗（否则模型当成今年 ✓）：%s" % out)
+        self.assertIn(str(now.tm_year - 1), out)
+        out2 = r.short_time(last_year)
+        self.assertTrue(out2.startswith(str(now.tm_year - 1)),
+                        "记录用的 short_time 跨年也要带年 ✓：%s" % out2)
+
+    def test_invalid_never_renders_1970(self):
+        for bad in (0, -1, "abc", 1e12):
+            self.assertEqual(r.short_day(bad), "", "非法时间必须留空 ✗：%r" % bad)
+            self.assertEqual(r.short_time(bad), "")
+
+    def test_alias_uses_day_granularity(self):
+        """曾用名用 **short_day** ✓（与事实侧同口径 ✓ 不带时分 ✓）"""
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn('"%s@%s" % (name, short_day(at) if at else "?")', src,
+                      "曾用名必须用 short_day ✓（跨年带年 ✓ 与事实侧一致 ✓）")
+
+
+class ToolDescriptionComplianceCase(unittest.TestCase):
+    """工具描述必须**跟得上实际输出** ✓（2026-09-18 用户要求 ✓）
+
+    这次就是这么抓到两处不合规 ✓：
+    · `GetProfile` 改成紧凑文本后，描述还写着"结果里的 id 是稳定实体 ID"
+      ⇒ 模型看到 `[r3]` 却**没人告诉它要回传** ✗（而 `CorrectMemory` 明确要求带 revision ✓）
+    · `SearchMemoryArchive` 的输出记号（★/L/bot/mem/arch/@）**没在描述里解释** ✗
+    ⇒ 立成常驻守卫 ✓（描述与输出一起改 ✓ 否则报红 ✓）
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def _desc(self, tool):
+        i = self.src.find('name="%s"' % tool)
+        self.assertGreater(i, 0, "找不到工具 %s ✗" % tool)
+        return self.src[i:i + 2200]
+
+    def test_search_explains_marks(self):
+        seg = self._desc("SearchMemoryArchive")
+        for mark in ("同一种紧凑文本", "★重要度", "L 层级", "bot", "arch", "@跨会话"):
+            self.assertIn(mark, seg, "搜索工具描述没解释输出记号 ✗：%s" % mark)
+        self.assertIn("expand", seg, "描述要提到 expand ✓")
+        self.assertIn("allow_seen", seg, "描述要提到 allow_seen ✓")
+
+    def test_profile_explains_revision(self):
+        seg = self._desc("GetProfile")
+        self.assertIn("[rN]", seg, "画像描述要解释 [rN] 记号 ✓")
+        self.assertIn("回传", seg, "画像描述要说清 revision 要**回传** ✓（改名要用 ✓）")
+        self.assertIn("紧凑文本", seg, "画像描述要说清输出形态 ✓")
+
+    def test_correct_memory_requires_revision(self):
+        seg = self._desc("CorrectMemory")
+        self.assertIn("revision", seg, "改名/更新必须要求带 revision ✓")
