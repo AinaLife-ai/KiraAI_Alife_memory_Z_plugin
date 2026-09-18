@@ -3407,6 +3407,11 @@ class AlifeMemoryPlugin(BasePlugin):
     # ── 身份绑定（2026-09-18 批次 3）──────────────────────────────
     #  ⚠️ tidy / audit / 合并 / 压缩的输入**一点没变** ✓
     #     这里只新增"显示与人工指认"用的接口 ✓ 规则全在 storage.identity_map 一处 ✓
+    @register.api(method="GET", path="/fact_health", auth=True)
+    async def api_fact_health(self):
+        """事实体检：按分数从低到高列出，标明"是否该下沉"及**为什么** ✓（只读 ✓）"""
+        return await self.store.call("fact_health", self.settings.fact_sink_threshold)
+
     @register.api(method="GET", path="/entity_links", auth=True)
     async def api_entity_links(self):
         """raw → canonical 的全量映射 ✓（含结构化归一：dm 会话归到人、群仍是群 ✓）"""

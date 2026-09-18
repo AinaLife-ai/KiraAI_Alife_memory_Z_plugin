@@ -1387,7 +1387,12 @@ $("#retryMigration").onclick = () =>
     }
   });
 $$("[data-tab]").forEach(
-  (e) => (e.onclick = () => guard(() => selectTab(e.dataset.tab))),
+  (e) =>
+    (e.onclick = () =>
+      guard(async () => {
+        await selectTab(e.dataset.tab);
+        if (e.dataset.tab === "health") await loadHealth();   // ★ 体检页顺手拉一次 ✓
+      })),
 );
 $("#refresh").onclick = () =>
   guard(async () => {
@@ -2007,6 +2012,51 @@ const nameOf = (value) => displayNames[String(value == null ? "" : value)] ||
 // 这里做一次**静默补载** ✓：拿不到就退回原始 ID ✓（绝不影响主流程 ✓）
 // ── 身份绑定面板（2026-09-18 批次 3）──────────────────────────
 // 规则全在后端 ✓ 这里只提交/展示 ✓ 拿不到数据时**什么都不做** ✓（显示与原来一致 ✓）
+// ── 事实体检（2026-09-18 批次 4）────────────────────────────────
+//  只读列表 ✓ 动作一律复用既有 `/edit`（调重要度 / 软删 ✓ 都可逆 ✓）
+async function loadHealth() {
+  const box = $("#healthList");
+  if (!box) return;
+  try {
+    const data = await api("/fact_health");
+    const rows = (data && data.rows) || [];
+    const meta = $("#healthMeta");
+    if (meta) {
+      const sunk = rows.filter((f) => f.sunk).length;
+      meta.textContent =
+        "共 " + rows.length + " 条 · 阈值 " + (data && data.threshold) +
+        " · 其中 " + sunk + " 条本轮不进常驻（分数低的排在前面）";
+    }
+    box.innerHTML = rows.length
+      ? rows
+          .map((f) => {
+            const state = f.never_sink
+              ? '<span class="pill">永不沉</span>'
+              : f.sunk
+              ? '<span class="pill">该下沉</span>'
+              : '<span class="pill">常驻</span>';
+            const imp = Number(f.importance || 5);
+            return (
+              '<div class="card">' + state +
+              ' <strong>' + esc(f.content) + '</strong>' +
+              '<div class="muted">主体 ' + esc(f.subject) + ' · 重要度 ' + imp +
+              ' · 被用 ' + (f.rotate_used || 0) + ' 次 · 年龄 ' +
+              (f.age_days == null ? "未知" : f.age_days + " 天") +
+              ' · 分数 ' + f.score + '</div>' +
+              '<div class="filters">' +
+              '<button data-imp="' + esc(f.id) + '" data-delta="1">重要度 +1</button>' +
+              '<button data-imp="' + esc(f.id) + '" data-delta="-1">重要度 −1</button>' +
+              '<button data-del="' + esc(f.id) + '">软删</button>' +
+              "</div></div>"
+            );
+          })
+          .join("")
+      : '<p class="muted">还没有事实。</p>';
+  } catch (e) {
+    box.innerHTML = '<p class="muted">读取失败：' + esc(e.message) + "</p>";
+  }
+}
+
 async function loadBindings() {
   const box = $("#bindList");
   if (!box) return;
@@ -2652,5 +2702,35 @@ document.addEventListener("click", (ev) => {
         loadBindings();
       })
       .catch((e) => toast("绑定失败：" + e.message));
+  }
+});
+
+// 事实体检的动作（委托 ✓）：调重要度 / 软删 —— 全部走既有 `/edit` ✓ 可逆 ✓
+document.addEventListener("click", (ev) => {
+  const t = ev.target;
+  if (!(t instanceof HTMLElement) || t.tagName !== "BUTTON") return;
+  const impId = t.getAttribute("data-imp");
+  if (impId) {
+    const delta = Number(t.getAttribute("data-delta") || 0);
+    const card = t.closest(".card");
+    const m = card && card.querySelector(".muted");
+    const cur = m ? Number((m.textContent.match(/重要度 (\d+)/) || [])[1] || 5) : 5;
+    const next = Math.max(1, Math.min(10, cur + delta));
+    api("/edit", { kind: "fact", target: impId, patch: { importance: next } })
+      .then(() => {
+        toast("重要度已改为 " + next);
+        loadHealth();
+      })
+      .catch((e) => toast("修改失败：" + e.message));
+    return;
+  }
+  const delId = t.getAttribute("data-del");
+  if (delId) {
+    api("/edit", { kind: "fact", target: delId, patch: { deleted: true } })
+      .then(() => {
+        toast("已移入回收站（可恢复）");
+        loadHealth();
+      })
+      .catch((e) => toast("删除失败：" + e.message));
   }
 });

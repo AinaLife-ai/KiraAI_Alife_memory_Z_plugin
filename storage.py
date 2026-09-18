@@ -1256,6 +1256,41 @@ class Store:
                 for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
             }
 
+    def fact_health(self, threshold=12, now=None, limit=300):
+        """事实体检数据 ✓（2026-09-18 批次 4）
+
+        给前端一页看清：**哪些事实该下沉、为什么** ✓
+        · 分数口径与下沉判定**完全一致**（复用 `retrieval.fact_sink_score/should_sink` ✓
+          一处定义 ⇒ 视图与实际行为不会漂移 ✓）
+        · 排序：**分数低的在前**（最该处理的先看到 ✓）
+        · ⚠️ 只读 ✓ 不改任何数据 ✓（动作由前端复用既有 `/edit` ✓）
+        """
+        from . import retrieval
+        now = float(now or time.time())
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, sid, subject, content, category, importance,"
+                " rotate_shown, rotate_used, created, event_at FROM facts"
+                " WHERE deleted=0 ORDER BY importance ASC, created ASC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            fact = {
+                "id": row[0], "sid": row[1], "subject": row[2], "content": row[3],
+                "category": row[4], "importance": row[5], "rotate_shown": row[6],
+                "rotate_used": row[7], "created": row[8], "event_at": row[9],
+            }
+            created = float(fact.get("created") or 0)
+            fact["age_days"] = max(0, int((now - created) / 86400)) if created else None
+            fact["score"] = retrieval.fact_sink_score(fact, now=now)
+            fact["sunk"] = retrieval.should_sink(fact, threshold, now=now)
+            fact["never_sink"] = int(fact.get("importance") or 5) >= retrieval.NEVER_SINK_IMPORTANCE
+            out.append(fact)
+        out.sort(key=lambda f: (f["score"], f["importance"], f["created"] or 0))
+        return {"threshold": int(threshold), "count": len(out),
+                "now": now, "rows": out}
+
     def infer_links(self, self_id="", limit=4000):
         """从事实里**自动推断**「名字 → QQ」绑定 ✓（2026-09-18 批次 3 第三步）
 

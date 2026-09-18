@@ -2213,3 +2213,54 @@ class SubjectVariantsCase(unittest.TestCase):
         links = {"周武": "qq:7696", "爱奈丽": "qq:1437"}
         self.assertEqual(i.subject_variants("周武", links), ["周武", "qq:7696"],
                          "不许把别人也拉进来 ✗")
+
+
+class FactHealthViewCase(unittest.TestCase):
+    """事实体检视图（2026-09-18 批次 4）
+
+    判据与下沉**同一份函数**（`fact_sink_score` / `should_sink`）⇒ 视图与实际行为不漂移 ✓
+    这里钉住三件事：① 分数低的排前面 ✓ ② 标注与实际判定一致 ✓ ③ ≥8 标"永不沉" ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.now = time.time()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, "s:1", ["周武"])
+            for tag, imp, age in (("low", 2, 400), ("mid", 5, 0), ("high", 9, 400)):
+                self.store._add_fact(db, "s:1", {
+                    "category": "profile", "subject": "周武", "content": "事实-" + tag,
+                    "reason": "t", "scenario": "", "relations": [], "tags": [],
+                    "source_ids": [], "importance": imp,
+                })
+            db.execute("UPDATE facts SET created=?", (self.now - 400 * 86400,))   # 全部变成老事实 ✓
+            db.commit()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_sorted_ascending_and_flags(self):
+        data = self.store.fact_health(threshold=12)
+        rows = data["rows"]
+        self.assertEqual([f["content"] for f in rows],
+                         ["事实-low", "事实-mid", "事实-high"],
+                         "分数应当升序（最该处理的在前 ✓）")
+        self.assertTrue(rows[0]["sunk"], "重要度 2 + 很旧 ⇒ 该下沉 ✓")
+        # 重要度 5 + 超过 90 天没用过 ⇒ 10 分 < 阈值 12 ⇒ **该沉** ✓
+        #（这正是设计意图："又旧又没被用过"才沉 ✓ 新鲜的一律留住 ✓）
+        self.assertTrue(rows[1]["sunk"], "重要度 5 且 400 天没被用过 ⇒ 该下沉 ✓")
+        self.assertTrue(rows[2]["never_sink"], "重要度 9 ⇒ 标永不沉 ✓")
+        self.assertFalse(rows[2]["sunk"], "永不沉的不许被判下沉 ✓")
+
+    def test_matches_sink_decisions(self):
+        """视图的 sunk 标必须与 `should_sink` **逐条一致** ✓（同一份函数 ✓）"""
+        data = self.store.fact_health(threshold=12)
+        for f in data["rows"]:
+            self.assertEqual(f["sunk"], r.should_sink(f, 12, now=data["now"]),
+                             "视图与判定漂移了 ✗：%s" % f["content"])
+
+    def test_threshold_zero_means_no_sink(self):
+        data = self.store.fact_health(threshold=0)
+        self.assertFalse(any(f["sunk"] for f in data["rows"]), "阈值 0 ⇒ 关闭下沉 ✓")
