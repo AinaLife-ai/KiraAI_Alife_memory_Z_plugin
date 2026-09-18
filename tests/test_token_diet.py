@@ -993,3 +993,63 @@ class TidyForceWiringCase(unittest.TestCase):
         self.assertIn('_force = bool(_d.get("force"))', code, "引擎没解析 force ✗")
         self.assertIn("0 if force else cfg.permanent_tidy_days", code,
                       "force 没被换成 0 天（=没无视冷却）✗")
+
+
+class TidyUnknownTargetCase(unittest.TestCase):
+    """模型编 id 时：**跳过那一条**，不能让整批整理作废 ✓（2026-09-17 用户要求核查 ✓）
+
+    原实现：`if record_id not in known: raise ValueError("unknown tidy target")` ✗
+    ⇒ 一条坏输出 ⇒ **整批作废**（前面已应用的条目白做 ✗）⇒ 还进重试 ⇒ 多半整体失败 ✓
+    对比：compress 故意 raise（source 可疑就该重试 ✓）；但 tidy 的 id 是**处置目标** ✗
+    ⇒ 一个坏目标不该连累其它条目 ✓（跳过 = 那条记录保持不动 ✓ 等价 keep ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.eng = e.Engine(self.store, lambda: c.Settings(), None, None, None)
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        self.loop.close()
+        self.temp.cleanup()
+
+    def _seed(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in (1, 2):
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold) "
+                    "VALUES(?,'s:1','assistant',9,?,?,?,?,?,?,?,?,1,0,1,0)",
+                    ("r%d" % i, now, now, "摘要 %d" % i, "摘要 %d" % i, "[]", i, now, "session"))
+            db.commit()
+        return self.store.permanent_records("s:1")
+
+    def test_unknown_id_is_skipped_not_raised(self):
+        rows = self._seed()
+        cands = [r for r in rows if r["id"] in ("r1", "r2")]
+        aliases = {"p1": "r1", "p2": "r2"}
+        output = {"items": [
+            {"id": "p1", "action": "archive", "reason": "过期"},
+            {"id": "p9", "action": "archive", "reason": "编的"},   # ✗ 不存在的目标
+            {"id": "p2", "action": "keep", "reason": "保留"},
+        ]}
+        applied = self.loop.run_until_complete(
+            self.eng.apply_tidy("s:1", cands, aliases, {}, output))
+        self.assertEqual(applied, 1, "正常的那条应当照旧被应用 ✓（只有坏目标被跳过 ✓）")
+        with self.store.connect() as db:
+            act = dict(db.execute(
+                "SELECT id, active FROM records WHERE id IN ('r1','r2')").fetchall())
+        self.assertEqual(act, {"r1": 0, "r2": 1}, "应用结果不对 ✗（r1 归档 ✓ r2 保持 ✓）")
+        self.assertIn("跳过", self.eng.last_tidy_note or "",
+                      "跳过条数应当体现在提示里 ✓（否则用户看到条数对不上 ✓）")
+
+    def test_all_bad_ids_does_not_raise(self):
+        rows = self._seed()
+        cands = [r for r in rows if r["id"] in ("r1", "r2")]
+        applied = self.loop.run_until_complete(
+            self.eng.apply_tidy("s:1", cands, {"p1": "r1"}, {},
+                                {"items": [{"id": "zzz", "action": "archive", "reason": "x"}]}))
+        self.assertEqual(applied, 0, "全是坏目标时应当**安静跳过**而不是抛错 ✗")

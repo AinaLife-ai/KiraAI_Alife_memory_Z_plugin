@@ -137,6 +137,25 @@ COMPACT_SCHEMAS = {
         '常见错误（会被拒）：把 predicate/object 平铺进事实（必须放 relations）；\n'
         'source_ids 编造或漏抄；content 为空；多写 range/records 等输入字段。'
     ),
+    "tidy": (
+        '返回 JSON（无 markdown、无额外字段）：\n'
+        '{"items": [{"id": str, "action": "keep|extract|archive|split",\n'
+        '            "category": str?, "importance": 1-10?,\n'
+        '            "facts": [{"category": str, "subject": str, "content": str,\n'
+        '                       "reason": str, "scenario": str, "tags": [str],\n'
+        '                       "relations": [{"subject","predicate","object"}],\n'
+        '                       "source_ids": [str], "importance": 1-10}]?,\n'
+        '            "keep_content": str?, "reason": str}]}\n'
+        '**只有 items 一个顶层键** —— 不要回写输入里的 cap/budget/who/items 等字段 ✗\n'
+        '必填：每条 id（逐字复制输入里的 p1/p2…）、action、reason。\n'
+        '可选：category / importance（keep 时顺手修正）；facts（extract/split 用，≤6 条）；\n'
+        '      keep_content（仅 split 用，≤16000 字，只留必须每轮在场的约束那段）。\n'
+        'facts[].source_ids 直接填这条记忆自己的 id 即可；facts[].subject 用 who 表里的稳定实体 ID。\n'
+        '上限：items ≤50、category ≤40 字、reason ≤40 字。\n'
+        '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
+        '常见错误（会被拒）：编造不存在的 id（每条 id 必须在输入里出现过）；\n'
+        '多写输入字段；split 却不给 keep_content；把 must-keep 的约束也 archive 掉。'
+    ),
     "fact_merge": (
         '返回 JSON（无 markdown、无额外字段）：\n'
         '{"groups": [{"target_id": str, "source_ids": [str], "content": str,\n'
@@ -1653,10 +1672,20 @@ class Engine:
         known = {row["id"] for row in candidates}
         by_id = {row["id"]: row for row in candidates}
         items, applied, touched = [], 0, []
+        skipped = 0
         for verdict in output.get("items", []):
             record_id = aliases.get(verdict.get("id", ""))
             if record_id not in known:
-                raise ValueError("unknown tidy target")
+                # 模型偶尔会编一个不存在的 id ✗ —— 这条**跳过**即可（记录保持不动 = 等价 keep ✓）
+                # ⚠️ 原来这里是 `raise` ✗ ⇒ **整批整理作废** ✓（前面已应用的条目白做 ✓）
+                #   而且它还进重试 ⇒ 模型多半再编一次 ⇒ 整个任务失败 ✓（2026-09-17 用户要求核查 ✓）
+                # 对比：compress 的 `restore_compress_ids` 故意 raise（那里 source 可疑就该重试 ✓）
+                #   但 tidy 的 id 是**处置目标** ✗ 一个坏目标不该连累其它条目 ✓
+                skipped += 1
+                logger.warning(
+                    "[记忆·Z] 整理输出含未知目标 id（已跳过）：%r", verdict.get("id")
+                )
+                continue
             row = by_id[record_id]
             action = verdict["action"]
             reason = "[整理] " + str(verdict.get("reason") or "").strip()[:200]
@@ -1708,6 +1737,11 @@ class Engine:
             await self.store.call("add_job_items", job_id, items)
         if touched:
             await self.store.call("touch_tidy", touched)
+        if skipped:
+            # 让任务提示能说清"有几条被跳过了" ✓（否则用户只看到条数对不上 ✓）
+            self.last_tidy_note = "整理 %d 条永久记忆（另有 %d 条因目标不存在被跳过）" % (
+                applied, skipped
+            )
         return applied
 
     async def tidy_worker(self):

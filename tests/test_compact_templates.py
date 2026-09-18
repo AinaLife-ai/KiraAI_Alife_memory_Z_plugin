@@ -130,6 +130,7 @@ def test_compact_schema_does_not_invent_fields():
         ("compress", contracts.Compression),
         ("fact_merge", contracts.FactMerge),
         ("audit", contracts.Audit),
+        ("tidy", contracts.PermanentTidy),   # 2026-09-17 补：tidy 之前**没有紧凑声明** ✗
     ):
         allowed = _all_field_names(model)
         invented = {
