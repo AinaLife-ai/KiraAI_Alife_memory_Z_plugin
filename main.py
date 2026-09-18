@@ -1250,7 +1250,7 @@ class AlifeMemoryPlugin(BasePlugin):
         if not flagged:
             return set()
         await self.store.call("mark_merge_pending", flagged, 1)
-        await self.engine.enqueue("fact_merge", sid)
+        await self.engine.enqueue("fact_merge", sid, automatic=True)   # 内部 ✓ 空转静默 ✓
         # 只标记、不当轮隐藏：本轮模型照常看到完整信息（判定有误也不会凭空少一条），
         # 从下一轮起 merge_pending 生效，重复的那条不再注入。
         logger.debug(

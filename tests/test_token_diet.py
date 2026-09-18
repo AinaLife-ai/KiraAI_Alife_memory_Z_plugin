@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import re
 import sys
 import tempfile
 import time
@@ -1082,3 +1083,96 @@ class TidyExtractMergesCase(unittest.TestCase):
         code = self._code("engine.py")
         for purpose in ('"tidy"', '"dedupe"'):
             self.assertIn(purpose + ":", code, "COMPACT_SCHEMAS 缺 %s ✗" % purpose)
+
+
+class InternalJobAutomaticFlagCase(unittest.TestCase):
+    """**内部路径**排的任务必须标 `automatic=True` ✓（2026-09-18 用户：这行日志刷屏 ✓）
+
+    `事实合并完成（合并 0 组重复事实（0 条并入））` ✗ —— 纯机械判断 ✓ **没走到模型** ✓
+    （`merge_facts` 无候选时 `return 0` ✓ 已验证 ✓）
+    但三处入队**都没传 automatic** ✗ ⇒ 库里默认 0 = "手动" ⇒ 空转静默规则不生效 ✓
+    ⇒ 每个空转的合并任务都打一行日志 ✓（用户实测 9 行/2 秒 ✓）
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_internal_fact_merge_enqueues_are_automatic(self):
+        bad = []
+        for name in ("engine.py", "main.py"):
+            for i, line in enumerate(self._code(name).splitlines(), 1):
+                if 'enqueue("fact_merge"' in line and "automatic=True" not in line:
+                    bad.append("%s:%d" % (name, i))
+        self.assertEqual(bad, [], "内部 fact_merge 入队没标 automatic=True ✗"
+                                  "（空转时不会静默 ⇒ 日志刷屏 ✓）：%s" % bad)
+
+    def test_noop_merge_is_quiet_when_automatic(self):
+        """空转合并（0 组）在自动标记下必须判为静默 ✓"""
+        import tempfile
+        loop = asyncio.new_event_loop()
+        try:
+            temp = tempfile.TemporaryDirectory()
+            st = s.Store(Path(temp.name) / "db")
+            st.initialize()
+            eng = e.Engine(st, lambda: c.Settings(), None, None, None)
+            self.assertTrue(loop.run_until_complete(eng._quiet_automatic(
+                {"id": "x", "kind": "fact_merge", "sid": "s", "automatic": 1},
+                "合并 0 组重复事实（0 条并入）")))
+            self.assertFalse(loop.run_until_complete(eng._quiet_automatic(
+                {"id": "x", "kind": "fact_merge", "sid": "s", "automatic": 1},
+                "合并 2 组重复事实（3 条并入）")), "真合并必须照常可见 ✓")
+            temp.cleanup()
+        finally:
+            loop.close()
+
+
+class ManualJobsStayVisibleCase(unittest.TestCase):
+    """**用户手动**排的任务永远不能被静默 ✓（2026-09-18 用户确认 ✓）
+
+    · 手动入口 `api_job` 一律**不传** `automatic` ⇒ 默认 False ⇒ 永远可见 ✓
+    · `_quiet_automatic` **要求** automatic 为真 ⇒ 手动天然免疫 ✓
+    · 前端手动按钮只有 compress/audit/dedupe/tidy/rewrite/reindex ✗
+      **没有 fact_merge** ✓ ⇒ 给三处内部 fact_merge 标 automatic=True 不会波及手动 ✓
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_manual_entry_never_marks_automatic(self):
+        code = self._code("main.py")
+        self.assertIn('await self.engine.enqueue(value.kind, value.sid)',
+                      code, "手动入口的入队形态变了 ✗ 需确认它仍然不传 automatic ✓")
+        self.assertNotIn('enqueue(value.kind, value.sid, automatic=True)',
+                         code, "手动入口被标成自动了 ✗✗ 用户手动的会被静默 ✓")
+
+    def test_quiet_rule_requires_automatic(self):
+        code = self._code("engine.py")
+        self.assertIn("if not job.get(\"automatic\"):", code,
+                      "静默判定不再要求 automatic ✗ ⇒ 手动任务也会被静默 ✓")
+
+    def test_frontend_manual_buttons_exclude_fact_merge(self):
+        html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
+        jobs = set(re.findall(r'data-job="(\w+)"', html))
+        self.assertNotIn("fact_merge", jobs,
+                         "前端出现了手动 fact_merge 按钮 ✗ ⇒ 需重新确认它的可见性 ✓")
+        self.assertTrue(jobs, "没找到任何手动任务按钮 ✗")
+
+    def test_manual_noop_merge_is_visible_behaviorally(self):
+        """行为判据 ✓：automatic=0 的空转合并**必须**判为"要显示" ✓"""
+        import tempfile
+        loop = asyncio.new_event_loop()
+        try:
+            temp = tempfile.TemporaryDirectory()
+            st = s.Store(Path(temp.name) / "db")
+            st.initialize()
+            eng = e.Engine(st, lambda: c.Settings(), None, None, None)
+            self.assertFalse(
+                loop.run_until_complete(eng._quiet_automatic(
+                    {"id": "x", "kind": "fact_merge", "sid": "s", "automatic": 0},
+                    "合并 0 组重复事实（0 条并入）")),
+                "手动排的空转合并被静默了 ✗（用户手动的必须看得见 ✓）")
+            temp.cleanup()
+        finally:
+            loop.close()
