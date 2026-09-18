@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import os
 import random
 import json
 import re
@@ -2290,3 +2291,91 @@ class ToolNameConsistencyCase(unittest.TestCase):
     def test_hint_points_to_real_tool(self):
         self.assertIn("SearchMemoryArchive(ids=[短码])", self.main,
                       "hint 必须指向真实工具与真实参数 ✓")
+
+
+class RecallPayloadPurityCase(unittest.TestCase):
+    """发给模型的工具载荷必须**干净** ✓（2026-09-18 用户实测：内部物泄漏给模型 ✗）
+
+    规则（用户对齐后会写进规范 ✓）：
+    · 内部记账不许出现：`observed` 时间戳 ✓ `revision`/`updated` ✓ `lookup_id` ✓ `history` ✓
+    · 常量/重复话不许出现：`label`（常量 ✗）`identity_note`（同一句重复 N 遍 ✗）
+    · 空值/空数组/默认值不许出现：`sp:""` `versions:[]` `legacy_sources:[]` `ci` ✗
+    · 同值冗余计数合一：`excluded_count` + `already_seen` ⇒ `seen` ✓
+    · **32 位十六进制内部主键**不许出现在内容条目里 ✓
+    ⚠️ 只约束"发给模型的载荷" ✓ 存储层照旧保留这些字段 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.src = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def test_slim_payload_removes_internal_fields(self):
+        """行为验证：拿一份"最脏"的载荷喂进去 ⇒ 出来的必须是干净的 ✓
+
+        `main.py` 依赖宿主（`core.plugin` ✓）⇒ 没设 KIRA_CORE 时跳过 ✓
+        （我在全量轮次里带 KIRA_CORE 跑 ⇒ 这条会被真正执行 ✓）
+        """
+        if not os.environ.get("KIRA_CORE"):
+            self.skipTest("需要 KIRA_CORE（main.py 依赖宿主）")
+        module = importlib.import_module("alife_diet_test.main")
+        plugin = object.__new__(module.AlifeMemoryPlugin)      # 不走 __init__ ✓ 只测这个方法 ✓
+        dirty = {
+            "ok": True,
+            "excluded_count": 27, "already_seen": 27,
+            "archive": {
+                "s": "存档摘要", "t": "09-15 20:41", "sp": "", "lv": 1, "kids": 40,
+                "next": 20, "versions": [], "legacy_sources": [], "ci": True,
+            },
+            "names": [
+                {"id": "qq:769690776", "kind": "user", "name": "周武", "revision": 2,
+                 "updated": 1789726763.0, "label": "名称待补全",
+                 "identity_note": "使用稳定账号区分身份，昵称相同不会合并。",
+                 "lookup_id": "qq:769690776",
+                 "history": [{"name": "周武", "source": "onebot", "context": "",
+                              "observed": 1789398866.483097, "reason": "批量确认"}]},
+            ],
+        }
+        out = plugin.slim_payload(dirty)
+        text = json.dumps(out, ensure_ascii=False)
+        for gone in ("observed", "revision", "updated", "lookup_id", "history",
+                     "label", "identity_note", "versions", "legacy_sources",
+                     "already_seen", "excluded_count", 'sp"', "next", "ci"):
+            self.assertNotIn(gone, text, "内部物还在 ✗：%s" % gone)
+        self.assertEqual(out["seen"], 27, "同值计数要合一 ✓")
+        self.assertEqual(out["names"], [{"i": "qq:769690776", "n": "周武"}],
+                         "画像实体要压成 {i,n} ✓")
+
+    def test_purity_survives_storage_layer(self):
+        """存储层不许被牵连 ✓（名字编辑页/历史记录还要这些字段 ✓）"""
+        blob = (self.root / "storage.py").read_text(encoding="utf-8") + self.src
+        for keep in ("observed", "identity_note", "lookup_id", "history"):
+            self.assertIn(keep, blob,
+                          "这些字段是给**界面**用的 ✓ 不该在数据/接口层被删 ✗：%s" % keep)
+
+
+class RecallPipelineConsistencyCase(unittest.TestCase):
+    """两条召回路必须共用**同一套文本管线** ✓（2026-09-18 用户实测漏了一条 ✗）
+
+    既有三件套（检索侧一直用 ✓）：`media_only` / `clean_text` / `trim_nested`（官方封装 `model_text` ✓）
+    "取全文"那条**原来没接** ✗ ⇒ 表情包/图片的机器描述整段进了模型 ✓
+    ⇒ 这条守卫钉住：**内容条目必须同时过 `media_only` 与 `model_text`** ✓
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def test_content_view_uses_same_pipeline(self):
+        i = self.src.find("_rows = archive.get")
+        self.assertGreater(i, 0, "找不到内容视图那段 ✗")
+        seg = self.src[i:i + 1600]
+        self.assertIn("media_only(", seg, "内容视图没过滤媒体-only ✗")
+        self.assertIn("model_text(", seg, "内容视图没走官方管线 ✗")
+        self.assertIn('"r":', seg)
+        self.assertIn('"s":', seg)
+        self.assertNotIn('"id": _item', seg, "内部主键不许进载荷 ✗")
+
+    def test_search_path_still_uses_pipeline(self):
+        i = self.src.find('"i": shorts.get')
+        self.assertGreater(i, 0)
+        seg = self.src[i:i + 400]
+        self.assertIn("model_text(", seg, "搜索侧管线被谁动了 ✗")
