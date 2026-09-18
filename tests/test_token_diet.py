@@ -1986,3 +1986,38 @@ class EntityLinksCleanupCase(unittest.TestCase):
         s.Store(self.db).initialize()
         self.assertEqual(len(st.facts("qq:gm:1", limit=10)), 1, "清表影响了事实 ✗")
         self.assertGreaterEqual(len(self._tables(st)), 5, "其它表被误删 ✗")
+
+
+class ToolResultNotRotatedCase(unittest.TestCase):
+    """「工具感知结果」**不是记忆** ⇒ 不许进轮换槽 ✓（2026-09-18 用户实测）
+
+    现象：模型抓回来的工具输出被存成记录 ✓ 再压成档案/提炼成事实 ✓
+    ⇒ 于是它**流进了轮换槽** ⇒ 用户看到"轮换槽被动召回到工具步（工具感知结果 xx）" ✗
+    修：轮换池（事实 ✓ 档案 ✓）排除它们 ✓ —— **主召回不动** ✓
+    （工具结果是对话史的一部分 ✓ 该能被想起来 ✓ 只是不该占"相关记忆"的槽位 ✓）
+    """
+
+    def test_detects_tool_result(self):
+        self.assertTrue(r.is_tool_result("工具感知结果：\n网页标题…"))
+        self.assertTrue(r.is_tool_result("  工具感知结果：xx"))       # 前导空白也算 ✓
+        self.assertFalse(r.is_tool_result("周武喜欢喝美式"))
+        self.assertFalse(r.is_tool_result(""))
+        self.assertFalse(r.is_tool_result(None))
+
+    def test_rotation_pools_filter_it(self):
+        """两处轮换池都必须过滤 ✓（源级钉住，防止有人改回去 ✗）"""
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn('fact_pool = [x for x in fact_pool if not is_tool_result(x.get("content"))]',
+                      src, "事实池没过滤工具结果 ✗")
+        self.assertIn('if r.get("id") and not is_tool_result(r.get("summary"))',
+                      src, "档案池没过滤工具结果 ✗")
+
+    def test_all_recall_paths_exclude_it(self):
+        """**主被动召回也都要排除** ✓（2026-09-18 用户确认 ✓ 原先只有渲染层剥标签 ✗）"""
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn('facts = [f for f in facts if not is_tool_result(f.get("content"))]',
+                      src, "被动召回的**事实**没排除工具结果 ✗")
+        self.assertIn('not is_tool_result(r.get("summary"))', src,
+                      "被动召回的**档案**没排除工具结果 ✗")
+        self.assertIn('if is_tool_result(r.get("summary")):', src,
+                      "**主动检索**没排除工具结果 ✗")

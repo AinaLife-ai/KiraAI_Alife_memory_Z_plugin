@@ -67,6 +67,7 @@ from .retrieval import (
     sink_filter,
     media_only,
     short_day,
+    is_tool_result,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -1813,10 +1814,19 @@ class AlifeMemoryPlugin(BasePlugin):
                     min_score=cfg.fact_recall_min_score,
                     **prefer,
                 )
+
+                # ★ 2026-09-18（用户实测）：**「工具感知结果」不是记忆** ✗
+                #   模型抓回来的工具输出会被存成记录 ✓ 再被压缩成档案/提炼成事实 ✓
+                #   ⇒ 于是它**也会流进轮换槽** ⇒ 用户看到"轮换槽被动召回到工具步" ✗
+                #   ⇒ 轮换槽（"相关但还没召回过的**记忆**" ✓）把它排除 ✓
+                #   注意：**主召回不动** ✓（工具结果是对话史的一部分 ✓ 该能被想起来 ✓）
+                fact_pool = [x for x in fact_pool if not is_tool_result(x.get("content"))]
             # ★ 2026-09-18 批次 2：**下沉** ✓
             #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
             #   **不删不藏**：它们仍在下面的轮换候选池里（那是独立查询 ✓）
             #   一旦被轮换带进来并被**用上**（rotate_used ↑）⇒ 分数回升 ⇒ 自动回常驻 ✓
+            # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主召回也排除 ✓）
+            facts = [f for f in facts if not is_tool_result(f.get("content"))]
             facts = sink_filter(facts, cfg.fact_sink_threshold, now=time.time())
             facts = facts + await self.rotation_extras(
                 sid,
@@ -1845,10 +1855,17 @@ class AlifeMemoryPlugin(BasePlugin):
                 **prefer,
             )
             local_ids = {r["id"] for r in rows}
-            fresh = [r for r in matches["items"] if r["id"] not in local_ids]
+            fresh = [
+                r for r in matches["items"]
+                if r["id"] not in local_ids and not is_tool_result(r.get("summary"))
+            ]
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
-            archive_pool = [r for r in fresh[reach:] if r.get("id")]
+            # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
+            archive_pool = [
+                r for r in fresh[reach:]
+                if r.get("id") and not is_tool_result(r.get("summary"))
+            ]
             if archive_pool:
                 related_rows = related_rows + await self.rotation_extras(
                     sid,
@@ -2870,6 +2887,10 @@ class AlifeMemoryPlugin(BasePlugin):
             who = {}
             packed = []
             for r in raw_items:
+                # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主动侧也排除 ✓）
+                #   （它们只是"模型抓回来的工具输出" ✗ 不是记忆 ✓）
+                if is_tool_result(r.get("summary")):
+                    continue
                 # 紧凑形态：i=短码(证据编码) t=时间 s=内容 u=参与者
                 # 默认值全部省略（archived/permanent/role/level/revision 之前占了两成字符）
                 item = {
