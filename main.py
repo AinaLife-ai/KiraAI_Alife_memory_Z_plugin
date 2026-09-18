@@ -67,6 +67,7 @@ from .retrieval import (
     RecallWindow,
     sink_filter,
     media_only,
+    short_day,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -1487,7 +1488,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     olds[old_name] = at
             if olds:
                 item["h"] = [
-                    "%s@%s" % (name, short_time(at) if at else "?")
+                    "%s@%s" % (name, short_day(at) if at else "?")
                     for name, at in sorted(olds.items(), key=lambda kv: kv[1],
                                            reverse=True)[:3]
                 ]
@@ -2404,7 +2405,7 @@ class AlifeMemoryPlugin(BasePlugin):
                         olds[old_name] = at
                 if olds:
                     item["h"] = [
-                        "%s@%s" % (name, short_time(at) if at else "?")
+                        "%s@%s" % (name, short_day(at) if at else "?")
                         for name, at in sorted(olds.items(), key=lambda kv: kv[1] or 0,
                                                reverse=True)[:3]     # 最近 3 个 ✓ 防爆表
                     ]

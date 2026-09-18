@@ -2471,3 +2471,43 @@ class ProfilePayloadPurityCase(unittest.TestCase):
         self.assertIn("profile.get(\"i\")", seg.replace("prof.get(\"i\")", "profile.get(\"i\")"))
         self.assertIn("[r%s]", seg, "revision 记号要输出 ✓")
         self.assertIn('row["src"]', seg, "来源短码要渲染 ✓")
+
+
+class ShortTimeCrossYearCase(unittest.TestCase):
+    """日期短码的**跨年规则** ✓（2026-09-18 用户确认 ✓ 与被动召回口径一致 ✓）
+
+    规则（`retrieval.short_day` / `short_time` 同一套 ✓）：
+    · **同年** ⇒ `MM-DD`（省 token ✓）/ `MM-DD HH:MM`（记录用 ✓）
+    · **跨年** ⇒ **必须带年份** `YYYY-MM-DD` ✓✓
+      —— 否则模型会把去年的「11-16」当成今年 ✗（docstring 里写的就是这个理由 ✓）
+    · 非法/越界（0 / 负数 / 毫秒戳 / 2000 年前）⇒ **留空** ✓（绝不渲染 1970-01-01 ✗）
+    曾用名（本轮新加 ✓）用的是 **`short_day`** ✓ —— 与**事实侧**同口径 ✓（只要日期 ✓ 不要时分 ✓）
+    """
+
+    def test_same_year_has_no_year(self):
+        now = time.localtime()
+        same = time.mktime((now.tm_year, 3, 15, 10, 30, 0, 0, 0, -1))
+        out = r.short_day(same)
+        self.assertRegex(out, r"^\d{2}-\d{2}$", "同年应当 MM-DD ✓：%s" % out)
+
+    def test_cross_year_keeps_year(self):
+        now = time.localtime()
+        last_year = time.mktime((now.tm_year - 1, 11, 16, 10, 33, 0, 0, 0, -1))
+        out = r.short_day(last_year)
+        self.assertRegex(out, r"^\d{4}-\d{2}-\d{2}$",
+                         "跨年**必须带年份** ✗（否则模型当成今年 ✓）：%s" % out)
+        self.assertIn(str(now.tm_year - 1), out)
+        out2 = r.short_time(last_year)
+        self.assertTrue(out2.startswith(str(now.tm_year - 1)),
+                        "记录用的 short_time 跨年也要带年 ✓：%s" % out2)
+
+    def test_invalid_never_renders_1970(self):
+        for bad in (0, -1, "abc", 1e12):
+            self.assertEqual(r.short_day(bad), "", "非法时间必须留空 ✗：%r" % bad)
+            self.assertEqual(r.short_time(bad), "")
+
+    def test_alias_uses_day_granularity(self):
+        """曾用名用 **short_day** ✓（与事实侧同口径 ✓ 不带时分 ✓）"""
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn('"%s@%s" % (name, short_day(at) if at else "?")', src,
+                      "曾用名必须用 short_day ✓（跨年带年 ✓ 与事实侧一致 ✓）")
