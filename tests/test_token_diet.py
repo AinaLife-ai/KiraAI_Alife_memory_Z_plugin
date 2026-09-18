@@ -20,6 +20,7 @@ c = importlib.import_module("alife_diet_test.contracts")
 s = importlib.import_module("alife_diet_test.storage")
 e = importlib.import_module("alife_diet_test.engine")
 r = importlib.import_module("alife_diet_test.retrieval")
+i = importlib.import_module("alife_diet_test.identity")
 
 
 def fact(**overrides):
@@ -1896,3 +1897,119 @@ class FactSinkFloatCase(unittest.TestCase):
         self.assertEqual([f["id"] for f in kept], ["a", "c"], "顺序要稳定、该留的要留 ✓")
         self.assertEqual(json.dumps(facts, ensure_ascii=False), before,
                          "不许就地修改（调用方可能还要用 ✓）")
+
+
+class EntityIdentityCase(unittest.TestCase):
+    """身份绑定（2026-09-18 批次 3）—— 反例守则，用户拍板的原则是**宁可少绑，不可绑错**
+
+    ① 结构化（确定性 ✓ 无需证据）：`qq:dm:<号>` ⇒ `qq:<号>`（私聊会话 ⇒ 归属人）
+    ② **群号 ≠ 人号**：`qq:gm:<号>` ⇒ 绝不归到 `qq:<号>`（群里那个数字是**群号**）
+    ③ `unresolved:*` ⇒ 不参与任何合并（不知道就别猜）
+    ④ 同名不同 QQ ⇒ **绝不绑**（绑定表按 raw 存 ⇒ 两个 raw 各自独立）
+    ⑤ 自身别名（我/自己/bot…）⇒ 归自身 ✓ 但**有其它归属时不抢** ✓
+    ⑥ 人工绑定**优先于**自动 ✓ 且**可解绑**（解绑后立刻回到未绑定）
+    ⑦ `legacy:self` ⇒ 自身 ✓（迁移遗留 ✓ 可撤销 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_structured_normalization(self):
+        self.assertEqual(i.canonical_key("qq:769690776", self_id="qq:9"), "qq:769690776")
+        self.assertEqual(i.canonical_key("qq:dm:769690776", self_id="qq:9"), "qq:769690776",
+                         "私聊会话要归到**归属人** ✓")
+        self.assertEqual(i.canonical_key("qq:gm:427674145", self_id="qq:9"),
+                         "qq:gm:427674145",
+                         "群**永远**不归到同号的人 ✗（群号≠人号 ✓）")
+        self.assertNotEqual(i.canonical_key("qq:gm:769690776", self_id="qq:9"), "qq:769690776",
+                            "群号与人号恰好相同也不许合 ✗")
+
+    def test_unknown_keys_are_left_alone(self):
+        for key in ("unresolved:qq:1", "u-3", "周武", "群里的匿名"):
+            self.assertEqual(i.canonical_key(key, self_id="qq:9"), key,
+                             "判不了就**原样返回**（未绑定）✓ 不许猜 ✓")
+
+    def test_self_alias_only_when_not_bound(self):
+        self.assertEqual(i.canonical_key("我", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("BOT", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("bot", self_id="qq:9"), "qq:9")
+        # ④ 但若它**已经归属别人**（绑定表里写着）⇒ 以绑定表为准 ✓ 不许抢 ✓
+        self.assertEqual(i.canonical_key("BOT", links={"BOT": "qq:123"}, self_id="qq:9"),
+                         "qq:123", "自身别名不许覆盖已有归属 ✓")
+
+    def test_legacy_keys(self):
+        self.assertEqual(i.canonical_key("legacy:self", self_id="qq:9"), "qq:9")
+        self.assertEqual(i.canonical_key("legacy:user:769690776", self_id="qq:9"),
+                         "qq:769690776", "迁移的人按同号归一（适配器确定时）✓")
+        self.assertEqual(i.canonical_key("legacy:user:769690776", legacy_adapter=""),
+                         "legacy:user:769690776", "适配器不确定 ⇒ **保守不归** ✓")
+
+    def test_same_name_different_qq_never_merge(self):
+        """② 同名不同 QQ ⇒ 绑不绑是**两条独立记录** ✓ 绝不互相牵扯 ✓"""
+        self.store.link_entity("周武", "qq:7696", "cooccur", "群 A 同现")
+        self.store.link_entity("周武（猫）", "qq:1437", "cooccur", "群 B 同现")
+        links = self.store.entity_links()
+        self.assertEqual(links["周武"], "qq:7696")
+        self.assertEqual(links["周武（猫）"], "qq:1437")
+
+    def test_manual_beats_auto_and_can_unlink(self):
+        self.store.link_entity("周武", "qq:7696", "cooccur", "自动推断")
+        self.store.link_entity("周武", "qq:1437", "manual", "人工指认")     # 人工覆盖 ✓
+        self.assertEqual(self.store.entity_links()["周武"], "qq:1437")
+        self.assertTrue(self.store.unlink_entity("周武"))
+        self.assertNotIn("周武", self.store.entity_links(),
+                         "解绑后必须立刻回到未绑定 ✓")
+        self.assertEqual(i.canonical_key("周武", links=self.store.entity_links()), "周武")
+
+    def test_canonical_links_listing(self):
+        self.store.link_entity("周武", "qq:7696", "cooccur", "群 A")
+        self.store.link_entity("武哥", "qq:7696", "manual", "他自称")
+        raws = sorted(x["raw"] for x in self.store.links_of_canonical("qq:7696"))
+        self.assertEqual(raws, ["周武", "武哥"], "同一人挂着的所有写法要能列出来 ✓")
+
+    def test_link_requires_two_distinct_keys(self):
+        self.assertFalse(self.store.link_entity("qq:1", "qq:1"), "自己绑自己没意义 ✓")
+        self.assertFalse(self.store.link_entity("", "qq:1"), "空键不许绑 ✓")
+        self.assertEqual(self.store.entity_links(), {})
+
+
+class TidyAuditUntouchedCase(unittest.TestCase):
+    """**tidy / audit 不许被身份绑定搞失效** ✓（用户明确要求 ✓）
+
+    现阶段（批次 3 第一步）身份绑定**只新增**：
+    · `identity.normalize_structured()` / `canonical_key()`（纯函数，没人调用 ✓）
+    · `storage.entity_links` 表 + 4 个 API（没人调用 ✓）
+    ⇒ 所以 tidy / audit / 合并 / 压缩的**输入键一点没变** ✓
+
+    这条守卫把"**要接就得连测试一起接**"钉死 ✓：
+    `canonical_key` / `normalize_structured` 出现在 engine.py / main.py 时，
+    必须同时更新本守卫并补上"接了之后 tidy/audit 仍然正确"的专项测试 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+
+    def test_identity_not_wired_into_hot_paths_yet(self):
+        for name in ("engine.py", "main.py"):
+            src = (self.root / name).read_text(encoding="utf-8")
+            self.assertNotIn("canonical_key", src,
+                             "%s 里出现了 canonical_key ✗ ⇒ 接线时必须同步补 "
+                             "tidy/audit 的专项测试并更新本守卫 ✓" % name)
+            self.assertNotIn("normalize_structured", src,
+                             "%s 里出现了 normalize_structured ✗ ⇒ 同上 ✓" % name)
+
+    def test_tidy_and_audit_prompts_still_intact(self):
+        """顺手钉住：tidy / audit 的关键约定**不许被改掉** ✓"""
+        src = (self.root / "engine.py").read_text(encoding="utf-8")
+        for needle, why in (
+            ("继续常驻", "tidy 的 keep 语义 ✓"),
+            ("移出常驻", "tidy 的 extract 语义 ✓"),
+            ("only_self=true", "审计里『不许据自述提重要度』的约定"),
+            ("与用户冲突以用户为准", "提取的冲突规则 ✓"),
+        ):
+            self.assertIn(needle, src, "tidy/audit 的关键约定消失了 ✗：%s" % why)

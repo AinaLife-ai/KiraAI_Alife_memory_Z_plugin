@@ -191,3 +191,69 @@ class Resolver:
         if kind == "session":
             return entity_sid, visibility, entity, list(users)
         return sid, visibility, subject, list(users)
+
+# ── 身份绑定（2026-09-18 批次 3）──────────────────────────────
+#  目标：把同一个人在数据里的**多种写法**归到同一个**规范键** ✓
+#  原则（用户拍板）：**宁可少绑，不可绑错** ✓
+#   · 确定性判据（结构）优先 ✓ 名字类猜测只允许"同现 + 唯一" ✓
+#   · 群号 ≠ 人号 ✓（`qq:gm:<号>` 绝不当人 ✓）
+SELF_ALIASES = ("我", "自己", "本机", "机器人", "bot")
+SELF_KEYS = ("self", "legacy:self")
+
+
+def normalize_structured(key, self_id="", legacy_adapter="qq"):
+    """**结构化归一** ✓ —— 确定性判据，不需要任何"猜" ✓ 判不了返回 "" ✓
+
+    · ``qq:769690776``          ⇒ 它自己（人是 2 段：`adapter:number` ✓）
+    · ``qq:dm:769690776``       ⇒ ``qq:769690776``（私聊会话 ⇒ **它的归属人** ✓）
+    · ``qq:gm:427674145``       ⇒ **原样返回** ✗（那是**群** ✓ 群号与人号恰好相同也不许合 ✓）
+    · ``legacy:self``/``self``  ⇒ ``self_id or "self"``（自身 ✓）
+    · ``legacy:user:<数字>``    ⇒ ``<legacy_adapter>:<数字>`` ✓（**只有能确定适配器时才归** ✓
+      调用方不确定就传空字符串 ⇒ 原样返回 ✓ 保守 ✓）
+    · 其它（``unresolved:`` / 名字 / 会话内码 `u-3` ✓）⇒ "" ✓（交给上层：绑定表 或 原样 ✓）
+    """
+    raw = str(key or "").strip()
+    if not raw:
+        return ""
+    if raw in SELF_KEYS:
+        return self_id or "self"
+    shape = legacy_shape(raw)
+    if shape:
+        kind, _, number = shape
+        if kind == "self":
+            return self_id or "self"
+        if kind == "user" and number and legacy_adapter:
+            return "%s:%s" % (legacy_adapter, number) if number.isdigit() else ""
+        return ""
+    adapter, number, session_type = split_adapter(raw)
+    if not adapter or not number or not number.isdigit():
+        return ""
+    if session_type == "dm":
+        return "%s:%s" % (adapter, number)      # 私聊会话 ⇒ 归属人 ✓
+    if session_type:
+        return ""                                # gm 等 ⇒ **群/别的对象** ✗ 不许当人 ✓
+    return "%s:%s" % (adapter, number)          # 人 ✓ 规范键就是它自己 ✓
+
+
+def canonical_key(key, links=None, self_id="", legacy_adapter="qq"):
+    """把任意"主体写法"解析成规范键 ✓（解析不了就**原样返回** = 未绑定 ✓）
+
+    顺序（越靠前越确定 ✓）：
+      ① 绑定表（含人工 ✓ 最高优先）
+      ② 结构化归一 ✓（`qq:` / `dm:` / `legacy:` / `self` ✓ 确定性 ✓）
+      ③ 自身别名 ✓（我/自己/bot… **且**绑定表里没有它的其它归属 ✓）
+      ④ 原样 ✓
+    ⚠️ 纯函数 ✓：`links` 由调用方一次查好传进来 ✓（便于测试与缓存 ✓）
+    """
+    raw = str(key or "").strip()
+    if not raw:
+        return ""
+    link = (links or {}).get(raw)
+    if link:
+        return str(link)
+    structured = normalize_structured(raw, self_id=self_id, legacy_adapter=legacy_adapter)
+    if structured:
+        return structured
+    if raw.lower() in SELF_ALIASES:
+        return self_id or "self"               # 没有别的归属 ⇒ 归自身 ✓（可撤销 ✓）
+    return raw

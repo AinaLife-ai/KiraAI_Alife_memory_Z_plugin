@@ -297,6 +297,19 @@ class Store:
               observed REAL NOT NULL, reason TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS name_entity ON entity_names(entity_id,observed DESC);
             """)
+
+            # ★ 2026-09-18（批次 3）：身份绑定表 ✓
+            #   `raw` 是**主键** ⇒ 一个原始写法**最多只能绑一个**规范实体 ✓
+            #   ⇒ 有歧义（同名两个号都同现过）就**不建记录** ✓ 宁可"未绑定"也不赌 ✓
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS entity_links ("
+                " raw TEXT PRIMARY KEY, canonical TEXT NOT NULL,"
+                " source TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS entity_links_canonical"
+                " ON entity_links(canonical)"
+            )
             # ★ 2026-09-18 性能审计：压缩预检 `compress_probe` 的**覆盖索引** ✓
             #   预检只回 (非永久行数, 最早 end, 最新 end) ✓ 但没有覆盖索引时
             #   SQLite 仍要按 3000 行回表 ⇒ 实测 6.7 ms ✗（够用但不够快 ✓）
@@ -1211,6 +1224,49 @@ class Store:
                 continue
             ids.append(row[0])
         return ids[:20]
+
+    # ── 身份绑定（2026-09-18 批次 3）────────────────────────────────
+    def link_entity(self, raw, canonical, source="manual", evidence=""):
+        """建立一条绑定 ✓（人工优先 ⇒ 覆盖自动 ✓ 可撤销 ✓）"""
+        raw = str(raw or "").strip()
+        canonical = str(canonical or "").strip()
+        if not raw or not canonical or raw == canonical:
+            return False
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO entity_links(raw, canonical, source, evidence, created)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(raw) DO UPDATE SET"
+                " canonical=excluded.canonical, source=excluded.source,"
+                " evidence=excluded.evidence, created=excluded.created",
+                (raw, canonical, str(source or "manual"), str(evidence or ""), time.time()),
+            )
+        return True
+
+    def unlink_entity(self, raw):
+        """解除绑定 ✓ ⇒ 立刻回到"未绑定"（**不是**删数据 ✓ 只删这条映射 ✓）"""
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM entity_links WHERE raw=?", (str(raw or "").strip(),))
+        return bool(cur.rowcount)
+
+    def entity_links(self):
+        """raw -> canonical 的**全量映射** ✓（调用方一次取好 ✓ 传给纯函数解析器 ✓）"""
+        with self.connect() as db:
+            return {
+                r[0]: r[1]
+                for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
+            }
+
+    def links_of_canonical(self, canonical):
+        """某个规范实体下**挂着的所有写法** ✓（图谱/画像用 ✓）"""
+        with self.connect() as db:
+            return [
+                {"raw": r[0], "source": r[1], "evidence": r[2], "created": r[3]}
+                for r in db.execute(
+                    "SELECT raw, source, evidence, created FROM entity_links"
+                    " WHERE canonical=? ORDER BY source, raw",
+                    (str(canonical or ""),),
+                ).fetchall()
+            ]
 
     def has_active_job(self, kind, sid):
         """该会话是否已有**排队中/在跑**的同类任务 ✓（2026-09-18）
