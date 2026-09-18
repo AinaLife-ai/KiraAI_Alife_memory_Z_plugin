@@ -3962,19 +3962,51 @@ class Store:
             )
 
     def enqueue(self, kind, sid, detail="", automatic=False):
+        """把任务排进队列 ✓（同一 (kind,sid) 只占一行 ✓）
+
+        ⚠️ 2026-09-18 修两处真问题 ✗✓（同 (kind,sid) 有 UNIQUE ✓）：
+        ① 原来是 `INSERT OR IGNORE` ✗ ⇒ 只要已有一行（**哪怕是 completed** ✓）
+           插入就被**静默忽略** ⇒ **这个会话再也排不上同类任务** ✓
+           （要等清理：50 条以外或 7 天前 ✓ —— 用户会看到"扫描说有内容、任务却没跑" ✓）
+        ② 紧接着 `SELECT ... state IN ('queued','running')` 可能返回 None ⇒ `[0]` ⇒
+           **TypeError** ✗（被扫描的 per-session try 吞成一行日志 ✓ 更难发现 ✓）
+
+        ⇒ 改成：**排队中就复用** ✓ / **已完结就重开** ✓ / 没有就新建 ✓ 三种都返回有效 id ✓
+        ⇒ 手动排的任务优先标 manual ✓（不被自动任务的静默规则吃掉 ✓）
+        """
+        now = time.time()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT id, state FROM jobs WHERE kind=? AND sid=?", (kind, sid)
+            ).fetchone()
+            if row:
+                jid, state = row
+                if state in ("queued", "running"):
+                    # 已在队列/执行中 ⇒ 只补充 detail 与 manual 标记 ✓
+                    db.execute(
+                        "UPDATE jobs SET detail=COALESCE(NULLIF(?, ''), detail),"
+                        " automatic=CASE WHEN ? THEN automatic ELSE 0 END, updated=?"
+                        " WHERE id=?",
+                        (detail, 1 if automatic else 0, now, jid),
+                    )
+                else:
+                    # 已完结（completed/failed 等）⇒ **重开** ✓ 否则这个会话永远排不上 ✗
+                    db.execute(
+                        "UPDATE jobs SET state='queued', detail=?, automatic=?,"
+                        " created=?, updated=? WHERE id=?",
+                        (detail, 1 if automatic else 0, now, now, jid),
+                    )
+                db.commit()
+                return jid
+            jid = uid()
             db.execute(
-                # v2.18.19：`detail` 用来携带"强制整理 / 只整理某几条"这类参数 ✓
-                "INSERT OR IGNORE INTO jobs"
-                "(id,kind,sid,state,detail,created,updated,automatic)"
+                "INSERT INTO jobs(id,kind,sid,state,detail,created,updated,automatic)"
                 " VALUES (?,?,?,'queued',?,?,?,?)",
-                (uid(), kind, sid, detail, time.time(), time.time(),
-                 1 if automatic else 0),
+                (jid, kind, sid, detail, now, now, 1 if automatic else 0),
             )
-            return db.execute(
-                "SELECT id FROM jobs WHERE kind=? AND sid=? AND state IN ('queued','running')",
-                (kind, sid),
-            ).fetchone()[0]
+            db.commit()
+            return jid
 
     def claim(self, kind="", exclude=()):
         """Claim the oldest queued job; dedupe has its own worker lane."""

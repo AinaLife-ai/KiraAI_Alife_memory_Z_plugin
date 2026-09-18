@@ -1176,3 +1176,135 @@ class ManualJobsStayVisibleCase(unittest.TestCase):
             temp.cleanup()
         finally:
             loop.close()
+
+
+class JobLogNoiseCase(unittest.TestCase):
+    """后台任务的日志噪音分界 ✓（2026-09-18 用户实测："待压缩扫描说 3 个有内容，
+    结果 3 个任务全说没有需要压缩的内容" ✗ 而且这行**开始时**就打出来了 ✓）
+
+    · **自动 + 空转** ⇒ **一行都不打** ✓（"开始"行开始时打了就收不回 ✗ ⇒ 干脆不打 ✓）
+    · **自动 + 真干活** ⇒ 打"完成"行 ✓
+    · **手动** ⇒ 保留"开始"行 ✓（用户点了在等 ✓ 需要即时反馈 ✓）
+    """
+
+    def _mk(self, sid, rows=1, age_days=5):
+        temp = tempfile.TemporaryDirectory()
+        st = s.Store(Path(temp.name) / "db")
+        st.initialize()
+        now = time.time()
+        with st.connect() as db:
+            st._ensure_entities(db, sid, ["u-1"])
+            for i in range(rows):
+                t = now - 86400 * age_days - i * 60
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold) "
+                    "VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("r%d" % i, sid, ("user", "assistant")[i % 2], t, t, "对话 %d" % i,
+                     "对话 %d" % i, json.dumps(["u-1"]), i + 1, now, "session"))
+            db.commit()
+        return temp, st
+
+    def _run(self, st, automatic):
+        import logging
+        lines = []
+        handler = logging.Handler()
+        handler.emit = lambda rec: lines.append(rec.getMessage())
+        # ⚠️ 必须挂到**插件自己的 logger** 上 ✗✓ —— 它未必向 root 传播
+        #（2026-09-18 实测：KIRA_CORE 环境下 root 抓不到 ✓ 日志其实打出来了 ✓）
+        targets = [logging.getLogger(), logging.getLogger("alife_memory_z")]
+        old_levels = [(lg, lg.level) for lg in targets]
+        for lg in targets:
+            lg.addHandler(handler)
+            lg.setLevel(logging.INFO)
+        loop = asyncio.new_event_loop()
+
+        async def model(*a, **k):
+            return json.dumps({"summary": "s", "facts": []})
+
+        async def flow():
+            eng = e.Engine(st, lambda: c.Settings(), model, None, None)
+            st.enqueue("compress", "qq:gm:1", "", automatic)
+            await eng.start()
+            await asyncio.sleep(2.5)
+            await eng.stop()
+        try:
+            loop.run_until_complete(flow())
+        finally:
+            loop.close()
+            for lg, lvl in old_levels:
+                lg.removeHandler(handler)
+                lg.setLevel(lvl)
+        return [l for l in lines if "分层压缩" in l or "没有需要压缩" in l]
+
+    def test_automatic_noop_prints_nothing(self):
+        # ⚠️ 必须用**新鲜且不足轮**的数据 ✓（5 天前 + 1 条会走 B4 真压 ✗ 那就不是空转了 ✓）
+        temp, st = self._mk("qq:gm:1", rows=1, age_days=0)
+        try:
+            self.assertEqual(self._run(st, True), [], "自动空转任务不该打任何日志 ✗")
+            with st.connect() as db:
+                n = db.execute("SELECT count(*) FROM jobs WHERE kind='compress'").fetchone()[0]
+            self.assertEqual(n, 0, "自动空转任务不该留在工作台 ✗")
+        finally:
+            temp.cleanup()
+
+    def test_manual_noop_logs_start_and_finish(self):
+        temp, st = self._mk("qq:gm:1", rows=1, age_days=0)
+        try:
+            lines = self._run(st, False)
+            self.assertTrue(any("开始后台任务" in l for l in lines),
+                            "手动任务必须有「开始」行 ✓（用户点了在等 ✓）")
+            self.assertTrue(any("没有需要压缩的内容" in l for l in lines),
+                            "手动任务的结果必须可见 ✓")
+        finally:
+            temp.cleanup()
+
+
+class EnqueueReopenCase(unittest.TestCase):
+    """同一 (kind,sid) 已完结后必须能**重开** ✓（2026-09-18 查出的真 bug ✓）
+
+    原来：`INSERT OR IGNORE` + `SELECT ... state IN ('queued','running')` ✗
+    ⇒ ① 已完结的行 ⇒ 插入被**静默忽略** ⇒ **该会话再也排不上同类任务** ✓
+         （要等清理：50 条以外或 7 天前 ✓ —— 用户看到的就是"扫描说有内容、任务却没跑" ✓）
+       ② 那个 SELECT 会返回 None ⇒ `[0]` ⇒ **TypeError** ✓（被 per-session try 吞成一行日志 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _state(self, jid):
+        with self.store.connect() as db:
+            return db.execute("SELECT state, automatic FROM jobs WHERE id=?", (jid,)).fetchone()
+
+    def test_completed_row_is_reopened(self):
+        jid = self.store.enqueue("compress", "s:1")
+        self.store.finish(jid, "completed", "压缩 40 条 → L1")
+        self.assertEqual(self._state(jid)[0], "completed")
+        jid2 = self.store.enqueue("compress", "s:1")      # 必须能重排 ✓
+        self.assertEqual(jid2, jid, "应当复用同一行 ✓（UNIQUE(kind,sid) ✓）")
+        self.assertEqual(self._state(jid)[0], "queued", "已完结的行没被重开 ✗ ⇒ 该会话永远排不上 ✓")
+
+    def test_queued_row_is_reused_not_duplicated(self):
+        a = self.store.enqueue("compress", "s:2")
+        b = self.store.enqueue("compress", "s:2")
+        self.assertEqual(a, b, "同一 (kind,sid) 不该产生第二行 ✗")
+
+    def test_manual_enqueue_upgrades_automatic_flag(self):
+        jid = self.store.enqueue("compress", "s:3", "", True)      # 自动
+        self.assertEqual(self._state(jid)[1], 1)
+        self.store.enqueue("compress", "s:3", "", False)           # 手动 ⇒ 优先 ✓
+        self.assertEqual(self._state(jid)[1], 0,
+                         "手动排的任务没升级标记 ✗ ⇒ 会被自动静默规则吃掉 ✓")
+
+    def test_no_typeerror_when_row_exists(self):
+        """判据：任何状态下 enqueue 都必须返回**有效 id** ✓（不能 None/异常 ✓）"""
+        jid = self.store.enqueue("tidy", "s:4")
+        self.store.finish(jid, "completed", "整理 0 条")
+        for _ in range(3):
+            out = self.store.enqueue("tidy", "s:4")
+            self.assertTrue(out and isinstance(out, str), "enqueue 返回了无效 id ✗：%r" % out)
