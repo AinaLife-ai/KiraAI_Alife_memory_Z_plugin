@@ -2345,6 +2345,42 @@ class AlifeMemoryPlugin(BasePlugin):
             ]
         # ⚠️ 不碰 `profiles` ✗（2026-09-18 教训：我臆测了它的形状 ⇒ 拍成 {c,i,n} 丢了结构 ✗
         #    集成测试当场报 KeyError ✓ ⇒ **结构化的东西不许凭想象瘦身** ✓）
+        profs = out.get("profiles")
+        if isinstance(profs, list):
+            # ★ 2026-09-18（用户："肯定要"）：profiles 也瘦身 ✓
+            #   · `summary` 与 `categories` **完全重复** ✗ ⇒ 直接去掉（实测：同 3 句出现两遍 ✓）
+            #   · `entity` 只留 `id` + `revision` ✓✓ —— 改名工具要 revision ✓
+            #     （`kind`/`lookup_id`/`label:"名称待补全"`/`name:""`/`aliases:[]`/`history:[]` 全丢 ✗）
+            #   · 空值清掉：`relations: []` ✓ `stats.last_active: 0` ✓
+            slim_profs = []
+            for prof in profs:
+                if not isinstance(prof, dict):
+                    continue
+                ent = prof.get("entity") if isinstance(prof.get("entity"), dict) else {}
+                item = {"i": ent.get("id") or "", "r": int(ent.get("revision") or 0)}
+                if ent.get("name"):
+                    item["n"] = ent["name"]
+                cats = {}
+                for cat, rows in (prof.get("categories") or {}).items():
+                    kept = []
+                    for row in (rows or []):
+                        if isinstance(row, dict):
+                            one = {k: v for k, v in row.items() if v not in (None, "", [])}
+                            if one:
+                                kept.append(one)
+                    if kept:
+                        cats[cat] = kept
+                if cats:
+                    item["c"] = cats
+                if prof.get("relations"):
+                    item["rel"] = prof["relations"]
+                stats = prof.get("stats") if isinstance(prof.get("stats"), dict) else {}
+                short = {k: int(v or 0) for k, v in stats.items()
+                         if k != "last_active" and int(v or 0) > 0}
+                if short:
+                    item["st"] = short
+                slim_profs.append(item)
+            out["profiles"] = slim_profs
         names = out.get("names")
         if isinstance(names, list):
             slim = []
@@ -2445,6 +2481,37 @@ class AlifeMemoryPlugin(BasePlugin):
                                  ("（曾用名 %s）" % "、".join(n["h"])) if n.get("h") else "")
                     for n in who if isinstance(n, dict)))
             return "\n".join(blocks)
+        profs = value.get("profiles")                       # ④ 画像（结构化的"人"视图 ✓）
+        if isinstance(profs, list):
+            out_lines = []
+            for prof in profs:
+                if not isinstance(prof, dict):
+                    continue
+                head = "【画像】%s%s" % (prof.get("n") or prof.get("i") or "?",
+                                        (" [r%s]" % prof["r"]) if prof.get("r") else "")
+                st = prof.get("st") or {}
+                if st:
+                    head += " · " + " · ".join("%s %s" % (k, v) for k, v in st.items())
+                out_lines.append(head)
+                for cat, rows in (prof.get("c") or {}).items():
+                    for row in (rows or []):
+                        if not isinstance(row, dict):
+                            continue
+                        who = row.get("u") or ""
+                        body = row.get("x") or row.get("s") or ""
+                        mark = ("★%s" % row["imp"]) if row.get("imp") is not None else ""
+                        when = row.get("t") or ""
+                        # `src` = 这条事实的**来源记录短码** ✓ ⇒ 用 [短码] 保留 ✓
+                        #   （bot 要能引用来源 ✓ 集成测试钉着这一点 ✓）
+                        src = ("[%s]" % row["src"]) if row.get("src") else ""
+                        out_lines.append(
+                            ("%s %s｜%s %s %s %s" % (cat, who, body, mark, when, src)
+                             ).replace("  ", " ").strip()
+                        )
+                if prof.get("rel"):
+                    out_lines.append("（关系 %d 条）" % len(prof["rel"]))
+            if out_lines:
+                return "\n".join(out_lines)
         entities = value.get("entities")                   # ④ 人物与群名
         if isinstance(entities, list):
             # `r<数字>` = revision ✓（改名要回传 ✓ 用户强调的"全编辑能力" ✓）

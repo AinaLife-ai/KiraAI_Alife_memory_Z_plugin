@@ -2412,3 +2412,62 @@ class RecallTextKeepsIdsCase(unittest.TestCase):
         seg = self.src[i:i + 700]
         for mark in ('"★%s"', '"L%s"', '"bot"', '"mem"', '"arch"', '"@%s"'):
             self.assertIn(mark, seg, "记号与被动侧不一致 ✗：%s" % mark)
+
+
+class ProfilePayloadPurityCase(unittest.TestCase):
+    """`profiles`（GetProfile 的"人"视图）也必须瘦身 ✓（2026-09-18 用户："肯定要"）
+
+    实测问题（我造 3 条事实真跑得到的 ✓）：
+      · `summary` 与 `categories` **完全重复** ✗（同 3 句话出现两遍 ✓）
+      · `entity` 里全是内部物 ✗：`kind` / `name:""` / `lookup_id` / `label:"名称待补全"` /
+        `aliases:[]` / `history:[]`
+      · 空值 ✗：`relations: []` / `stats.last_active: 0` / `ok: true`
+    ⚠️ **必须保留** `id` 与 `revision` ✓✓ —— 改名 `correct_name(id, name, revision, reason)`
+       全靠它 ✓（用户强调"别忘了 bot 的全编辑能力" ✓）
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.src = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def _slim(self, payload):
+        if not os.environ.get("KIRA_CORE"):
+            self.skipTest("需要 KIRA_CORE（main.py 依赖宿主）")
+        module = importlib.import_module("alife_diet_test.main")
+        plugin = object.__new__(module.AlifeMemoryPlugin)
+        return plugin.slim_payload(payload)
+
+    def test_profiles_slimmed(self):
+        dirty = {
+            "ok": True,
+            "profiles": [{
+                "entity": {"id": "qq:1", "kind": "user", "name": "", "revision": 4,
+                           "lookup_id": "qq:1", "label": "名称待补全",
+                           "aliases": [], "history": []},
+                "summary": ["周武爱喝美式"],
+                "categories": {"preference": [
+                    {"c": "pr", "u": "周武", "x": "周武爱喝美式", "imp": 7, "t": "09-18",
+                     "src": "4khyio", "reason": "用户说的"}]},
+                "relations": [],
+                "stats": {"facts": 1, "relations": 0, "sessions": 1, "last_active": 0},
+            }],
+        }
+        out = self._slim(dirty)["profiles"][0]
+        self.assertNotIn("summary", out, "重复的 summary 必须去掉 ✗")
+        self.assertEqual(out["i"], "qq:1")
+        self.assertEqual(out["r"], 4, "revision 必须保留 ✓（改名要用 ✓）")
+        self.assertNotIn("kind", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("lookup_id", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("label", json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("relations", out, "空 relations 必须去掉 ✗")
+        self.assertEqual(out["st"], {"facts": 1, "sessions": 1}, "空计数不许出现 ✓")
+        self.assertEqual(out["c"]["preference"][0]["src"], "4khyio",
+                         "来源短码 src 要留 ✓（bot 引用来源用 ✓）")
+
+    def test_text_view_keeps_ids_and_src(self):
+        i = self.src.find('profs = value.get("profiles")')
+        self.assertGreater(i, 0, "找不到画像文本分支 ✗")
+        seg = self.src[i:i + 2200]
+        self.assertIn("profile.get(\"i\")", seg.replace("prof.get(\"i\")", "profile.get(\"i\")"))
+        self.assertIn("[r%s]", seg, "revision 记号要输出 ✓")
+        self.assertIn('row["src"]', seg, "来源短码要渲染 ✓")

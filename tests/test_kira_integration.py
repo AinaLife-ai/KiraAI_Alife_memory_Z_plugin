@@ -1136,9 +1136,11 @@ async def test_profile_tool_and_restore_api(tmp_path):
         plugin.store.observe_name("test:firefly", "萤火", source="admin")
         event = make_event()
 
-        tool = recall_view(await plugin.get_profile(event, "萤火"))
-        assert tool["ok"] is True
-        assert tool["profiles"][0]["summary"] == ["萤火对花生过敏"]
+        # 2026-09-18：工具返回改成**紧凑文本** ✓ ⇒ 只改这一侧 ✓
+        #   （`api_profile` 那个 **webui** 接口保持 JSON 原样 ✓ 下面的断言不动 ✓）
+        text = await plugin.get_profile(event, "萤火")
+        assert text.startswith("【画像】"), text[:60]
+        assert "萤火对花生过敏" in text, "画像文本里必须逐条列出事实 ✓（summary 已并入 ✓）"
 
         profile = await plugin.api_profile(entity_id="test:firefly")
         assert profile["entity"]["name"] == "萤火"
@@ -1411,10 +1413,11 @@ async def test_bot_profile_is_trimmed_while_webui_profile_keeps_reason(tmp_path)
         _add_fact(plugin, event.sid, "test:firefly", "preference",
                   "喜欢猫", 7, record["id"])
 
-        tool = recall_view(await plugin.get_profile(event, "test:firefly"))
-        bot_fact = tool["profiles"][0]["categories"]["preference"][0]
-        assert "reason" not in bot_fact and "fingerprint" not in bot_fact
-        assert "src" in bot_fact
+        tool = await plugin.get_profile(event, "test:firefly")   # 要**原文** ✓ 不加垫片
+        # 2026-09-18：画像也改成**紧凑文本** ✓ ⇒ 断言改成文本形态（测的意图不变 ✓）
+        assert tool.startswith("【画像】"), tool[:60]
+        assert "reason" not in tool and "fingerprint" not in tool, "内部物不许出现 ✓"
+        assert "[" in tool, "来源短码 src 要以 [短码] 保留 ✓（bot 要能引用来源 ✓）"
 
         webui = await plugin.api_profile("test:firefly")
         webui_fact = webui["categories"]["preference"][0]
