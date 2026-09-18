@@ -96,7 +96,10 @@ async def test_search_returns_only_new_memories(tmp_path):
 
     second = json.loads(await plugin.search_archive(event, keyword="喵梓"))
     assert second["items"] == [] and second["already_seen"] == 3
-    assert "ReadMemoryArchive" in second["hint"]
+    # 2026-09-18：这里原来断言 hint 里含 **ReadMemoryArchive** ✗ —— 那是**幽灵工具名** ✗
+    # （该工具从未注册 ✓ 真实名字是 SearchMemoryArchive ✓；test_tidy_29 里它本来就被列在"已删除"里 ✓）
+    # ⇒ 当年改名时漏改了这句 hint ✓ 现已修正 ⇒ 断言跟着改成真实工具名 ✓
+    assert "SearchMemoryArchive" in second["hint"]
 
     again = json.loads(
         await plugin.search_archive(event, keyword="喵梓", allow_seen=True)

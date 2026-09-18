@@ -2264,3 +2264,29 @@ class FactHealthViewCase(unittest.TestCase):
     def test_threshold_zero_means_no_sink(self):
         data = self.store.fact_health(threshold=0)
         self.assertFalse(any(f["sunk"] for f in data["rows"]), "阈值 0 ⇒ 关闭下沉 ✓")
+
+
+class ToolNameConsistencyCase(unittest.TestCase):
+    """提示词/hint 里提到的**工具名必须真实存在** ✓（2026-09-18 用户日志审计发现）
+
+    实测：主动召回的 hint 里写着「用 **ReadMemoryArchive**(id)」✗ —— 而那个工具**从未注册** ✗
+    （真实名字是 `SearchMemoryArchive` ✓ ⇒ 模型照着念会调一个**不存在的工具** ✓）
+    这类"文案指到不存在的东西"在本项目里出现过多次 ⇒ 立成守卫 ✓
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+        self.main = (self.root / "main.py").read_text(encoding="utf-8")
+
+    def test_registered_tools(self):
+        self.assertIn('name="SearchMemoryArchive"', self.main)
+
+    def test_no_phantom_tool_names(self):
+        # 曾经出现过的幽灵名（一律不许再回来 ✓）
+        for ghost in ("ReadMemoryArchive", "GetMemoryArchive", "MemorySearch"):
+            self.assertNotIn(ghost, self.main,
+                             "提示词/hint 里又出现了不存在的工具名 ✗：%s" % ghost)
+
+    def test_hint_points_to_real_tool(self):
+        self.assertIn("SearchMemoryArchive(ids=[短码])", self.main,
+                      "hint 必须指向真实工具与真实参数 ✓")

@@ -2657,7 +2657,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if not result["items"] and seen:
                 result["hint"] = (
                     "本轮没有新内容：相关记忆此前已经给过。"
-                    "如需重看，用 ReadMemoryArchive(id)，或传 allow_seen=true 重搜。"
+                    "如需重看，用 SearchMemoryArchive(ids=[短码]) 取回，或传 allow_seen=true 重搜。"
                 )
             else:
                 result["hint"] = (
