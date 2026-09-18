@@ -1621,3 +1621,37 @@ class ActiveCacheCase(unittest.TestCase):
         self.store.touch_accessed(["c-0"])                     # 另一个写方法 ✓
         self.assertEqual(self.store._active_cache, {},
                          "其它写路径也要能失效 ✗（靠 total_changes ✓ 不该漏 ✓）")
+
+
+class ScanDedupCase(unittest.TestCase):
+    """扫描不该把"已在排队"的会话重复计数/重复入队 ✓（2026-09-18 用户日志 ✓）
+
+    现象：启动扫描与迁移后扫描相隔 2 秒 ✓ 日志里**同两行出现两遍**
+    「待压缩扫描：2 个会话…本次排 2 个」✗（用户实测 ✓）
+    根因：扫描每轮都重新判所有会话 ✓ 已有排队任务的会话也被算进 pending ✓
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_only_queued_or_running_counts_as_active(self):
+        self.assertFalse(self.store.has_active_job("compress", "s:1"), "没有任务 ⇒ False ✓")
+        jid = self.store.enqueue("compress", "s:1", "", True)
+        self.assertTrue(self.store.has_active_job("compress", "s:1"), "排队中 ⇒ True ✓")
+        self.store.finish(jid, "completed", "压缩 3 条 → L1")
+        self.assertFalse(self.store.has_active_job("compress", "s:1"), "已完成 ⇒ False ✓")
+        self.assertFalse(self.store.has_active_job("tidy", "s:1"), "不同 kind 互不影响 ✓")
+
+    def test_second_scan_does_not_recount(self):
+        """端到端：同一会话连排两次 ⇒ 只有一行任务 ✓（计数不会重复 ✓）"""
+        for _ in range(2):
+            if not self.store.has_active_job("compress", "s:2"):
+                self.store.enqueue("compress", "s:2", "", True)
+        with self.store.connect() as db:
+            n = db.execute("SELECT count(*) FROM jobs WHERE kind='compress' AND sid='s:2'").fetchone()[0]
+        self.assertEqual(n, 1, "同一会话同时只该有一行压缩任务 ✓")

@@ -972,6 +972,11 @@ class AlifeMemoryPlugin(BasePlugin):
         _by_sid = await self.store.call("active_by_session")
         for sid in _order:
             try:
+                # ★ 已有排队/在跑的压缩任务 ⇒ **不重复计数、不重复入队** ✓
+                #   （否则同一会话会被数两次 ✓ 用户实测：启动扫描与迁移后扫描相隔 2 秒 ✓
+                #    日志里同两行出现两遍 ✗）
+                if await self.store.call("has_active_job", "compress", sid):
+                    continue
                 rows = _by_sid.get(sid) or []
                 # 闸门用 stamp=False ✗✓：只判断"要不要排" ✓ 不消耗降门槛资格 ✓
                 _plan = compression_plan(rows, cfg, now=now,
@@ -993,7 +998,10 @@ class AlifeMemoryPlugin(BasePlugin):
             await self.engine.enqueue("compress", sid, automatic=True)
         if pending:
             logger.info(
-                "[记忆·Z] 待压缩扫描：%s 个会话有内容可压，本次排 %s 个",
+                # 措辞：这里只说明"**扫描那一刻**达到了压缩条件" ✓
+                # 不承诺"一定有内容可压" ✗ —— 任务真正跑起来时条件可能已变
+                # （群里刚好又说了话等 ✓ 实测可复现 ✓），那时任务会静默空转 ✓
+                "[记忆·Z] 待压缩扫描：%s 个会话达到压缩条件，本次排 %s 个",
                 len(pending), min(len(pending), cap),
             )
         if archived_only:

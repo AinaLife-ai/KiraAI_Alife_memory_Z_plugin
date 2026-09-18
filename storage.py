@@ -1199,6 +1199,23 @@ class Store:
             ids.append(row[0])
         return ids[:20]
 
+    def has_active_job(self, kind, sid):
+        """该会话是否已有**排队中/在跑**的同类任务 ✓（2026-09-18）
+
+        为什么需要：扫描每轮都会重新判一遍所有会话 ✓ ——
+        若某会话已经有任务在排队 ✓ 它仍会被算进"有内容可压"的数量里 ✓
+        并被**再入队一次**（`INSERT OR IGNORE` 不报错 ✓ 但计数是假的 ✓）
+        实测现象：启动扫描与迁移后扫描相隔 2 秒 ✓ 日志里同两行被数了两次 ✗
+        （用户 2026-09-18 的日志就是这个 ✓）
+        """
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM jobs WHERE kind=? AND sid=? AND state IN ('queued','running')"
+                " LIMIT 1",
+                (kind, sid),
+            ).fetchone()
+        return row is not None
+
     def can_schedule(self, kind, sid):
         with self.connect() as db:
             row = db.execute(
