@@ -2331,11 +2331,32 @@ class AlifeMemoryPlugin(BasePlugin):
             out["archive"] = arch
         names = out.get("names")
         if isinstance(names, list):
-            slim = [
-                {"i": n.get("id"), "n": n.get("name")}
-                for n in names
-                if isinstance(n, dict) and n.get("name")
-            ]
+            slim = []
+            for n in names:
+                if not isinstance(n, dict) or not n.get("name"):
+                    continue
+                item = {"i": n.get("id"), "n": n.get("name")}
+                # ★ 2026-09-18（用户要求）：**曾用名**可以留 ✓ 但要"只在真换过时"给 ✗
+                #   · `history` 里的 `observed` = 该名字**被观察到的时间** ✓
+                #     ⇒ 换算成**绝对日期**才有意义 ✓（形如 武哥@08-20 ✓）
+                #   · **同名不算曾用名** ✗（那是同一名字被反复确认 ✓）
+                olds = {}
+                for h in (n.get("history") or []):
+                    if not isinstance(h, dict):
+                        continue
+                    old_name = str(h.get("name") or "").strip()
+                    if not old_name or old_name == n.get("name"):
+                        continue
+                    at = h.get("observed")
+                    if old_name not in olds or (at and at > (olds[old_name] or 0)):
+                        olds[old_name] = at
+                if olds:
+                    item["h"] = [
+                        "%s@%s" % (name, short_time(at) if at else "?")
+                        for name, at in sorted(olds.items(), key=lambda kv: kv[1] or 0,
+                                               reverse=True)[:3]     # 最近 3 个 ✓ 防爆表
+                    ]
+                slim.append(item)
             if slim:
                 out["names"] = slim
             else:
