@@ -51,6 +51,7 @@ const fields = {
   recall_skip_media: "召回跳过表情/图片-only 消息",
   compress_input_max_chars: "每批压缩的原文上限（字符）",
   compress_stale_after_days: "陈旧记忆几天后开始消化",
+  fact_sink_threshold: "常驻下沉阈值",
   compress_idle_after_hours: "会话闲置几小时后收尾",
   compress_idle_cooldown_min: "收尾压缩的冷却（分钟）",
   compress_batches_per_job: "单个压缩任务最多连压几批",

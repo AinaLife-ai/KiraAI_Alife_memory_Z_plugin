@@ -454,6 +454,14 @@
         "minimum": 0,
         "maximum": 20
       },
+      "fact_sink_threshold": {
+        "type": "integer",
+        "name": "常驻下沉阈值",
+        "default": 12,
+        "description": "常驻下沉阈值：低重要度且分数低于它的事实本轮让位给轮换槽位（被用上会自动浮回）。0=关闭下沉。默认12。",
+        "minimum": 0,
+        "maximum": 40
+      },
       "rotate_keep_rounds": {
         "type": "integer",
         "name": "轮换保留轮数",

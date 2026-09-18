@@ -1832,3 +1832,67 @@ class ArchiveLayerMarkCase(unittest.TestCase):
                       "说明文案没解释 L 标 ✗ ⇒ 模型不会用 ✓")
         self.assertIn("*=永久记忆", self.src)
         self.assertIn("@=来自别的会话", self.src)
+
+
+class FactSinkFloatCase(unittest.TestCase):
+    """事实的**下沉 / 上浮**（2026-09-18 批次 2）
+
+    设计（用户拍板 ✓ 沿用既有术语、不加新概念）：
+    · 「下沉」= 移出常驻 ⇒ 天然落进**轮换槽位**（轮换池是独立查询，不受这里影响）
+    · 「上浮」= 在轮换里被**「用上」**（`rotate_used` ↑）⇒ 分数回升 ⇒ 自动回常驻
+    · 分数 = 重要度×2 + min(被用次数,5)×3 + 新鲜度（30 天 +5 / 90 天 +2）
+    · **重要度 ≥ 8 永不沉**（硬规则 ✓）；阈值设 0 = 关闭下沉
+    """
+
+    NOW = 1_800_000_000.0
+
+    def _fact(self, importance=5, used=0, age_days=0):
+        return {
+            "id": "f1",
+            "importance": importance,
+            "rotate_used": used,
+            "created": self.NOW - age_days * 86400,
+        }
+
+    def test_score_formula(self):
+        self.assertEqual(r.fact_sink_score(self._fact(5, 0, 0), now=self.NOW), 20)
+        self.assertEqual(r.fact_sink_score(self._fact(5, 2, 0), now=self.NOW), 26)
+        self.assertEqual(r.fact_sink_score(self._fact(5, 99, 0), now=self.NOW), 35,
+                         "被用次数封顶 5 次（10 + 5×3 + 10 = 35 ✓ 避免刷分 ✓）")
+        self.assertEqual(r.fact_sink_score(self._fact(3, 0, 200), now=self.NOW), 6,
+                         "老事实没有新鲜度加分 ✓")
+
+    def test_never_sink_high_importance(self):
+        """硬规则：重要度 ≥8 **永不沉** ✓（哪怕很旧、没人用过 ✓）"""
+        for imp in (8, 9, 10):
+            self.assertFalse(r.should_sink(self._fact(imp, 0, 500), 20, now=self.NOW),
+                             "重要度 %d 被下沉了 ✗（用户拍板 ≥8 永不沉 ✓）" % imp)
+
+    def test_low_importance_sinks(self):
+        self.assertTrue(r.should_sink(self._fact(3, 0, 200), 20, now=self.NOW))
+
+    def test_threshold_zero_disables(self):
+        facts = [self._fact(2, 0, 500), self._fact(9, 0, 500)]
+        self.assertEqual(len(r.sink_filter(facts, 0, now=self.NOW)), 2, "0 = 关闭下沉 ✓")
+
+    def test_float_back_when_used(self):
+        """**上浮**：被轮换带进来并用上之后 ⇒ 分数回升 ⇒ 不再被下沉 ✓"""
+        sunk = self._fact(3, 0, 200)
+        self.assertTrue(r.should_sink(sunk, 20, now=self.NOW), "前置：先能沉 ✓")
+        # 3×2=6；用 1 次 +3 ⇒ 9 < 12 还沉 ✓；用 2 次 +6 ⇒ 12 ≥ 12 浮回 ✓
+        self.assertTrue(r.should_sink(self._fact(3, 1, 200), 12, now=self.NOW),
+                        "用 1 次（9 分）不该浮回 ✓ 阈值必须真的在拦 ✓")
+        used = self._fact(3, 2, 200)                      # 在轮换里被用上 2 次 ✓
+        self.assertFalse(r.should_sink(used, 12, now=self.NOW),
+                         "被用上了还沉 ✗ ⇒ 上浮转不起来 ✓")
+
+    def test_filter_keeps_order_and_no_mutation(self):
+        facts = [{"id": "a", "importance": 9, "rotate_used": 0, "created": self.NOW},
+                 {"id": "b", "importance": 2, "rotate_used": 0,
+                  "created": self.NOW - 400 * 86400},      # 老且没人用过 ⇒ 该沉 ✓
+                 {"id": "c", "importance": 6, "rotate_used": 5, "created": self.NOW}]
+        before = json.dumps(facts, ensure_ascii=False)
+        kept = r.sink_filter(facts, 20, now=self.NOW)
+        self.assertEqual([f["id"] for f in kept], ["a", "c"], "顺序要稳定、该留的要留 ✓")
+        self.assertEqual(json.dumps(facts, ensure_ascii=False), before,
+                         "不许就地修改（调用方可能还要用 ✓）")

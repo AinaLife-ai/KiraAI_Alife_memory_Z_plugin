@@ -327,6 +327,17 @@ class Settings(Strict):
     # 轮换槽位：在"同样相关"的候选里，优先把还没被召回过的那几条补进来
     rotate_enabled: bool = True
     rotate_count: int = Field(default=3, ge=0, le=20)
+    # 2026-09-18（批次 2）：事实的**常驻下沉阈值** ✓
+    #   分数 = 重要度×2 + min(被用次数,5)×3 + 新鲜度（30 天 +5 / 90 天 +2）
+    #   低于它、且重要度 ≤7 的事实本轮**不进常驻** ✓ 改由轮换槽位接力 ✓
+    #   被轮换带进来且被"用上"（rotate_used ↑）⇒ 分数回升 ⇒ 自动浮回常驻 ✓
+    #   设 0 = 关闭下沉 ✓（重要度 ≥8 硬规则永不沉 ✓ 与阈值无关 ✓）
+    #   ⚠️ 默认值标定（2026-09-18 实测教训 ✗）：一开始给 20，
+    #     结果**重要度 5（默认分）+ 新鲜** = 15 分 ⇒ 全被沉掉 ✗
+    #     —— 集成测试当场抓到"注入里少了事实" ✓
+    #     现在 12：默认分 + 新鲜（15）**不沉** ✓
+    #     默认分 + 超过 90 天没被用过（10）⇒ **沉** ✓（可被轮换带回来 ⇒ 用上就浮回 ✓）
+    fact_sink_threshold: int = Field(default=12, ge=0, le=40)
     rotate_keep_rounds: int = Field(default=3, ge=1, le=20)
     rotate_min_hits: int = Field(default=2, ge=1, le=10)
     rotate_cooldown_rounds: int = Field(default=10, ge=0, le=100)

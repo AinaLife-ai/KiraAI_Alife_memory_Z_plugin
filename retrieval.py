@@ -900,6 +900,60 @@ def bot_facts_grouped(facts, current_sid="", codes=None, self_id=""):
     return out
 
 
+# ── 下沉 / 上浮（2026-09-18 批次 2）──────────────────────────────
+#  术语沿用既有的「常驻 / 轮换槽位」✓ **不新增概念** ✓
+#  · 「下沉」= 移出常驻 ⇒ 天然落进轮换候选（轮换池是独立查询 ✓ 不在本文件过滤 ✓）
+#  · 「上浮」= 在轮换里被**「用上」**（`rotate_used` ↑）⇒ 分数回升 ⇒ 回常驻 ✓
+#  分数只用于**排序 / 过滤**，**不落库** ⇒ 随时可逆、可调 ✓
+NEVER_SINK_IMPORTANCE = 8          # 硬规则：重要度 ≥ 8 **永不沉** ✓（用户拍板 ✓）
+
+
+def fact_sink_score(fact, now=None):
+    """常驻分数 ✓ = 重要度×2 + min(用上次数,5)×3 + 新鲜度加分
+
+    与既有机制对齐 ✓：`rotate_used` 就是轮换槽记的"被用过"次数 ✓
+    （`mark_rotation(kind="fact")` 已在批次 1 修好 ✓ 所以这个数是真实的 ✓）
+    新鲜度按事实的 `created` 算 ✓：30 天内 +5 / 90 天内 +2 / 更早 0 ✓
+    """
+    now = now or time.time()
+    importance = int(fact.get("importance") or 5)
+    used = min(int(fact.get("rotate_used") or 0), 5)
+    created = float(fact.get("created") or 0)
+    age_days = max(0.0, (now - created) / 86400.0) if created else 9999.0
+    # ⚠️ 标定（2026-09-18 第二次修正 ✗）：一开始 +5/+2 会让**新鲜的低重要度**事实
+    #   立刻被沉掉 ⇒ 与既有行为冲突（"低重要度也照常注入、只是排后面" ✓
+    #   集成测试 `test_injection_hides_pending_and_prefers_important_subjects` 当场抓到 ✓）
+    #   ⇒ 新鲜就该留住 ✓ 下沉只针对"**又旧又没被用过**"的 ✓ 这也才叫"慢慢沉" ✓
+    fresh = 10 if age_days <= 30 else (4 if age_days <= 90 else 0)
+    return importance * 2 + used * 3 + fresh
+
+
+def should_sink(fact, threshold, now=None):
+    """这条事实这次要不要**让位** ✓（移出常驻 ✓ 不是删除 ✓）
+
+    ⚠️ 两条保守规则（2026-09-18 实测教训 ✗：默认阈值一开始给 20，
+    把"重要度 5（默认分）+ 新鲜"的事实也沉了 ⇒ 注入里少了事实 ✓ 集成测试抓到 ✓）：
+    · 判不出年龄（没有 `created`）⇒ **不沉** ✓（不知道就别动 ✓）
+    """
+    if int(fact.get("importance") or 5) >= NEVER_SINK_IMPORTANCE:
+        return False                      # ★ 硬规则：≥8 永不沉 ✓
+    if not fact.get("created"):
+        return False                      # ★ 没有时间戳 ⇒ 保守不沉 ✓
+    return fact_sink_score(fact, now=now) < int(threshold)
+
+
+def sink_filter(facts, threshold, now=None):
+    """把该下沉的从**常驻**列表里摘掉 ✓ 其余保持原顺序 ✓
+
+    · `threshold <= 0` ⇒ **关闭下沉** ✓（原样返回 ✓ 便于随时回退 ✓）
+    · **不删数据** ✓ 被摘掉的仍在轮换候选池里（调用方保证 ✓）⇒ 被「用上」就能浮回来 ✓
+    """
+    if not threshold or int(threshold) <= 0:
+        return list(facts or [])
+    now = now or time.time()
+    return [f for f in (facts or []) if not should_sink(f, threshold, now=now)]
+
+
 def self_only_last(facts, self_id=""):
     """把"最新来源是助手自己"的事实**稳定地排到最后** ✓（2026-09-18，回声防线的排序侧 ✓）
 

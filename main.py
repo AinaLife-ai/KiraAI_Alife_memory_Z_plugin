@@ -64,6 +64,7 @@ from .retrieval import (
     tool_call_summary,
     tool_preview,
     RecallWindow,
+    sink_filter,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -1795,6 +1796,11 @@ class AlifeMemoryPlugin(BasePlugin):
                     min_score=cfg.fact_recall_min_score,
                     **prefer,
                 )
+            # ★ 2026-09-18 批次 2：**下沉** ✓
+            #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
+            #   **不删不藏**：它们仍在下面的轮换候选池里（那是独立查询 ✓）
+            #   一旦被轮换带进来并被**用上**（rotate_used ↑）⇒ 分数回升 ⇒ 自动回常驻 ✓
+            facts = sink_filter(facts, cfg.fact_sink_threshold, now=time.time())
             facts = facts + await self.rotation_extras(
                 sid,
                 cfg,
