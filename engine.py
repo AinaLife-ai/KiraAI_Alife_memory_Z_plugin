@@ -356,10 +356,26 @@ def restore_audit_ids(output, aliases):
     return output
 
 
-def compress_summary(steps):
-    """压缩任务详情：压缩了几批、每批多少条进了哪一层。"""
+def compress_summary(steps, cfg=None):
+    """压缩任务详情：压缩了几批、每批多少条进了哪一层。
+
+    空转时（`steps` 为空 ✓）**把原因写出来** ✓ —— 否则用户只看到
+    "本次没有需要压缩的内容" ✗ 完全不知道是"没攒够轮"还是"冷会话条件没满足" ✓
+    原因用**当前配置**生成 ✓（改过设置也不会写出过期的数字 ✓）
+    """
     if not steps:
-        return "本次没有需要压缩的内容"
+        base = "本次没有需要压缩的内容"
+        if cfg is None:
+            return base
+        rounds = int(getattr(cfg, "compress_rounds", 12) or 12)
+        days = int(getattr(cfg, "compress_stale_after_days", 3) or 0)
+        hours = int(getattr(cfg, "compress_idle_after_hours", 6) or 0)
+        if days and hours:
+            why = "未满 %d 个完整轮，且未同时满足冷会话条件（陈旧 %d 天 且 闲置 %d 小时）" % (
+                rounds, days, hours)
+        else:
+            why = "未满 %d 个完整轮，且未达到冷会话门槛" % rounds
+        return "%s（%s）" % (base, why)
     parts = ["%d 条 → L%d" % (step["count"], step["level"]) for step in steps[:3]]
     if len(steps) > 3:
         parts.append("等 %d 批" % len(steps))
@@ -799,7 +815,9 @@ class Engine:
         kind = job["kind"]
         if kind == "fact_merge":
             return detail.startswith("合并 0 组")
-        return detail in QUIET_JOB_NOTES
+        # 前缀匹配 ✓：空转说明会**追加原因**（"…（未满 12 个完整轮，且未达冷会话条件）"）✓
+        # 只认"确定不调模型"的那几条 ✓ 措辞变了也仍然静默 ✓（有测试盯着 ✓）
+        return any(detail.startswith(q) for q in QUIET_JOB_NOTES)
 
     async def name_map(self, ids):
         """实体 id → 当前名字。发给模型的记录里带上名字，它才知道 id 背后是谁。"""
@@ -922,7 +940,15 @@ class Engine:
         # 一次判定 = 这条任务"追平这个会话"的授权 ✓ 循环里一直有效 ✓
         # （循环本身在 `compression_plan` 返回 None 时立刻退出 ✓ 不会空转 ✓）
         _cap = max(1, min(64, int(getattr(self.settings(), "compress_batches_per_job", 3) or 3)))
-        _boost = _boost_ok(sid, self.settings())
+        # ★ 2026-09-18：**先只询问、不盖章** ✗✓
+        #   背景：扫描排任务时判的是"**那一刻**"✓（冷会话 ⇒ 门槛降到 1 ⇒ 有内容 ✓）；
+        #   而任务真正跑起来要等几秒~几十秒 ✓ —— 这期间群里**只要再来一条消息**，
+        #   "闲置 >6 小时"立刻不成立 ✓ ⇒ 降门槛失效 ⇒ 不够 12 轮 ⇒ **空转** ✓
+        #   （实测对照：同一份冷会话数据，排完任务后加 2 条新消息 ⇒ 必空转 ✓）
+        #   原实现一进任务就盖章 ✗ ⇒ 一次**没用上**的判定白占 30 分钟冷却 ✓
+        #   ⇒ 改成**真压到了才盖章** ✓（"30 分钟最多降一次"应当指"真的降了"✓）
+        _boost = _boost_ok(sid, self.settings(), stamp=False)
+        _boost_stamped = False
         for _ in range(_cap):          # ← 花钱闸门 ✓ 一条任务最多 _cap 批 ✓
             cfg = self.settings()
             if not cfg.enabled:
@@ -1073,6 +1099,9 @@ class Engine:
             logger.debug(
                 "[记忆·Z] 压缩完成：%d 条 → L%d，原文已保留", len(candidates), level
             )
+            if _boost and not _boost_stamped:
+                _boost_ok(sid, self.settings(), stamp=True)   # ★ 真压到了才消耗 ✓
+                _boost_stamped = True
             if cfg.semantic_enabled:
                 await self.index(record_id, cfg)
 
@@ -2037,7 +2066,7 @@ class Engine:
             try:
                 if job["kind"] == "compress":
                     steps = await self.compress(job["sid"], job["id"])
-                    detail = compress_summary(steps)
+                    detail = compress_summary(steps, self.settings())
                 elif job["kind"] == "proactive":
                     if cfg.proactive_enabled and job["sid"] in cfg.proactive_sessions:
                         await self.notice(job["sid"])
