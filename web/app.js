@@ -936,6 +936,10 @@ async function loadHealth(page) {
   if (!meta || !box) return;
   const p = Math.max(0, Number(page) || 0);
   meta.textContent = "正在加载…";
+  // ★ 2026-09-19（用户实测）：先点体检页时卡片只显示 `qq:2141951927` ✗
+  //   根因：昵称表 displayNames 是**懒加载**的，只有"名字页/关系页"会补载 ✓
+  //   ⇒ 这里先补一次 ✓（静默 ✓ 拿不到也不影响主流程 ✓）
+  await ensureNames();
   let d;
   try {
     // ★ 服务端分页：只拉**本页 50 条**（原来一次 300 行 = 189.5 KB ✗ 用户实测"加载太久"）
@@ -1500,7 +1504,17 @@ $$("[data-tab]").forEach(
     (e.onclick = () =>
       guard(async () => {
         await selectTab(e.dataset.tab);
-        if (e.dataset.tab === "health") await loadHealth();   // ★ 体检页顺手拉一次 ✓
+        if (e.dataset.tab === "health") {
+          await loadHealth();   // ★ 体检页顺手拉一次 ✓
+          // ★ 2026-09-19（用户实测："首次点进去一直正在加载，得点别的页再点回来" ✓）
+          //   首屏偶发失败（面板刚起/竞态）⇒ 自动重试一次 ✓ 用户不必手动绕一圈 ✓
+          setTimeout(() => {
+            const m = $("#healthMeta");
+            if (m && /正在加载/.test(m.textContent)) {
+              loadHealth(healthPage).catch(() => {});
+            }
+          }, 1200);
+        }
       })),
 );
 $("#refresh").onclick = () =>

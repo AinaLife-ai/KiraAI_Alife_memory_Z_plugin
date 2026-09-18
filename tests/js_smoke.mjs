@@ -127,6 +127,14 @@ sandbox.fetch = async (url, opts) => {
   try { await sandbox.loadHealth(); ok("调用不抛错", true); }
   catch (e) { ok("调用不抛错", false, String((e && e.message) || e)); }
   ok("请求了 /fact_health", healthCalls.some((u) => u.includes("fact_health")));
+  {
+    const body = src.slice(src.indexOf("async function loadHealth("));
+    const iNames = body.indexOf("await ensureNames()");
+    const iFetch = body.indexOf("/fact_health");
+    ok("★ 先补昵称表再取数据（否则卡片只显示 qq:数字）",
+      iNames > -1 && iFetch > -1 && iNames < iFetch,
+      "ensureNames@" + iNames + " / fact_health@" + iFetch);
+  }
   ok("★ 服务端分页：请求带 limit=50&offset=0（不再一次拉 300 行）",
     healthCalls.some((u) => u.includes("limit=50") && u.includes("offset=0")), healthCalls[0]);
   const metaText = String((memo["#healthMeta"] || {}).textContent || "");
