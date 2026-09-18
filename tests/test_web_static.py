@@ -224,3 +224,27 @@ def test_every_tab_has_a_title_entry():
     for tab in tabs:
         assert re.search(r'\b%s:\s*\["' % tab, block), (
             "页签 %s 没有 titles 条目 ✗ ⇒ 一点它就报 reading '0' ✓" % tab)
+
+
+# ★ 2026-09-18：**调用了没定义的函数**这类 bug 必须被静态挡住 ✓
+#   实测事故：`loadHealth()` 被调用 3 处，函数从来没定义 ✗
+#   ⇒ 体检页永远"正在加载…" ✓ 后来我误加调用 ⇒ 页面直接报 "loadHealth is not defined" ✗
+def _undefined_called_functions(src):
+    """返回被调用但**没有定义**的 load*/render*/open* 函数名 ✓"""
+    defined = set(re.findall(r"(?:function|const|let|var)\s+((?:load|render|open)[A-Z]\w*)", src))
+    called = set(re.findall(r"\b((?:load|render|open)[A-Z]\w*)\s*\(", src))
+    return sorted(called - defined)
+
+
+def test_every_called_loader_is_defined():
+    src = (WEB / "app.js").read_text(encoding="utf-8")
+    missing = _undefined_called_functions(src)
+    assert missing == [], "这些函数被调用了但没有定义：%s" % missing
+
+
+def test_the_guard_can_actually_fail():
+    """反向自检 ✓：判据在"确实缺定义"时必须报红（否则它是摆设 ✗）"""
+    bad = "async function loadFacts() {} loadHealth(); loadFacts();"
+    assert _undefined_called_functions(bad) == ["loadHealth"]
+    good = "async function loadFacts() {} async function loadHealth() {} loadHealth();"
+    assert _undefined_called_functions(good) == []

@@ -918,6 +918,53 @@ function askPurge(kind, target, summary) {
   });
 }
 
+/* ★ 2026-09-18：补上一直**缺失**的体检页渲染 ✓
+   （HTML 有 #health / #healthList ✓ 点击处理器也早就写好 ✓
+     但渲染函数从来没实现 ✗ ⇒ 页面永远"正在加载…" ✓
+     我上次误加了 `loadHealth()` 调用 ⇒ 变成 "loadHealth is not defined" ✗）
+   后端接口：GET /fact_health ✓ → {threshold, count, now, rows:[…]} ✓ */
+async function loadHealth() {
+  const meta = $("#healthMeta"), box = $("#healthList");
+  if (!meta || !box) return;
+  meta.textContent = "正在加载…";
+  let d;
+  try {
+    d = await api("/fact_health");
+  } catch (e) {
+    meta.textContent = "加载失败：" + e.message;
+    return;
+  }
+  const rows = (d && d.rows) || [];
+  const thr = (d && d.threshold) != null ? d.threshold : 12;
+  const sunk = rows.filter((f) => f.sunk).length;
+  meta.textContent =
+    "共 " + rows.length + " 条事实；阈值 " + thr + "，本轮会下沉 " + sunk + " 条。" +
+    "分数低的排在前面（最该处理的先看到）。";
+  box.innerHTML = rows.length
+    ? rows.map(healthCard).join("")
+    : '<p class="muted">暂无事实 ✓</p>';
+}
+
+function healthCard(f) {
+  const imp = f.importance != null ? f.importance : 5;
+  const age = f.age_days != null ? f.age_days + " 天前" : "时间未知";
+  const tags =
+    (f.sunk ? '<span class="badge">本轮下沉</span>' : "") +
+    (f.never_sink ? '<span class="badge">永不沉</span>' : "");
+  return (
+    '<div class="card fact">' +
+    '<div class="muted">重要度 ' + imp + " · 分数 " + f.score + " · 被用 " +
+    (f.rotate_used || 0) + " 次 · " + age + " " + tags + "</div>" +
+    '<div class="fact-content">' + esc(f.content) + "</div>" +
+    '<div class="row">' +
+    '<button data-imp="' + f.id + '" data-delta="-1">－</button>' +
+    '<button data-imp="' + f.id + '" data-delta="1">＋</button>' +
+    '<button data-del="' + f.id + '">删除</button>' +
+    "</div></div>"
+  );
+}
+
+
 async function loadFacts() {
   const byContent = $("#factContent").checked;
   const q = new URLSearchParams({
