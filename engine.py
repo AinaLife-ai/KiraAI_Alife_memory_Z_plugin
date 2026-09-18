@@ -714,7 +714,8 @@ class Engine:
         self.tasks.append(asyncio.create_task(self.tidy_worker()))
         self.tasks.append(asyncio.create_task(self.scheduler()))
         for row in await self.store.call("pending_facts"):
-            await self.enqueue("fact_merge", row["sid"])
+            # 内部补齐路径 ✓ 空转时该静默 ✓（2026-09-18 用户：这行日志刷屏 ✓）
+            await self.enqueue("fact_merge", row["sid"], automatic=True)
 
     async def proactive_tick(self, now, cfg):
         """到点就挑一批会话入队。首轮先等一个完整间隔（重启不立刻刷屏）。"""
@@ -1214,7 +1215,7 @@ class Engine:
                 flagged.append(row["id"])
         if flagged:
             await self.store.call("mark_merge_pending", flagged)
-            await self.enqueue("fact_merge", sid)
+            await self.enqueue("fact_merge", sid, automatic=True)   # 内部 ✓ 空转静默 ✓
         return len(flagged)
 
     async def queue_migration_merges(self, since):
