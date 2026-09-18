@@ -66,13 +66,13 @@ from .retrieval import (
     tool_preview,
     RecallWindow,
     sink_filter,
+    media_only,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
 
 PLUGIN_ID = "alife_memory_z"
 
-from .retrieval import media_only
 from .retrieval import recall_text   # v2.18.12：媒体判定统一放 retrieval ✓
 from .retrieval import _MEDIA_HEAD as _MEDIA_HEAD_PAT   # v2.18.18 绊线用同一份判据 ✓
 logger = get_logger(PLUGIN_ID, "light_purple")
@@ -2386,13 +2386,34 @@ class AlifeMemoryPlugin(BasePlugin):
             recall_key = (event.sid, tuple(user_ids(event)), self.settings.recall_scope)
             self.seen_window.remember(recall_key, "", [id])
             names = await self.store.call("entities", ids=[row["sid"], *row["users"]])
+            archive = archive_view(row, child_offset, child_count, include_content)
+            # ★ 2026-09-18：内容条目必须与**检索侧同一套口径** ✓（用户实测这条漏了 ✗）
+            #   · 只有壳（表情/图片描述）⇒ **整条丢** ✓ —— **已识别的也一样丢** ✓
+            #     （用户拍板 A：视觉描述是机器补的 ✓ "只有它一条"的消息不算有人在说话 ✓
+            #      人味由 L1 摘要承载 ✓ 不必把 400 字机器描述塞进召回 ✓）
+            #   · 真话走官方管线 `model_text`（剥思考块 ✓ 内联壳归一 ✓ 嵌套裁剪 40/100 ✓）
+            #   · 字段瘦身：内部主键 `id` ✗ 内部 `level` ✗ `role`→`r` ✓ `content`→`s` ✓
+            _rows = archive.get("content")
+            if isinstance(_rows, list):
+                _names = tuple(
+                    str(n.get("name") or "") for n in (names or []) if n.get("name")
+                )
+                _keep = tuple(n for n in _names if " " in n)
+                _clean = []
+                for _item in _rows:
+                    _raw = str(_item.get("content") or "")
+                    if not _raw.strip() or media_only(_raw, names=_names):
+                        continue                      # 只有壳 ⇒ 整条不发 ✓
+                    _clean.append({
+                        "r": "a" if _item.get("role") == "assistant" else "u",
+                        "s": self.model_text(_raw, _keep),
+                    })
+                archive["content"] = _clean
             return self.recall_result(
                 event,
                 {
                     "ok": True,
-                    "archive": archive_view(
-                        row, child_offset, child_count, include_content
-                    ),
+                    "archive": archive,
                     "names": names,
                 },
             )
