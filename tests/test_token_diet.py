@@ -1258,3 +1258,53 @@ class JobLogNoiseCase(unittest.TestCase):
                             "手动任务的结果必须可见 ✓")
         finally:
             temp.cleanup()
+
+
+class EnqueueReopenCase(unittest.TestCase):
+    """同一 (kind,sid) 已完结后必须能**重开** ✓（2026-09-18 查出的真 bug ✓）
+
+    原来：`INSERT OR IGNORE` + `SELECT ... state IN ('queued','running')` ✗
+    ⇒ ① 已完结的行 ⇒ 插入被**静默忽略** ⇒ **该会话再也排不上同类任务** ✓
+         （要等清理：50 条以外或 7 天前 ✓ —— 用户看到的就是"扫描说有内容、任务却没跑" ✓）
+       ② 那个 SELECT 会返回 None ⇒ `[0]` ⇒ **TypeError** ✓（被 per-session try 吞成一行日志 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _state(self, jid):
+        with self.store.connect() as db:
+            return db.execute("SELECT state, automatic FROM jobs WHERE id=?", (jid,)).fetchone()
+
+    def test_completed_row_is_reopened(self):
+        jid = self.store.enqueue("compress", "s:1")
+        self.store.finish(jid, "completed", "压缩 40 条 → L1")
+        self.assertEqual(self._state(jid)[0], "completed")
+        jid2 = self.store.enqueue("compress", "s:1")      # 必须能重排 ✓
+        self.assertEqual(jid2, jid, "应当复用同一行 ✓（UNIQUE(kind,sid) ✓）")
+        self.assertEqual(self._state(jid)[0], "queued", "已完结的行没被重开 ✗ ⇒ 该会话永远排不上 ✓")
+
+    def test_queued_row_is_reused_not_duplicated(self):
+        a = self.store.enqueue("compress", "s:2")
+        b = self.store.enqueue("compress", "s:2")
+        self.assertEqual(a, b, "同一 (kind,sid) 不该产生第二行 ✗")
+
+    def test_manual_enqueue_upgrades_automatic_flag(self):
+        jid = self.store.enqueue("compress", "s:3", "", True)      # 自动
+        self.assertEqual(self._state(jid)[1], 1)
+        self.store.enqueue("compress", "s:3", "", False)           # 手动 ⇒ 优先 ✓
+        self.assertEqual(self._state(jid)[1], 0,
+                         "手动排的任务没升级标记 ✗ ⇒ 会被自动静默规则吃掉 ✓")
+
+    def test_no_typeerror_when_row_exists(self):
+        """判据：任何状态下 enqueue 都必须返回**有效 id** ✓（不能 None/异常 ✓）"""
+        jid = self.store.enqueue("tidy", "s:4")
+        self.store.finish(jid, "completed", "整理 0 条")
+        for _ in range(3):
+            out = self.store.enqueue("tidy", "s:4")
+            self.assertTrue(out and isinstance(out, str), "enqueue 返回了无效 id ✗：%r" % out)
