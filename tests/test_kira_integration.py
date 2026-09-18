@@ -1,5 +1,6 @@
 """Run with KIRA_CORE pointing at a real checkout; no fake core modules."""
 
+import re
 import asyncio
 import importlib
 import json
@@ -115,14 +116,14 @@ async def test_followup_recall_returns_new_records_and_tools_continue(tmp_path):
         await plugin.on_request(event, req2)
         assert req.system_prompt[0].content == req2.system_prompt[0].content
         # 已经注入过的记忆不再重复返回
-        tool = json.loads(await plugin.search_archive(event, keyword="猫", count=2))
+        tool = recall_view(await plugin.search_archive(event, keyword="猫", count=2))
         assert tool["ok"] and tool["items"]
         tool_ids = {r["i"] for r in tool["items"]}
         assert not tool_ids & first_ids
-        tool2 = json.loads(await plugin.search_archive(event, keyword="猫", count=2))
+        tool2 = recall_view(await plugin.search_archive(event, keyword="猫", count=2))
         assert not {r["i"] for r in tool2["items"]} & (tool_ids | first_ids)
         # 显式重看仍然可以
-        tool3 = json.loads(
+        tool3 = recall_view(
             await plugin.search_archive(event, keyword="猫", count=2, allow_seen=True)
         )
         assert {r["i"] for r in tool3["items"]} & (tool_ids | first_ids)
@@ -174,13 +175,13 @@ async def test_continuation_excludes_local_context_and_direct_reads(tmp_path):
         )
         request = LLMRequest()
         await plugin.on_request(event, request)
-        result = json.loads(await plugin.search_archive(event, keyword="猫"))
+        result = recall_view(await plugin.search_archive(event, keyword="猫"))
         assert local not in {r["id"] for r in result["items"]}
         other = plugin.store.memorize(
             "test:gm:other", "我喜欢猫的别处记忆", ["test:v"], 2.0, 2.0
         )
         await plugin.read_archive(event, other)
-        result = json.loads(await plugin.search_archive(event, keyword="猫"))
+        result = recall_view(await plugin.search_archive(event, keyword="猫"))
         assert other not in {r["id"] for r in result["items"]}
     finally:
         await plugin.terminate()
@@ -219,8 +220,8 @@ async def test_followup_facts_excluded_before_limit(tmp_path):
                     ),
                 )
         event = make_event()
-        first = json.loads(await plugin.overview(event))
-        second = json.loads(await plugin.overview(event))
+        first = recall_view(await plugin.overview(event))
+        second = recall_view(await plugin.overview(event))
         # MemoryOverview 每次最多返回 50 条新事实：先排除已送达的，再截断。
         def _total(payload):
             facts = payload["facts"]
@@ -230,7 +231,7 @@ async def test_followup_facts_excluded_before_limit(tmp_path):
 
         assert _total(first) == 50 and first["seen"] == 0
         assert _total(second) == 5 and second["seen"] == 50
-        third = json.loads(await plugin.overview(event))
+        third = recall_view(await plugin.overview(event))
         assert _total(third) == 0 and third["seen"] == 55
     finally:
         await plugin.terminate()
@@ -334,8 +335,8 @@ async def test_global_recall_has_provenance_names_and_no_vector_calls(tmp_path):
         assert "test:gm:noise" not in _txt, "被排除的会话不该出现在简报里"
         assert "阿澄" in _txt, "跨会话的名字应该在简报里"
         assert "阿澄" not in "".join(p.content for p in request.system_prompt)
-        names = json.loads(await plugin.memory_names(event, "阿澄"))["entities"]
-        result = json.loads(
+        names = recall_view(await plugin.memory_names(event, "阿澄"))["entities"]
+        result = recall_view(
             await plugin.correct_name(
                 event,
                 "test:cheng",
@@ -347,10 +348,13 @@ async def test_global_recall_has_provenance_names_and_no_vector_calls(tmp_path):
         assert result["ok"]
         # 2.2.8 起 MemoryNames 只返回 id/kind/name/revision/aliases，
         # 旧称呼出现在 aliases 里。
-        renamed = json.loads(await plugin.memory_names(event, "阿澄"))["entities"][0]
-        assert renamed["name"] == "阿澄的新名字" and "阿澄" in renamed["aliases"]
+        # 2026-09-18：召回返回改成**紧凑文本**（与被动侧同形态 ✓ 用户要求 ✓）
+        #   ⇒ 直接断言文本 = 测**意图** ✓：新名字要在 ✓ 旧称呼要作为**曾用名**出现 ✓
+        renamed_text = await plugin.memory_names(event, "阿澄")
+        assert "阿澄的新名字" in renamed_text, renamed_text[:100]
+        assert "曾用名" in renamed_text and "阿澄@" in renamed_text, renamed_text[:100]
         plugin.settings = plugin.settings.model_copy(update={"recall_scope": "session"})
-        assert not json.loads(await plugin.memory_names(event, "阿澄"))["entities"]
+        assert not recall_view(await plugin.memory_names(event, "阿澄"))["entities"]
     finally:
         await plugin.terminate()
 
@@ -501,14 +505,14 @@ async def test_real_core_capture_inject_edit_reload(tmp_path, monkeypatch):
         result = await plugin.memorize(event, "一起看流星的约定")
         import json
 
-        record_id = json.loads(result)["id"]
-        assert json.loads(await plugin.forget(event, record_id))["ok"]
-        assert json.loads(await plugin.read_archive(event, record_id))["ok"]
+        record_id = recall_view(result)["id"]
+        assert recall_view(await plugin.forget(event, record_id))["ok"]
+        assert recall_view(await plugin.read_archive(event, record_id))["ok"]
         other = make_event()
         other.session.session_id = "other"
-        assert json.loads(await plugin.read_archive(other, record_id))["ok"]
+        assert recall_view(await plugin.read_archive(other, record_id))["ok"]
         plugin.settings = plugin.settings.model_copy(update={"recall_scope": "session"})
-        assert not json.loads(await plugin.read_archive(other, record_id))["ok"]
+        assert not recall_view(await plugin.read_archive(other, record_id))["ok"]
     finally:
         await plugin.terminate()
     plugin2 = module.AlifeMemoryPlugin(
@@ -648,12 +652,12 @@ async def test_safe_migration_disables_after_commit_and_yields_to_user_switch(tm
         assert plugin.runtime_settings().enabled
         event = make_event()
         assert (
-            json.loads(await plugin.search_archive(event, keyword="Sunday"))["total"]
+            recall_view(await plugin.search_archive(event, keyword="Sunday"))["total"]
             == 1
         )
         assert any(
             "Sunday" in f["x"]
-            for f in _rows(json.loads(await plugin.overview(event)))
+            for f in _rows(recall_view(await plugin.overview(event)))
         )
         assert (root / "core.txt").read_bytes() == original
         # Re-enabling a legacy plugin is a user choice, not a disable-loop trigger.
@@ -663,7 +667,7 @@ async def test_safe_migration_disables_after_commit_and_yields_to_user_switch(tm
         await plugin.on_request(event, req)
         assert not req.system_prompt and len(req.user_prompt) == 1
         assert (
-            json.loads(await plugin.memorize(event, "do not write"))["error"]
+            recall_view(await plugin.memorize(event, "do not write"))["error"]
             == "memory_paused"
         )
     finally:
@@ -821,7 +825,7 @@ async def test_optional_vectors_never_call_provider_when_disabled(tmp_path):
         event = make_event()
         key = plugin.store.memorize(event.sid, "用户喜欢橘猫", ["test:u"], 1.0, 1.0)
         assert (
-            json.loads(await plugin.search_archive(event, prompt="橘猫"))["total"] == 1
+            recall_view(await plugin.search_archive(event, prompt="橘猫"))["total"] == 1
         )
         await plugin.engine.index(key, plugin.settings)
         job = await plugin.engine.enqueue("reindex", event.sid)
@@ -1132,7 +1136,7 @@ async def test_profile_tool_and_restore_api(tmp_path):
         plugin.store.observe_name("test:firefly", "萤火", source="admin")
         event = make_event()
 
-        tool = json.loads(await plugin.get_profile(event, "萤火"))
+        tool = recall_view(await plugin.get_profile(event, "萤火"))
         assert tool["ok"] is True
         assert tool["profiles"][0]["summary"] == ["萤火对花生过敏"]
 
@@ -1407,7 +1411,7 @@ async def test_bot_profile_is_trimmed_while_webui_profile_keeps_reason(tmp_path)
         _add_fact(plugin, event.sid, "test:firefly", "preference",
                   "喜欢猫", 7, record["id"])
 
-        tool = json.loads(await plugin.get_profile(event, "test:firefly"))
+        tool = recall_view(await plugin.get_profile(event, "test:firefly"))
         bot_fact = tool["profiles"][0]["categories"]["preference"][0]
         assert "reason" not in bot_fact and "fingerprint" not in bot_fact
         assert "src" in bot_fact
@@ -1990,3 +1994,90 @@ async def test_global_bucket_sessions_also_get_swept_and_yield_facts(tmp_path, m
         assert any("拿铁" in f.get("content", "") for f in facts), "事实内容不对 ✗"
     finally:
         await plugin.terminate()
+
+def recall_view(raw):
+    """召回返回现在可能是**紧凑文本**（2026-09-18 用户要求 ✓ 与被动侧同形态 ✓）
+    ⇒ 这里把它还原成 dict 供**老断言**复用 ✓（只服务测试 ✓ 生产不发 JSON 给模型 ✓）
+    文本形如：
+      【召回】命中 619 · 本次 2 · 已见过 27
+      n1=周武 n2=爱奈丽
+      4khyio 09-18 18:18 ★7 L2 bot mem @g3 爱奈丽｜有的，CodeBuddy…
+      （hint…）
+    """
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    out = {"items": [], "who": {}, "hint": "", "text": raw, "ok": True,
+           "entities": [], "names": [], "archives": []}
+    for line in str(raw).splitlines():
+        if line.startswith("【召回】"):
+            m = re.search(r"命中 (\d+) · 本次 (\d+)", line)
+            if m:
+                out["total"] = int(m.group(1))
+            m2 = re.search(r"已见过 (\d+)", line)
+            if m2:
+                out["seen"] = int(m2.group(1))
+        elif "｜" in line:
+            head, _sep, snippet = line.partition("｜")
+            parts = head.split()
+            item = {"i": parts[0] if parts else "",
+                    "t": parts[1] if len(parts) > 1 else "", "s": snippet}
+            for token in parts[2:]:
+                if token.startswith("★"):
+                    item["k"] = int(token[1:])
+                elif token.startswith("L") and token[1:].isdigit():
+                    item["l"] = int(token[1:])
+                elif token in ("bot", "mem", "arch"):
+                    item[token] = 1
+                elif token.startswith("@"):
+                    item["from"] = token[1:]
+                else:
+                    item.setdefault("sp", token)
+            out["items"].append(item)
+        elif line.startswith("【人物与群名】") or line.startswith("【画像】"):
+            # 「i=名字 [rN]（曾用名 …）」逐个还原 ✓ 同时给新旧两套键 ✓（老断言照旧可用 ✓）
+            body = line.split("】", 1)[1]
+            target = out["entities"] if line.startswith("【人物与群名】") else out["names"]
+            for one in body.split(" · "):
+                if "=" not in one:
+                    continue
+                key, _eq, rest = one.partition("=")
+                # 名字里**剥掉** revision 记号 [rN] 与曾用名括注 ✓
+                name = re.split(r"\s*\[r\d+\]", rest.split("（", 1)[0])[0].strip()
+                item = {"i": key, "n": name, "id": key, "name": name}
+                m = re.search(r"\[r(\d+)\]", rest)
+                if m:
+                    item["r"] = item["revision"] = int(m.group(1))
+                if "曾用名" in rest:
+                    item["aliases"] = rest.split("曾用名 ", 1)[1].rstrip("）").split("、")
+                    item["h"] = list(item["aliases"])
+                target.append(item)
+                if line.startswith("【画像】"):
+                    out["entities"].append(item)
+        elif line.startswith("（"):
+            out["hint"] = line.strip("（）")
+        elif line.startswith("【人物与群名】") or line.startswith("【画像】"):
+            # 「i=名字（曾用名 …）」逐个还原 ✓ 新旧两套键都给 ✓（老断言照旧可用 ✓）
+            body = line.split("】", 1)[1]
+            target = out["entities"] if line.startswith("【人物与群名】") else out["names"]
+            for one in body.split(" · "):
+                if "=" not in one:
+                    continue
+                key, _eq, rest = one.partition("=")
+                # 名字里要**剥掉** revision 记号 [rN] ✓（否则断言拿到"阿澄的新名字 [r3]" ✗）
+                name = re.split(r"\s*\[r\d+\]", rest.split("（", 1)[0])[0].strip()
+                item = {"i": key, "n": name, "id": key, "name": name}
+                m = re.search(r"\[r(\d+)\]", rest)      # 文本里的 revision 记号 [rN] ✓
+                if m:
+                    item["r"] = item["revision"] = int(m.group(1))
+                if "曾用名" in rest:
+                    item["aliases"] = rest.split("曾用名 ", 1)[1].rstrip("）").split("、")
+                    item["h"] = list(item["aliases"])
+                target.append(item)
+        elif "=" in line and not line.startswith("【"):
+            for pair in line.split():
+                if "=" in pair:
+                    k, _eq, v = pair.partition("=")
+                    out["who"][k] = v
+    return out

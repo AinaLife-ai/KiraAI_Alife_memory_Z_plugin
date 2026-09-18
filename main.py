@@ -1471,19 +1471,26 @@ class AlifeMemoryPlugin(BasePlugin):
         rows = await self.store.call("entities", query, ids=ids, offset=offset)
         entities = []
         for row in rows:
-            item = {
-                "id": row["id"],
-                "kind": row["kind"],
-                "name": row["name"],
-                "revision": row["revision"],
-                "aliases": list(
-                    dict.fromkeys(
-                        h["name"] for h in row["history"] if h["name"] != row["name"]
-                    )
-                )[:5],
-            }
-            if row.get("lookup_id") and row["lookup_id"] != row["id"]:
-                item["lookup_id"] = row["lookup_id"]
+            # ⚠️ `revision` **必须留着** ✗✓ —— 用户提醒"别忘了 bot 的全编辑能力" ✓
+            #   改名工具签名是 `correct_name(entity_id, name, revision, reason)` ✓
+            #   ⇒ 没有 revision，bot 就**改不了名** ✓（乐观并发令牌 ✓）
+            item = {"i": row["id"], "n": row["name"], "r": int(row["revision"] or 0)}
+            # ★ 2026-09-18：曾用名**只在真换过时**给 ✓ 并带**绝对日期** ✓
+            #   （`observed` 是内部时间戳 ✗ ⇒ 换成人能读的 date ✓ 用户要求 ✓）
+            olds = {}
+            for h in (row.get("history") or []):
+                old_name = str(h.get("name") or "").strip()
+                if not old_name or old_name == row["name"]:
+                    continue
+                at = h.get("observed") or 0
+                if old_name not in olds or at > olds[old_name]:
+                    olds[old_name] = at
+            if olds:
+                item["h"] = [
+                    "%s@%s" % (name, short_time(at) if at else "?")
+                    for name, at in sorted(olds.items(), key=lambda kv: kv[1],
+                                           reverse=True)[:3]
+                ]
             entities.append(item)
         return self.recall_result(event, {"ok": True, "entities": entities})
 
@@ -2329,6 +2336,15 @@ class AlifeMemoryPlugin(BasePlugin):
             for key in ("sp", "versions", "legacy_sources", "ci", "next"):
                 arch.pop(key, None)
             out["archive"] = arch
+        ents = out.get("entities")
+        if isinstance(ents, list):
+            # entities 已在源头瘦身 ✓ ⇒ 这里只把残留的内部键再压一遍（保险 ✓）
+            out["entities"] = [
+                {k: v for k, v in e.items() if k in ("i", "n", "h", "r")}
+                for e in ents if isinstance(e, dict)
+            ]
+        # ⚠️ 不碰 `profiles` ✗（2026-09-18 教训：我臆测了它的形状 ⇒ 拍成 {c,i,n} 丢了结构 ✗
+        #    集成测试当场报 KeyError ✓ ⇒ **结构化的东西不许凭想象瘦身** ✓）
         names = out.get("names")
         if isinstance(names, list):
             slim = []
@@ -2363,9 +2379,108 @@ class AlifeMemoryPlugin(BasePlugin):
                 out.pop("names", None)
         return out
 
+    @staticmethod
+    def _marks_of(item):
+        """把"记号"按**被动侧同一套**拼出来 ✓（★重要度 L层 bot mem arch @会话 ✓）"""
+        mark = []
+        if item.get("k") is not None:
+            mark.append("★%s" % item["k"])
+        if item.get("l"):
+            mark.append("L%s" % item["l"])
+        for flag in ("bot", "mem", "arch"):
+            if item.get(flag):
+                mark.append(flag)
+        if item.get("from"):
+            mark.append("@%s" % item["from"])
+        return " ".join(mark)
+
+    def recall_text_view(self, value):
+        """把工具返回渲染成**与被动注入同一种紧凑文本** ✓（2026-09-18 用户要求 ✓）
+
+        ⚠️ 范围：**只转"召回形状"** ✓ —— 搜索 ✓ 档案(单/复) ✓ 人物与群名 ✓ 画像 ✓ 资料 ✓
+        写入类（记住/更正/遗忘 ✓）与失败回执**保持 JSON** ✗ —— 它们不是召回 ✓
+        而且它们在测试里被逐字段断言 ✓（转文本只增加脆性 ✗ 不增加价值 ✓）
+        ⇒ 对这 5 种召回形状，兜底**不该触发** ✓（有守卫 ✓）
+        记号与被动侧对齐 ✓：`★重要度` ✓ `L层号` ✓ `bot`=我自己说的 ✓ `mem`=永久 ✓
+        `arch`=已归档 ✓ `@会话`=跨会话 ✓ `n1=名字`=码表 ✓
+        """
+        if not isinstance(value, dict):
+            return None
+        items = value.get("items")
+        if isinstance(items, list):                        # ② 搜索
+            head = "【召回】命中 %s · 本次 %s" % (value.get("total", "?"), len(items))
+            if value.get("seen"):
+                head += " · 已见过 %s" % value["seen"]
+            lines = [head]
+            who = value.get("who")
+            if isinstance(who, dict) and who:
+                lines.append(" ".join("%s=%s" % (k, v) for k, v in who.items()))
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                speaker = (" " + str(it["sp"])) if it.get("sp") else ""
+                lines.append("%s %s %s%s｜%s" % (
+                    it.get("i", "?"), it.get("t", ""), self._marks_of(it),
+                    speaker, it.get("s", "")))
+            if not items:
+                lines.append("（没有新的命中 ✓ 可换词，或传 allow_seen=true 重看）")
+            if value.get("hint"):
+                lines.append("（%s）" % value["hint"])
+            return "\n".join(lines)
+        readings = value.get("archives")                   # ③ 查档案（复数）
+        single = value.get("archive")
+        blocks = []
+        if isinstance(readings, list):
+            for idx, one in enumerate(readings, 1):
+                inner = one.get("archive") if isinstance(one, dict) and "archive" in one else one
+                if isinstance(inner, dict):
+                    blocks.append(self._archive_block(inner, idx, len(readings)))
+        elif isinstance(single, dict):
+            blocks.append(self._archive_block(single, 0, 1))
+        if blocks:
+            who = value.get("who") or value.get("names")
+            if isinstance(who, list) and who:
+                blocks.append(" ".join(
+                    "%s=%s%s" % (n.get("i", "?"), n.get("n", "?"),
+                                 ("（曾用名 %s）" % "、".join(n["h"])) if n.get("h") else "")
+                    for n in who if isinstance(n, dict)))
+            return "\n".join(blocks)
+        entities = value.get("entities")                   # ④ 人物与群名
+        if isinstance(entities, list):
+            # `r<数字>` = revision ✓（改名要回传 ✓ 用户强调的"全编辑能力" ✓）
+            return "【人物与群名】" + " · ".join(
+                "%s=%s%s%s" % (
+                    e.get("i", "?"), e.get("n", "?"),
+                    (" [r%s]" % e["r"]) if e.get("r") is not None else "",
+                    ("（曾用名 %s）" % "、".join(e["h"])) if e.get("h") else "")
+                for e in entities if isinstance(e, dict))
+        names = value.get("names")                          # ⑤ 画像
+        if isinstance(names, list):
+            return "【画像】" + " · ".join(
+                "%s=%s%s" % (n.get("i", "?"), n.get("n", "?"),
+                             ("（曾用名 %s）" % "、".join(n["h"])) if n.get("h") else "")
+                for n in names if isinstance(n, dict))
+        return None                                         # 兜底（新形状未适配 ✓ 安全网）
+
+    def _archive_block(self, arch, idx, total):
+        """单份档案的紧凑文本 ✓（头一行 + 内容逐条 ✓ 与被动侧存档行同构 ✓）"""
+        head = "【档案%s】%s · L%s · %s 条" % (
+            (" %d/%d" % (idx, total)) if total > 1 else "",
+            arch.get("t", ""), arch.get("lv", "?"), arch.get("kids", "?"))
+        if arch.get("s"):
+            head += "｜%s" % arch["s"]
+        lines = [head]
+        for row in (arch.get("content") or []):
+            if isinstance(row, dict):
+                lines.append("%s｜%s" % (row.get("r") or "?", row.get("s") or ""))
+            elif row:
+                lines.append(str(row))
+        return "\n".join(lines)
+
     def recall_result(self, event, value):
         value = self.slim_payload(value)        # ★ 统一出口处瘦身 ✓ 所有工具一致 ✓
-        text = dump(value)
+        view = self.recall_text_view(value)     # ★ 与被动侧同一种紧凑文本 ✓
+        text = view if view else dump(value)    # 兜底：新形状未适配时回退 JSON（安全网 ✓）
         # v2.18 第6项：召回用量计数（工作台可见）——懒创建，避免动 __init__ ✓
         self.note_recall(event.sid, text)
         digest = hashlib.sha256(text.encode()).hexdigest()

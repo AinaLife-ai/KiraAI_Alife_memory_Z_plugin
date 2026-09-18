@@ -2379,3 +2379,36 @@ class RecallPipelineConsistencyCase(unittest.TestCase):
         self.assertGreater(i, 0)
         seg = self.src[i:i + 400]
         self.assertIn("model_text(", seg, "搜索侧管线被谁动了 ✗")
+
+
+class RecallTextKeepsIdsCase(unittest.TestCase):
+    """召回文本**必须保留可引用的短码** ✓（用户明确提醒 ✓）
+
+    "别忘了 bot 的全编辑能力哦（除了 L0 不可修外的）" ✓
+    ⇒ bot 要"改"，就得能从召回结果里**指到那一条** ✓
+        修正事实 / 更正名字 / 归档，全靠返回里的**短码** ✓
+    ⇒ 这条守卫钉住：召回文本的行首**必须是短码** ✓（且短码不是内部长 id ✗）
+    """
+
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+
+    def test_search_line_starts_with_short_code(self):
+        i = self.src.find('lines.append("%s %s %s%s｜%s"')
+        self.assertGreater(i, 0, "找不到搜索行渲染 ✗")
+        seg = self.src[i:i + 220]
+        self.assertIn('it.get("i"', seg, "行首必须是短码 ✗ ⇒ bot 就没法指到那一条 ✓")
+
+    def test_no_long_internal_ids_in_text_view(self):
+        i = self.src.find("def recall_text_view")
+        seg = self.src[i:i + 4200]
+        for bad in ('it.get("id"', 'row.get("id"', 'n.get("id"'):
+            self.assertNotIn(bad, seg,
+                             "召回文本里出现了内部长 id ✗（短码才可引用 ✓）：%s" % bad)
+
+    def test_marks_align_with_passive(self):
+        """记号必须与被动侧同款 ✓（★重要度 / L层 / bot / mem / arch / @会话 ✓）"""
+        i = self.src.find("def _marks_of")
+        seg = self.src[i:i + 700]
+        for mark in ('"★%s"', '"L%s"', '"bot"', '"mem"', '"arch"', '"@%s"'):
+            self.assertIn(mark, seg, "记号与被动侧不一致 ✗：%s" % mark)
