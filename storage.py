@@ -3992,6 +3992,10 @@ class Store:
                     )
                 else:
                     # 已完结（completed/failed 等）⇒ **重开** ✓ 否则这个会话永远排不上 ✗
+                    # ⚠️ 重开必须**连上一轮的 items 一起清** ✗✓（2026-09-18 用户反馈：
+                    #    「明细」里标题写着"该会话还没有永久记忆" ✗ 正文却列出两条「保留」✓）
+                    #    —— 那两条是**上一轮**的条目 ✓ 被**这一轮**的结论配着显示 ⇒ 张冠李戴 ✓
+                    db.execute("DELETE FROM job_items WHERE job_id=?", (jid,))
                     db.execute(
                         "UPDATE jobs SET state='queued', detail=?, automatic=?,"
                         " created=?, updated=? WHERE id=?",

@@ -1044,7 +1044,7 @@ class TidyUnknownTargetCase(unittest.TestCase):
             act = dict(db.execute(
                 "SELECT id, active FROM records WHERE id IN ('r1','r2')").fetchall())
         self.assertEqual(act, {"r1": 0, "r2": 1}, "应用结果不对 ✗（r1 归档 ✓ r2 保持 ✓）")
-        self.assertIn("跳过", self.eng.last_tidy_note or "",
+        self.assertIn("跳过", self.eng.last_tidy_notes.get("s:1", "") or "",
                       "跳过条数应当体现在提示里 ✓（否则用户看到条数对不上 ✓）")
 
     def test_all_bad_ids_does_not_raise(self):
@@ -1308,3 +1308,152 @@ class EnqueueReopenCase(unittest.TestCase):
         for _ in range(3):
             out = self.store.enqueue("tidy", "s:4")
             self.assertTrue(out and isinstance(out, str), "enqueue 返回了无效 id ✗：%r" % out)
+
+
+class JobDetailHygieneCase(unittest.TestCase):
+    """任务「明细」不能张冠李戴 ✓（2026-09-18 用户截图反馈的两处 ✓）
+
+    ① 重开后**上一轮的 items 没清** ✗ ⇒ 明细里"这一轮的结论"配"上一轮的条目" ✓
+    ② 整理结论存在**引擎级单变量**里 ✗ ⇒ 两个会话并发整理时**互相覆盖** ✓
+       （用户点「全部重新整理」正好同时起两个任务 ✓ 当场复现 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_reopen_clears_previous_items(self):
+        """重开任务行必须清掉上一轮的 items ✓（否则明细会混两次运行 ✓）"""
+        jid = self.store.enqueue("tidy", "s:q1")
+        self.store.add_job_items(jid, [
+            {"kind": "fact", "target": "f:1", "action": "keep", "note": "", "before": ""},
+            {"kind": "fact", "target": "f:2", "action": "keep", "note": "", "before": ""},
+        ])
+        self.assertEqual(len(self.store.job_items(jid)), 2)
+        self.store.finish(jid, "completed", "整理 2 条永久记忆")
+        self.store.enqueue("tidy", "s:q1")                 # 重开 ✓
+        self.assertEqual(
+            self.store.job_items(jid), [],
+            "重开后仍留着上一轮的条目 ✗ ⇒ 明细会把上一轮条目配这一轮结论 ✓（用户截图 ✓）",
+        )
+
+    def test_tidy_note_is_per_session(self):
+        """整理结论必须**按会话**可取 ✓（旧版是引擎级单变量 ⇒ 并发时互相覆盖 ✓）"""
+        engine = e                                          # 本文件已导入的引擎模块 ✓
+        eng = object.__new__(engine.Engine)                 # 不走 __init__ ✓ 只验这条链路 ✓
+        eng.last_tidy_notes = {}
+        eng._note_tidy("s:A", "A 的结论")
+        eng._note_tidy("s:B", "B 的结论")
+        self.assertEqual(eng.last_tidy_notes.get("s:A"), "A 的结论",
+                         "A 的结论被 B 覆盖了 ✗ ⇒ 明细会张冠李戴 ✓")
+        self.assertEqual(eng.last_tidy_notes.get("s:B"), "B 的结论")
+
+    def test_source_no_shared_tidy_note(self):
+        """静态判据：不许再有引擎级单变量 `self.last_tidy_note` 的赋值 ✗"""
+        src = (Path(__file__).resolve().parent.parent / "engine.py").read_text(encoding="utf-8")
+        self.assertNotRegex(
+            src, r"self\.last_tidy_note\s*=",
+            "又出现引擎级单变量 last_tidy_note ✗ ⇒ 并发整理会互相覆盖 ✓",
+        )
+        self.assertIn('self.last_tidy_notes.get(job["sid"])', src,
+                      "任务的结论必须按**该任务的会话**取 ✓")
+
+
+class NoOpDoesNotBurnBoostCase(unittest.TestCase):
+    """空转的压缩任务**不该消耗**"降门槛"资格 ✓（2026-09-18 用户问"为什么还有空转" ✓）
+
+    机制：扫描判的是**排任务那一刻** ✓（冷会话 ⇒ 门槛降到 1 ⇒ 有内容 ✓）；
+    任务真正跑起来要等几秒~几十秒 ✓ —— 这期间群里**再来一条消息**，
+    "闲置 >6 小时"立刻不成立 ⇒ 降门槛失效 ⇒ 不够 12 轮 ⇒ **空转** ✓
+    （实测对照：同一份冷会话数据，排完任务后加 2 条新消息 ⇒ 必空转 ✓）
+
+    ⇒ 既然没压到东西，就**不该盖章** ✗（原来一进任务就盖章 ⇒ 白占 30 分钟冷却 ✓）
+    """
+
+    SID = "qq:gm:9"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.cfg = c.Settings(probability=1.0)
+        self.now = time.time()
+
+    def tearDown(self):
+        self.temp.cleanup()
+        e._BOOST_AT.pop(self.SID, None)
+
+    def _seed_cold(self):
+        """冷会话：最老 4 天前 ✓ 最新 8 小时前 ✓（陈旧 ✓ 且 闲置 ✓）"""
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, self.SID, ["u-1"])
+            for i, off in enumerate([8 * 3600, 8 * 3600 + 3600, 2 * 86400, 4 * 86400]):
+                t = self.now - off
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("cold-%d" % i, self.SID, ("user", "assistant")[i % 2], t, t,
+                     "旧 %d" % i, "旧 %d" % i, json.dumps(["u-1"]), i + 1, self.now, "session"),
+                )
+            db.commit()
+
+    def _add_fresh(self, n=2):
+        with self.store.connect() as db:
+            for i in range(n):
+                t = time.time()
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold)"
+                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,0,0)",
+                    ("new-%d" % i, self.SID, "user", t, t, "新 %d" % i, "新 %d" % i,
+                     json.dumps(["u-1"]), 10 + i, t, "session"),
+                )
+            db.commit()
+
+    def test_noop_does_not_burn_boost(self):
+        self._seed_cold()
+        e._BOOST_AT.pop(self.SID, None)
+        plan = e.compression_plan(
+            self.store.active(self.SID), self.cfg, now=time.time(),
+            boost_allowed=e._boost_ok(self.SID, self.cfg, stamp=False),
+        )
+        self.assertIsNotNone(plan, "冷会话应当能降门槛 ✓（前置条件没造对）")
+        self.store.enqueue("compress", self.SID, "", True)
+
+        self._add_fresh()                     # ← 排完任务后群里又来消息 ⇒ 必然空转 ✓
+        async def model(*a, **k):
+            return json.dumps({"summary": "摘要", "facts": []})
+
+        eng = e.Engine(self.store, lambda: self.cfg, model, None, None)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(eng.start())
+            loop.run_until_complete(asyncio.sleep(3))
+            loop.run_until_complete(eng.stop())
+        finally:
+            loop.close()
+        with self.store.connect() as db:
+            row = db.execute("SELECT detail FROM jobs WHERE kind='compress'").fetchone()
+        detail = (row[0] if row else "") or ""
+        # 空转的**自动**任务会被静默删除 ✓（行没了也是"确实空转了" ✓）
+        self.assertTrue(
+            row is None or "没有需要压缩的内容" in detail,
+            "这次本该是空转 ✓（用来验证不盖章 ✓）实际 detail=%r" % detail,
+        )
+
+        # 群里又安静下来了（删掉那两条新消息 ✓）⇒ 应当**还能**降门槛 ✓
+        with self.store.connect() as db:
+            db.execute("DELETE FROM records WHERE id LIKE 'new-%'")
+            db.commit()
+        self.assertIsNone(e._BOOST_AT.get(self.SID),
+                          "空转却消耗了降门槛资格 ✗ ⇒ 该会话 30 分钟内再也降不了门槛 ✓")
+        again = e.compression_plan(
+            self.store.active(self.SID), self.cfg, now=time.time(),
+            boost_allowed=e._boost_ok(self.SID, self.cfg, stamp=False),
+        )
+        self.assertIsNotNone(again, "空转把资格吃掉后，群里安静了也降不了门槛 ✗")
