@@ -97,34 +97,69 @@ if (failure) {
 }
 console.log("JS-SMOKE-OK loaded");
 
-// ── 体检页行为检查（★ 2026-09-18）──────────────────────────────
-// 事故：loadHealth() 被调用 3 处但从来没定义 ⇒ 页面永远"正在加载…" ✓
-//      后来误加调用 ⇒ 报 "loadHealth is not defined" ✗
+// ── 体检页行为检查（★ 2026-09-18，用户反馈后升级）────────────────────
+// 事故 1：loadHealth() 从没定义 ⇒ 页面停在"正在加载…"
+// 事故 2（用户实测）：一次渲染**全部 300 条** ⇒ 每次点击后重建 ⇒ 浏览器卡死
+// 事故 3（用户实测）：卡片信息太少、只能删除 ⇒ 不好判断
+//   ⇒ 本检查：分页 50 ✓ 点卡片打开编辑器 ✓ ＋发对 id ✓ meta 更新 ✓
 const healthCalls = [];
+const manyRows = Array.from({ length: 300 }, (_, i) => ({
+  id: "f" + i, sid: "s1", subject: "u-zhou", content: "第" + i + "条事实的内容",
+  category: "fact", importance: 3, rotate_used: i % 5, age_days: 40 - (i % 30),
+  score: 5 + (i % 20), sunk: i % 10 === 0, never_sink: false,
+  tags: ["猫", "日常"], reason: "用户原话", scenario: "聊天",
+  sources: [{ id: "r1" }, { id: "r2" }], rewrite_pending: false, relation_warnings: [], edit_history: [],
+}));
 sandbox.fetch = async (url, opts) => {
   healthCalls.push(String(url));
   if (String(url).includes("fact_health"))
-    return { ok: true, status: 200, json: async () => ({ threshold: 12, count: 2, now: 0, rows: [
-      { id: "f1", content: "猫在窗台", importance: 3, score: 5, rotate_used: 0, age_days: 40, sunk: true, never_sink: false },
-      { id: "f2", content: "用户喜欢咖啡", importance: 9, score: 30, rotate_used: 4, age_days: 2, sunk: false, never_sink: true } ] }) };
-  return { ok: true, status: 200, json: async () => statusFixture, text: async () => "" };
+    return { ok: true, status: 200, json: async () => ({ threshold: 12, count: 300, now: 0, rows: manyRows }) };
+  return { ok: true, status: 200, json: async () => ({ id: "f0", subject: "u-zhou", sid: "s1", versions: [], fields: {} }), text: async () => "" };
 };
 {
   const results = [];
   const ok = (name, cond, extra) =>
     results.push((cond ? "HEALTH-SMOKE-OK   " : "HEALTH-SMOKE-FAIL ") + name + (extra ? " | " + extra : ""));
   ok("loadHealth 已定义", typeof sandbox.loadHealth === "function");
-  try {
-    await sandbox.loadHealth();
-    ok("调用不抛错（修复前 is not defined）", true);
-  } catch (e) {
-    ok("调用不抛错（修复前 is not defined）", false, String((e && e.message) || e));
-  }
-  ok("真的请求了 /fact_health", healthCalls.some((u) => u.includes("fact_health")), healthCalls.join(","));
-  const listHtml = String((memo["#healthList"] || {}).innerHTML || "");
-  ok("卡片写进 healthList（带 data-imp/data-del）", listHtml.includes("data-imp") && listHtml.includes("data-del"));
+  try { await sandbox.loadHealth(); ok("调用不抛错", true); }
+  catch (e) { ok("调用不抛错", false, String((e && e.message) || e)); }
+  ok("请求了 /fact_health", healthCalls.some((u) => u.includes("fact_health")));
   const metaText = String((memo["#healthMeta"] || {}).textContent || "");
-  ok("meta 不再停在『正在加载…』", metaText.length > 0 && !metaText.includes("正在加载"), metaText.slice(0, 40));
+  ok("meta 已更新（不再停在加载中）", metaText.includes("300") && !metaText.includes("正在加载"), metaText.slice(0, 46));
+  const html = String((memo["#healthList"] || {}).innerHTML || "");
+  const cards = (html.match(/<article class="card"/g) || []).length;
+  ok("★ 分页：300 条只渲染 50 张（防卡死）", cards === 50, "渲染 " + cards + " 张");
+  ok("★ 有翻页控件", html.includes("data-hpage=") && html.includes("/ 6"));
+  ok("★ 对齐正常卡片的四要素（tag/strong/p/small）",
+    html.includes('class="tag"') && html.includes("<strong>") && html.includes("<p>") && html.includes("<small>重要度"));
+  ok("卡片带 data-hidx（可点开编辑器）", html.includes("data-hidx="));
+  // ★ 用户要求：与「事实卡片」显示的东西**一样都不能少** ✓
+  const must = [
+    ['类别标签', 'class="tag"'],
+    ['显示名', "<strong>"],
+    ['内容段', "<p>"],
+    ['标签行', "<small>猫 · 日常</small>"],
+    ['事实依据', "事实依据：用户原话"],
+    ['场景', "场景：聊天"],
+    ['来源数', "2 个来源"],
+    ['明确的「编辑事实」按钮', ">编辑事实</button>"],
+    ['重要度 ±1 快捷按钮', 'data-delta="-1"'],
+    ['删除按钮', "data-del="],
+    ['本页特有：分数', "分数 "],
+    ['本页特有：被用次数', "被用 "],
+    ['本页特有：年龄', "天前"],
+  ];
+  const missing = must.filter(([, needle]) => !html.includes(needle)).map(([name]) => name);
+  ok("★ 与事实卡片逐样对齐（缺一即红）", missing.length === 0, missing.length ? "缺：" + missing.join("、") : "13 样齐");
+  // 点卡片 ⇒ 打开编辑器（openFact 会去拉 /fact/<id>）
+  const n0 = healthCalls.length;
+  const cardEl = { dataset: { hidx: "0" }, onclick: null, closest: () => null };
+  sandbox.document.querySelectorAll = (sel) => (String(sel).includes("data-hidx") ? [cardEl] : []);
+  try { sandbox.paintHealth(); cardEl.onclick && cardEl.onclick({ target: { closest: () => null } }); }
+  catch (e) { ok("点卡片不抛错", false, String(e && e.message)); }
+  await new Promise((r) => setTimeout(r, 10));
+  ok("★ 点卡片 = 打开编辑器（请求 /fact/<id>）",
+    healthCalls.slice(n0).some((u) => u.includes("/fact/")), healthCalls.slice(n0).join(","));
   for (const line of results) console.log(line);
   if (results.some((l) => l.includes("FAIL"))) process.exitCode = 1;
 }

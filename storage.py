@@ -1251,22 +1251,38 @@ class Store:
         with self.connect() as db:
             rows = db.execute(
                 "SELECT id, sid, subject, content, category, importance,"
-                " rotate_shown, rotate_used, created, event_at FROM facts"
+                " rotate_shown, rotate_used, created, event_at"
+                # ★ 2026-09-18（用户）：体检卡片要和「事实卡片」显示**一样的东西** ✓
+                #   只多出本页特有的（分数/被用/年龄/下沉标签）✓
+                #   ⇒ 这些列**存在才取** ✓ 免得列名猜错炸整个接口 ✗
+                + "".join(
+                    ", " + c
+                    for c in ("tags", "reason", "scenario", "sources", "rewrite_pending")
+                    if c in {r[1] for r in db.execute("PRAGMA table_info(facts)").fetchall()}
+                )
+                + " FROM facts"
                 " WHERE deleted=0 ORDER BY importance ASC, created ASC LIMIT ?",
                 (max(1, int(limit)),),
             ).fetchall()
+        names = [d[0] for d in db.execute("PRAGMA table_info(facts)").fetchall()]
         out = []
         for row in rows:
-            fact = {
-                "id": row[0], "sid": row[1], "subject": row[2], "content": row[3],
-                "category": row[4], "importance": row[5], "rotate_shown": row[6],
-                "rotate_used": row[7], "created": row[8], "event_at": row[9],
-            }
+            fact = {names[i]: row[i] for i in range(len(names)) if i < len(row)}
+            for key in ("tags", "sources"):
+                val = fact.get(key)
+                if isinstance(val, str):
+                    try:
+                        fact[key] = json.loads(val)
+                    except Exception:
+                        fact[key] = []
+            fact["rewrite_pending"] = int(fact.get("rewrite_pending") or 0)
             created = float(fact.get("created") or 0)
             fact["age_days"] = max(0, int((now - created) / 86400)) if created else None
             fact["score"] = retrieval.fact_sink_score(fact, now=now)
             fact["sunk"] = retrieval.should_sink(fact, threshold, now=now)
             fact["never_sink"] = int(fact.get("importance") or 5) >= retrieval.NEVER_SINK_IMPORTANCE
+            fact["edit_history"] = []  # 体检页读的是"下沉体检"，审校历史沿用事实页 ✓
+            fact["relation_warnings"] = []
             out.append(fact)
         out.sort(key=lambda f: (f["score"], f["importance"], f["created"] or 0))
         return {"threshold": int(threshold), "count": len(out),

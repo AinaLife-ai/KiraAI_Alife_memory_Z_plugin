@@ -918,11 +918,18 @@ function askPurge(kind, target, summary) {
   });
 }
 
-/* ★ 2026-09-18：补上一直**缺失**的体检页渲染 ✓
-   （HTML 有 #health / #healthList ✓ 点击处理器也早就写好 ✓
-     但渲染函数从来没实现 ✗ ⇒ 页面永远"正在加载…" ✓
-     我上次误加了 `loadHealth()` 调用 ⇒ 变成 "loadHealth is not defined" ✗）
-   后端接口：GET /fact_health ✓ → {threshold, count, now, rows:[…]} ✓ */
+/* ★ 2026-09-18：补上体检页渲染 ✓（含用户反馈的两点修复 ✓）
+   ① 卡死：原来一次渲染**全部 300 条** ✗ 每次点 ± / 删除后都要重建 300 张卡 ⇒ 浏览器未响应
+      ⇒ 改为**分页 50 条**（与「记忆存档」页一致 ✓）
+   ② 信息太少：原来只有 重要度/分数/年龄 + 删除 ✗ 用户不好判断
+      ⇒ 逐字对齐**正常事实卡片**的结构（类别 tag / 显示名 / 内容 / 元信息）
+        并**点击卡片 = 打开编辑器**（= openFact ✓ 可改内容/重要度/标签/删除 ✓）
+   后端接口：GET /fact_health ✓ → {threshold, count, now, rows:[{id,sid,subject,content,
+   category,importance,rotate_used,age_days,score,sunk,never_sink}]} ✓ */
+const HEALTH_PAGE = 50;
+let healthRows = [];
+let healthPage = 0;
+
 async function loadHealth() {
   const meta = $("#healthMeta"), box = $("#healthList");
   if (!meta || !box) return;
@@ -934,36 +941,90 @@ async function loadHealth() {
     meta.textContent = "加载失败：" + e.message;
     return;
   }
-  const rows = (d && d.rows) || [];
-  const thr = (d && d.threshold) != null ? d.threshold : 12;
-  const sunk = rows.filter((f) => f.sunk).length;
+  healthRows = (d && d.rows) || [];
+  healthPage = 0;
+  const thr = d && d.threshold != null ? d.threshold : 12;
+  const sunk = healthRows.filter((f) => f.sunk).length;
   meta.textContent =
-    "共 " + rows.length + " 条事实；阈值 " + thr + "，本轮会下沉 " + sunk + " 条。" +
-    "分数低的排在前面（最该处理的先看到）。";
-  box.innerHTML = rows.length
-    ? rows.map(healthCard).join("")
-    : '<p class="muted">暂无事实 ✓</p>';
+    "共 " + healthRows.length + " 条事实；阈值 " + thr + "，本轮会下沉 " + sunk + " 条。" +
+    "分数低的排在前面；点卡片即可编辑（内容 / 重要度 / 标签 / 删除），重要度 ±1 是上浮手段。" +
+    "每页 " + HEALTH_PAGE + " 条。";
+  paintHealth();
 }
 
-function healthCard(f) {
+function paintHealth() {
+  const box = $("#healthList");
+  if (!box) return;
+  const pages = Math.max(1, Math.ceil(healthRows.length / HEALTH_PAGE));
+  healthPage = Math.max(0, Math.min(pages - 1, healthPage));
+  const slice = healthRows.slice(healthPage * HEALTH_PAGE, (healthPage + 1) * HEALTH_PAGE);
+  box.innerHTML = slice.length
+    ? slice.map((f, i) => healthCard(f, healthPage * HEALTH_PAGE + i)).join("") +
+      '<div class="pager"><button data-hpage="prev">上一页</button>' +
+      "<small>" + (healthPage + 1) + " / " + pages + "</small>" +
+      '<button data-hpage="next">下一页</button></div>'
+    : '<p class="muted">暂无事实 ✓</p>';
+  $$("#healthList [data-hidx]").forEach((e) => {
+    e.onclick = (ev) => {
+      if (ev.target.closest("button")) return;
+      const row = healthRows[Number(e.dataset.hidx)];
+      if (row) guard(() => openFact(row));
+    };
+  });
+  $$("#healthList [data-hpage]").forEach((e) => {
+    e.onclick = () => {
+      healthPage += e.dataset.hpage === "next" ? 1 : -1;
+      paintHealth();
+    };
+  });
+}
+
+function healthCard(f, idx) {
+  // ★ 与「事实卡片」显示**完全一样的东西** ✓ 只多出本页特有的：
+  //   分数 / 被用次数 / 年龄 / 本轮下沉·永不沉 标签 / 重要度 ±1 快捷上浮 ✓
   const imp = f.importance != null ? f.importance : 5;
   const age = f.age_days != null ? f.age_days + " 天前" : "时间未知";
-  const tags =
-    (f.sunk ? '<span class="badge">本轮下沉</span>' : "") +
-    (f.never_sink ? '<span class="badge">永不沉</span>' : "");
+  const sinkTags =
+    (f.sunk ? '<span class="tag">本轮下沉</span>' : "") +
+    (f.never_sink ? '<span class="tag">永不沉</span>' : "");
+  const cat = f.category != null ? labels[f.category] || f.category : "其他";
+  const tagLine = (f.tags || []).join(" · ");
+  const notice =
+    (f.rewrite_pending
+      ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) +
+        "/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；" +
+        '也可以点维护面板的「重整理待处理事实」立刻排队。</div>'
+      : "") +
+    ((f.relation_warnings || []).length
+      ? '<div class="notice">待审校：' +
+        esc((f.relation_warnings || []).map((w) => w.reason).join("；")) +
+        "。该连线未用于关系召回。</div>"
+      : "");
+  const reason = (f.reason ? "事实依据：" + f.reason : "") +
+    (f.scenario ? " · 场景：" + f.scenario : "");
+  const hist = (f.edit_history || []).length
+    ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " +
+      date(f.edit_history[0].created) + "</p>"
+    : "";
   return (
-    '<div class="card fact">' +
-    '<div class="muted">重要度 ' + imp + " · 分数 " + f.score + " · 被用 " +
-    (f.rotate_used || 0) + " 次 · " + age + " " + tags + "</div>" +
-    '<div class="fact-content">' + esc(f.content) + "</div>" +
-    '<div class="row">' +
+    '<article class="card" data-hidx="' + idx + '" title="点击编辑这条事实">' +
+    '<div class="row"><span class="tag">' + esc(cat) + "</span><strong>" +
+    esc(displayLabel(f.subject)) + "</strong></div>" +
+    "<p>" + esc(f.content) + "</p>" +
+    (tagLine ? "<small>" + esc(tagLine) + "</small>" : "") +
+    notice +
+    (reason ? '<p class="muted">' + esc(reason) + "</p>" : "") +
+    hist +
+    "<small>重要度 " + imp + " · 分数 " + f.score + " · 被用 " + (f.rotate_used || 0) +
+    " 次 · " + age + " " + sinkTags + "</small>" +
+    "<footer><small>" + ((f.sources || []).length) + " 个来源</small>" +
     '<button data-imp="' + f.id + '" data-delta="-1">－</button>' +
     '<button data-imp="' + f.id + '" data-delta="1">＋</button>' +
     '<button data-del="' + f.id + '">删除</button>' +
-    "</div></div>"
+    '<button data-hidx="' + idx + '">编辑事实</button>' +
+    "</footer></article>"
   );
 }
-
 
 async function loadFacts() {
   const byContent = $("#factContent").checked;
