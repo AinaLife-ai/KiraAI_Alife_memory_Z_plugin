@@ -298,18 +298,6 @@ class Store:
             CREATE INDEX IF NOT EXISTS name_entity ON entity_names(entity_id,observed DESC);
             """)
 
-            # ★ 2026-09-18（批次 3）：身份绑定表 ✓
-            #   `raw` 是**主键** ⇒ 一个原始写法**最多只能绑一个**规范实体 ✓
-            #   ⇒ 有歧义（同名两个号都同现过）就**不建记录** ✓ 宁可"未绑定"也不赌 ✓
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS entity_links ("
-                " raw TEXT PRIMARY KEY, canonical TEXT NOT NULL,"
-                " source TEXT NOT NULL, evidence TEXT NOT NULL, created REAL NOT NULL)"
-            )
-            db.execute(
-                "CREATE INDEX IF NOT EXISTS entity_links_canonical"
-                " ON entity_links(canonical)"
-            )
             # ★ 2026-09-18 性能审计：压缩预检 `compress_probe` 的**覆盖索引** ✓
             #   预检只回 (非永久行数, 最早 end, 最新 end) ✓ 但没有覆盖索引时
             #   SQLite 仍要按 3000 行回表 ⇒ 实测 6.7 ms ✗（够用但不够快 ✓）
@@ -318,6 +306,29 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS record_probe ON records("
                 "sid, active, deleted, permanent, end)"
             )
+
+            # ★ 2026-09-18：清理「身份绑定」撤除后**留在老库里的废弃表** ✓
+            #   该功能已整体摘除（判据站不住 ✗ 用户决定不要 ✓）⇒ 表里只剩死数据 ✓
+            #   用户要求："不会误伤、安全即可" ✓ ⇒ **四道保险**：
+            #     ① 表不存在 ⇒ 什么都不做 ✓（新库/已清过 ⇒ 幂等 ✓）
+            #     ② **列结构必须与当年创建的一模一样**才删 ✓
+            #        （万一以后有别的表叫这名 ✗ ⇒ **跳过**并只记一行 warning ✓）
+            #     ③ 全程 try/except ⇒ **绝不影响启动** ✓
+            #     ④ 只 DROP 这一张表 ✓ 不碰任何其它表/数据 ✓
+            try:
+                cols = [r[1] for r in db.execute("PRAGMA table_info(entity_links)")]
+                if cols:
+                    if cols == ["raw", "canonical", "source", "evidence", "created"]:
+                        db.execute("DROP TABLE entity_links")
+                        logger.info(
+                            "[记忆·Z] 已清理废弃的 entity_links 表（身份绑定功能已撤除 ✓）"
+                        )
+                    else:
+                        logger.warning(
+                            "[记忆·Z] 同名表 entity_links 列结构不符（%s）⇒ 跳过不动 ✓", cols
+                        )
+            except Exception:
+                logger.debug("[记忆·Z] 清理废弃表失败（已忽略 ✓）", exc_info=True)
             _jcols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
             if "automatic" not in _jcols:
                 # 给旧库补列 ✓（默认 0 = 手动 ⇒ 老任务照旧显示 ✓ 不改变历史行为 ✓）
@@ -1226,36 +1237,6 @@ class Store:
         return ids[:20]
 
     # ── 身份绑定（2026-09-18 批次 3）────────────────────────────────
-    def link_entity(self, raw, canonical, source="manual", evidence=""):
-        """建立一条绑定 ✓（人工优先 ⇒ 覆盖自动 ✓ 可撤销 ✓）"""
-        raw = str(raw or "").strip()
-        canonical = str(canonical or "").strip()
-        if not raw or not canonical or raw == canonical:
-            return False
-        with self.connect() as db:
-            db.execute(
-                "INSERT INTO entity_links(raw, canonical, source, evidence, created)"
-                " VALUES(?,?,?,?,?) ON CONFLICT(raw) DO UPDATE SET"
-                " canonical=excluded.canonical, source=excluded.source,"
-                " evidence=excluded.evidence, created=excluded.created",
-                (raw, canonical, str(source or "manual"), str(evidence or ""), time.time()),
-            )
-        return True
-
-    def unlink_entity(self, raw):
-        """解除绑定 ✓ ⇒ 立刻回到"未绑定"（**不是**删数据 ✓ 只删这条映射 ✓）"""
-        with self.connect() as db:
-            cur = db.execute("DELETE FROM entity_links WHERE raw=?", (str(raw or "").strip(),))
-        return bool(cur.rowcount)
-
-    def entity_links(self):
-        """raw -> canonical 的**全量映射** ✓（调用方一次取好 ✓ 传给纯函数解析器 ✓）"""
-        with self.connect() as db:
-            return {
-                r[0]: r[1]
-                for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
-            }
-
     def fact_health(self, threshold=12, now=None, limit=300):
         """事实体检数据 ✓（2026-09-18 批次 4）
 
@@ -1290,124 +1271,6 @@ class Store:
         out.sort(key=lambda f: (f["score"], f["importance"], f["created"] or 0))
         return {"threshold": int(threshold), "count": len(out),
                 "now": now, "rows": out}
-
-    def infer_links(self, self_id="", limit=4000):
-        """从事实里**自动推断**「名字 → QQ」绑定 ✓（2026-09-18 批次 3 第三步）
-
-        用户拍板的判据（**宁可少绑，不可绑错** ✓）：
-          · 只看"**同一会话里，这个名字只被一个 QQ 说过**" ✓ 出现第二个说话人 ⇒ **歧义 ⇒ 不绑** ✓
-          · 跨会话再核一次：不同会话给出的 QQ 必须**一致** ✓ 不一致 ⇒ 不绑 ✓
-          · 说话人必须是**人**（`adapter:数字` ✓）且**不是助手自己** ✗
-            （这点很关键：机器人说"周武喜欢猫"不能把"周武"绑到机器人头上 ✗）
-          · **人工绑定优先** ✓ 已有的 manual 一律不动 ✓
-        返回报告：新增 / 歧义（给人指认）/ 跳过 ✓
-        """
-        from . import identity                       # 局部导入（与 observe_name 等处一致 ✓）
-        with self.connect() as db:
-            rows = db.execute(
-                "SELECT id, sid, subject, sources FROM facts"
-                " WHERE deleted=0 AND subject<>'' AND subject NOT LIKE '%:%'"
-                " LIMIT ?",
-                (max(1, int(limit)),),
-            ).fetchall()
-        facts = [
-            {"id": r[0], "sid": r[1], "subject": r[2],
-             "sources": json.loads(r[3] or "[]")}
-            for r in rows
-        ]
-        if not facts:
-            return {"added": 0, "considered": 0, "ambiguous": [], "skipped": 0}
-        self.attach_evidence(facts)                  # ← 复用既有口径（说话人 ✓）
-        per_session = {}                             # (sid, 名字) -> {说话人}
-        for fact in facts:
-            speaker = str(fact.get("src_user") or "")
-            adapter, number, session_type = (identity.split_adapter(speaker)
-                                              if speaker else ("", "", ""))
-            if not adapter or not number or not number.isdigit() or session_type:
-                continue                             # 不是"人"的 ID ⇒ 不作为证据 ✓
-            if self_id and speaker == self_id:
-                continue                             # 助手自己说的 ⇒ 不算证据 ✓
-            per_session.setdefault((fact["sid"], fact["subject"]), set()).add(speaker)
-        by_name = {}                                 # 名字 -> {候选 QQ} / 标记歧义
-        ambiguous = set()
-        for (_sid, name), speakers in per_session.items():
-            if len(speakers) > 1:
-                ambiguous.add(name)                  # 同一会话里两个说话人 ⇒ 歧义 ✓
-                continue
-            by_name.setdefault(name, set()).update(speakers)
-        existing = self.entity_links()
-        added = skipped = 0
-        for name, speakers in by_name.items():
-            if name in ambiguous or len(speakers) != 1:
-                ambiguous.add(name)                  # 跨会话不一致 ⇒ 歧义 ✓
-                continue
-            canonical = next(iter(speakers))
-            current = existing.get(name)
-            if current == canonical:
-                skipped += 1
-                continue
-            if current is not None and self.link_source(name) == "manual":
-                skipped += 1                          # 人工绑定**不许**被自动覆盖 ✓
-                continue
-            self.link_entity(name, canonical, "cooccur", "同会话唯一说话人")
-            added += 1
-        return {
-            "added": added,
-            "considered": len(by_name),
-            "ambiguous": sorted(ambiguous),
-            "skipped": skipped,
-        }
-
-    def link_source(self, raw):
-        """这条绑定的来源 ✓（manual / cooccur ✓；没有则空串 ✓）"""
-        with self.connect() as db:
-            row = db.execute(
-                "SELECT source FROM entity_links WHERE raw=?", (str(raw or "").strip(),)
-            ).fetchone()
-        return row[0] if row else ""
-
-    def identity_map(self, self_id="", legacy_adapter="qq"):
-        """**全量解析映射** raw → canonical ✓（2026-09-18 批次 3）
-
-        给"显示/分组"用 ✓：前端只要 `map[raw] || raw` 就能得到规范键 ✓
-        ⇒ 规则**只在后端一处**（`identity.canonical_key` ✓）不会前后端漂移 ✓
-
-        覆盖范围（够用即可 ✓）：
-          · 已登记的实体 id（`entities` ✓ 名字就是在这里学的 ✓）
-          · 事实里出现过的 subject ✓（没登记过的也算 ✓）
-          · 已有绑定记录的 raw ✓
-        **解析不了的键不会出现在映射里** ✓（前端拿不到就原样显示 ✓ 与"未绑定"一致 ✓）
-        """
-        from . import identity                       # 局部导入，避免任何循环风险 ✓
-        with self.connect() as db:
-            raws = {r[0] for r in db.execute("SELECT id FROM entities").fetchall()}
-            raws |= {r[0] for r in db.execute(
-                "SELECT DISTINCT subject FROM facts WHERE subject<>''"
-            ).fetchall()}
-            links = {r[0]: r[1] for r in db.execute(
-                "SELECT raw, canonical FROM entity_links"
-            ).fetchall()}
-        out = {}
-        for raw in raws:
-            if not raw or raw in links:
-                continue
-            key = identity.canonical_key(raw, self_id=self_id, legacy_adapter=legacy_adapter)
-            if key and key != raw:
-                out[raw] = key
-        out.update(links)
-        return out
-
-    def links_of_canonical(self, canonical):
-        """某个规范实体下**挂着的所有写法** ✓（图谱/画像用 ✓）"""
-        with self.connect() as db:
-            return [
-                {"raw": r[0], "source": r[1], "evidence": r[2], "created": r[3]}
-                for r in db.execute(
-                    "SELECT raw, source, evidence, created FROM entity_links"
-                    " WHERE canonical=? ORDER BY source, raw",
-                    (str(canonical or ""),),
-                ).fetchall()
-            ]
 
     def has_active_job(self, kind, sid):
         """该会话是否已有**排队中/在跑**的同类任务 ✓（2026-09-18）

@@ -39,7 +39,6 @@ from .contracts import (
 )
 from . import identity
 from .engine import Engine, compression_plan
-from .identity import subject_variants
 from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
@@ -68,6 +67,8 @@ from .retrieval import (
     sink_filter,
     media_only,
     short_day,
+    is_tool_result,
+    is_tool_step,
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -536,10 +537,6 @@ class AlifeMemoryPlugin(BasePlugin):
         if data_dir is None:
             raise RuntimeError("KiraAI did not associate plugin data directory")
         self.store = Store(Path(data_dir) / "alife-v2.sqlite3")
-        # 身份绑定映射的**短缓存** ✓（2026-09-18 批次 3 ✓ 60 秒 TTL ✓）
-        #   `identity_map()` 要扫实体表与事实主体 ✓ 不该每条消息都跑 ✓
-        self._links_cache = {}
-        self._links_at = 0.0
         await self.store.call("initialize")
         try:
             # v2.13.0 之前拼接出来的事实没有待重做标记，这里回填一次（幂等）
@@ -946,24 +943,6 @@ class AlifeMemoryPlugin(BasePlugin):
         for owner in sorted(owners):
             await self.engine.enqueue("tidy", owner, automatic=automatic, detail=detail)
         return sorted(owners)
-
-    async def identity_links(self):
-        """身份绑定映射（raw → 规范键）✓ **60 秒缓存** ✓
-
-        只用于"显示 / 归类" ✓ —— 慢一点没关系 ✓ 变旧一点也没关系 ✓
-        ⇒ 所以缓存是安全的 ✓；**失败就当作没有绑定** ✓（显示与改造前完全一致 ✓）
-        """
-        now = time.time()
-        if self._links_cache and now - self._links_at < 60:
-            return self._links_cache
-        try:
-            self._links_cache = await self.store.call("identity_map") or {}
-        except Exception:
-            logger.debug("[记忆·Z] 身份映射读取失败（按未绑定处理）", exc_info=True)
-            self._links_cache = {}
-        self._links_at = now
-        return self._links_cache
-
     async def queue_compress_all(self, limit=2):
         """排"该压但还没压"的会话 ✓（**确定性**兜底 ✓ 不看骰子 ✓）
 
@@ -1695,7 +1674,6 @@ class AlifeMemoryPlugin(BasePlugin):
 
     @on.llm_request(priority=Priority.LOW)
     async def on_request(self, event, req: LLMRequest, *_):
-        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         cfg = self.runtime_settings()
         if not cfg.enabled:
             return
@@ -1837,10 +1815,19 @@ class AlifeMemoryPlugin(BasePlugin):
                     min_score=cfg.fact_recall_min_score,
                     **prefer,
                 )
+
+                # ★ 2026-09-18（用户实测）：**「工具感知结果」不是记忆** ✗
+                #   模型抓回来的工具输出会被存成记录 ✓ 再被压缩成档案/提炼成事实 ✓
+                #   ⇒ 于是它**也会流进轮换槽** ⇒ 用户看到"轮换槽被动召回到工具步" ✗
+                #   ⇒ 轮换槽（"相关但还没召回过的**记忆**" ✓）把它排除 ✓
+                #   注意：**主召回不动** ✓（工具结果是对话史的一部分 ✓ 该能被想起来 ✓）
+                fact_pool = [x for x in fact_pool if not is_tool_result(x.get("content"))]
             # ★ 2026-09-18 批次 2：**下沉** ✓
             #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
             #   **不删不藏**：它们仍在下面的轮换候选池里（那是独立查询 ✓）
             #   一旦被轮换带进来并被**用上**（rotate_used ↑）⇒ 分数回升 ⇒ 自动回常驻 ✓
+            # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主召回也排除 ✓）
+            facts = [f for f in facts if not is_tool_result(f.get("content"))]
             facts = sink_filter(facts, cfg.fact_sink_threshold, now=time.time())
             facts = facts + await self.rotation_extras(
                 sid,
@@ -1869,10 +1856,22 @@ class AlifeMemoryPlugin(BasePlugin):
                 **prefer,
             )
             local_ids = {r["id"] for r in rows}
-            fresh = [r for r in matches["items"] if r["id"] not in local_ids]
+            fresh = [
+                r for r in matches["items"]
+                # 与既有约定一致：`category='tool'` 的工具步也要排除 ✓（v2.18.19 全链路 ✓）
+                if r["id"] not in local_ids
+                and not is_tool_result(r.get("summary"))
+                and not is_tool_step(r)
+            ]
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
-            archive_pool = [r for r in fresh[reach:] if r.get("id")]
+            # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
+            archive_pool = [
+                r for r in fresh[reach:]
+                if r.get("id")
+                and not is_tool_result(r.get("summary"))
+                and not is_tool_step(r)
+            ]
             if archive_pool:
                 related_rows = related_rows + await self.rotation_extras(
                     sid,
@@ -2082,8 +2081,7 @@ class AlifeMemoryPlugin(BasePlugin):
             codes=fact_shorts,
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
-            links=_links,
-        ),
+                    ),
         }
         if users:
             perception["participants"] = users
@@ -2895,6 +2893,10 @@ class AlifeMemoryPlugin(BasePlugin):
             who = {}
             packed = []
             for r in raw_items:
+                # ★ 2026-09-18（用户确认）：**工具结果不进召回** ✓（主动侧也排除 ✓）
+                #   （它们只是"模型抓回来的工具输出" ✗ 不是记忆 ✓）
+                if is_tool_result(r.get("summary")) or is_tool_step(r):
+                    continue
                 # 紧凑形态：i=短码(证据编码) t=时间 s=内容 u=参与者
                 # 默认值全部省略（archived/permanent/role/level/revision 之前占了两成字符）
                 item = {
@@ -3058,7 +3060,6 @@ class AlifeMemoryPlugin(BasePlugin):
             return dump({"ok": False, "error": "not_accessible_or_not_permanent"})
 
     async def overview(self, event, subject="", offset=0):
-        _links = await self.identity_links()   # ★ 身份绑定（批次 3）✓ 只影响显示/归类 ✓
         if not self.runtime_settings().enabled:
             return self.recall_result(event, {"ok": False, "error": "memory_paused"})
         if type(offset) != int or offset < 0:
@@ -3079,28 +3080,6 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
-        # ★ 身份绑定（批次 3 第四步）：同一人的**其它写法**也一起搜 ✓
-        #   例：问「周武」时，记成 `qq:7696` 的事实也要能找到 ✓
-        #   多跑的查询都在 try 里 ⇒ 扩展失败**绝不影响**主结果 ✓
-        _variants = subject_variants(subject, _links)
-        if len(_variants) > 1:
-            _seen_ids = {row["id"] for row in rows}
-            for _variant in _variants[1:]:
-                try:
-                    _more = await self.store.call(
-                        "facts", event.sid, subject=_variant, offset=0, limit=50,
-                        global_scope=self.settings.recall_scope == "global",
-                        users=user_ids(event), include_shared=True,
-                        exclude_ids=seen, hide_pending=self.settings.merge_pending_hide,
-                        importance_first=True,
-                    )
-                except Exception:
-                    logger.debug("[记忆·Z] 主体变体检索失败：%s", _variant, exc_info=True)
-                    continue
-                for _row in _more:
-                    if _row["id"] not in _seen_ids:
-                        _seen_ids.add(_row["id"])
-                        rows.append(_row)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(
@@ -3123,8 +3102,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     ),
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
-                    links=_links,
-                ),
+                                    ),
                 "next_offset": offset + len(rows),
             },
         )
@@ -3528,6 +3506,15 @@ class AlifeMemoryPlugin(BasePlugin):
         versions = await self.store.call("versions_of", "fact", fact_id)
         return {**rows[0], "versions": versions}
 
+    @register.api(method="GET", path="/fact_health", auth=True)
+    async def api_fact_health(self):
+        """事实体检：按分数从低到高列出，标明"是否该下沉"及**为什么** ✓（只读 ✓）"""
+        # ⚠️ 用 getattr 兜底：用户配置里可能**还没有**这个新字段（面板没存过 ✓）
+        #   否则这里 AttributeError ⇒ 接口 500 ⇒ 前端就报 "
+        #   Cannot read properties of undefined (reading '0')" ✗（用户实测 ✓）
+        _thr = int(getattr(self.settings, "fact_sink_threshold", 12) or 12)
+        return await self.store.call("fact_health", _thr)
+
     @register.api(method="GET", path="/facts", auth=True)
     async def api_facts(
         self,
@@ -3693,59 +3680,6 @@ class AlifeMemoryPlugin(BasePlugin):
         if result is None:
             raise HTTPException(404, "entity not found")
         return result
-
-    # ── 身份绑定（2026-09-18 批次 3）──────────────────────────────
-    #  ⚠️ tidy / audit / 合并 / 压缩的输入**一点没变** ✓
-    #     这里只新增"显示与人工指认"用的接口 ✓ 规则全在 storage.identity_map 一处 ✓
-    @register.api(method="GET", path="/fact_health", auth=True)
-    async def api_fact_health(self):
-        """事实体检：按分数从低到高列出，标明"是否该下沉"及**为什么** ✓（只读 ✓）"""
-        return await self.store.call("fact_health", self.settings.fact_sink_threshold)
-
-    @register.api(method="GET", path="/entity_links", auth=True)
-    async def api_entity_links(self):
-        """raw → canonical 的全量映射 ✓（含结构化归一：dm 会话归到人、群仍是群 ✓）"""
-        return {"links": await self.store.call("identity_map")}
-
-    @register.api(method="POST", path="/entity_link", auth=True)
-    async def api_entity_link(self, request: Request):
-        """人工指认：把某个写法绑到某个人 ✓（优先级最高 ✓ 随时可解绑 ✓）"""
-        payload = await request.json()
-        raw = str((payload or {}).get("raw") or "").strip()
-        canonical = str((payload or {}).get("canonical") or "").strip()
-        if not raw or not canonical or len(raw) > 200 or len(canonical) > 200:
-            raise HTTPException(422, "invalid link")
-        if raw == canonical:
-            raise HTTPException(422, "nothing to link")
-        ok = await self.store.call("link_entity", raw, canonical, "manual", "工作台人工指认")
-        return {"ok": bool(ok), "raw": raw, "canonical": canonical}
-
-    @register.api(method="POST", path="/entity_infer", auth=True)
-    async def api_entity_infer(self, request: Request):
-        """跑一次**自动推断**（同会话唯一说话人 ✓ 歧义一律不绑 ✓）"""
-        payload = {}
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        self_id = str((payload or {}).get("self_id") or "")
-        report = await self.store.call("infer_links", self_id)
-        logger.info(
-            "[记忆·Z] 身份推断：新增 %s 条 · 歧义 %s 个 · 跳过 %s",
-            report.get("added"), len(report.get("ambiguous") or []), report.get("skipped"),
-        )
-        return {"report": report, "links": await self.store.call("identity_map")}
-
-    @register.api(method="POST", path="/entity_unlink", auth=True)
-    async def api_entity_unlink(self, request: Request):
-        """解绑 ✓（只删映射，**不动任何事实/记录** ✓）"""
-        payload = await request.json()
-        raw = str((payload or {}).get("raw") or "").strip()
-        if not raw:
-            raise HTTPException(422, "invalid raw")
-        ok = await self.store.call("unlink_entity", raw)
-        return {"ok": bool(ok), "raw": raw}
-
     @register.api(method="GET", path="/job/{job_id}", auth=True)
     async def api_job_detail(self, job_id: str):
         """后台任务明细：这次压缩/审计具体处理了哪几条，能直接跳去编辑。"""

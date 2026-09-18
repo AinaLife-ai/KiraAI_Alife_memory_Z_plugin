@@ -20,6 +20,16 @@ _MEMORY_PAYLOAD_MARKERS = (
 TOOL_RESULT_PREFIX = "工具感知结果："
 
 
+def is_tool_result(text):
+    """这条内容是不是**模型抓回来的工具结果** ✓（2026-09-18 用户实测 ✓）
+
+    它们会被存成记录、再压成档案/提炼成事实 ⇒ 之前会**流进轮换槽** ✗
+    ⇒ 轮换槽是"相关但还没召回过的**记忆**" ✓ 工具结果不是记忆 ✗ ⇒ 排除 ✓
+    （**主召回不动** ✓ —— 工具结果是对话史的一部分 ✓ 该能被想起来 ✓）
+    """
+    return str(text or "").lstrip().startswith(TOOL_RESULT_PREFIX)
+
+
 def looks_like_memory_payload(text):
     head = (text or "")[:4000]
     if head.startswith(TOOL_RESULT_PREFIX):
