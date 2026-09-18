@@ -1481,8 +1481,13 @@ class CompressProbeSoundnessCase(unittest.TestCase):
         self.temp.cleanup()
 
     def _build(self, sid, now):
-        """随机造一个会话：条数/时间跨度/永久记忆比例都随机 ✓"""
+        """随机造一个会话：条数/时间跨度/永久记忆比例/**层级**都随机 ✓
+
+        ⚠️ 2026-09-18：第一版**只造 level=0** ✗ ⇒ 漏掉了"上层摘要分支门槛只有 4" ✓
+        ⇒ 预检误杀 5 条上层摘要的会话却全绿 ✓ 现在必须覆盖 level>0 ✓
+        """
         n = self.rnd.choice([0, 1, 2, 3, 5, 12, 13, 25])
+        level = self.rnd.choice([0, 1, 2])          # ★ 关键补强 ✓
         newest_off = self.rnd.choice([30, 3600, 6 * 3600 + 60, 86400, 5 * 86400])
         span = self.rnd.choice([0, 3600, 86400, 5 * 86400])
         with self.store.connect() as db:
@@ -1493,8 +1498,8 @@ class CompressProbeSoundnessCase(unittest.TestCase):
                 db.execute(
                     "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
                     "position,created,visibility,active,deleted,permanent,cold)"
-                    " VALUES(?,?,?,0,?,?,?,?,?,?,?,?,1,0,?,0)",
-                    ("%s-%d" % (sid, i), sid, ("user", "assistant")[i % 2], t, t,
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,0)",
+                    ("%s-%d" % (sid, i), sid, ("user", "assistant")[i % 2], level, t, t,
                      "摘要", "内容", json.dumps(["u-1"]), i + 1, now, "session",
                      1 if self.rnd.random() < 0.3 else 0),
                 )
@@ -1508,17 +1513,26 @@ class CompressProbeSoundnessCase(unittest.TestCase):
             sid = "s:%d" % case
             self._build(sid, now)
             boost = self.rnd.choice([True, False])
+            _thr = self.rnd.choice([10, 50, 200])
+            cfg = c.Settings(
+                compress_batch_mode=self.rnd.choice(["rounds", "records"]),
+                compress_rounds=self.rnd.choice([1, 12, 30]),
+                threshold=_thr,
+                batch_size=min(40, _thr - 1),     # 契约：batch_size 必须小于 threshold ✓
+            )
             rows = self.store.active(sid)
-            plan = e.compression_plan(rows, self.cfg, now=now, boost_allowed=boost)
+            plan = e.compression_plan(rows, cfg, now=now, boost_allowed=boost)
             probe = self.store.compress_probe(sid)
-            worth = e.worth_checking_probe(probe, self.cfg, now=now, boost_allowed=boost)
+            worth = e.worth_checking_probe(probe, cfg, now=now, boost_allowed=boost)
             if worth:
                 accepted_by_probe += 1
             if not worth:
                 self.assertIsNone(
                     plan,
-                    "预检误杀 ✗：probe=%s 但 plan 非空（case %d, boost=%s, 行数=%d）"
-                    % (probe, case, boost, len(rows)),
+                    "预检误杀 ✗：probe=%s 但 plan 非空（case %d, boost=%s, 行数=%d,"
+                    " mode=%s rounds=%s threshold=%s）"
+                    % (probe, case, boost, len(rows), cfg.compress_batch_mode,
+                       cfg.compress_rounds, cfg.threshold),
                 )
                 rejected += 1
         # 上面每条 assert 已经证明"被否掉的 case 计划都是空的" ✓（102 例命中过 ✓）
@@ -1541,7 +1555,7 @@ class CompressProbeSoundnessCase(unittest.TestCase):
                      i + 1, now, "session", perm),
                 )
             db.commit()
-        count, oldest, newest = self.store.compress_probe(sid)
+        count, upper, oldest, newest = self.store.compress_probe(sid)
         self.assertEqual(count, 1, "行数必须只数**非永久** ✓（候选集口径 ✓）")
         self.assertAlmostEqual(oldest, now - 10 * 86400, delta=2,
                                msg="时间必须用**全部可用行** ✓ —— 只取非永久会把"

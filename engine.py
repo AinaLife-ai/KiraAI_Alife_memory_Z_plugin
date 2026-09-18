@@ -565,22 +565,32 @@ def _fit_rows(rows, cap_chars):
 
 
 def worth_checking_probe(result, cfg, now=None, boost_allowed=False):
-    """`compression_plan` 的**必要条件**预检 ✓（用于不加载整表就跳过不可能的会话 ✓）
+    """`compression_plan` 的**必要条件**预检 ✓（不加载整表就跳过不可能的会话 ✓）
 
-    输入 = `store.compress_probe(sid)` 的 (非永久行数, 最早 end, 最新 end) ✓
-    口径与 `compression_plan` **逐条对齐** ✓（见那里的 _times/_stale/_idle/_cands ✓）
+    输入 = `store.compress_probe(sid)` 的
+           (非永久行数, 上层摘要行数, 最早 end, 最新 end) ✓
 
-    **只放行不否决** ✓：这里说 False 必须等价于"计划必然是空" ✓
-    （有测试用随机用例对拍 ✓ 修坏立刻报红 ✓）
+    ⚠️ 2026-09-18 审计修正 ✗✓：第一版只认"`compress_rounds`（12）行" ✗ ——
+    而计划其实有**三条不同门槛**（见 `compression_plan` ✓）：
+      · 原始层（level=0）按轮：需要 `compress_rounds` 个完整轮 ✓（行的必要下界 = 轮数 ✓）
+      · 原始层按条（`compress_batch_mode='records'`）：`len >= threshold`（默认 50 ✓）
+      · **上层摘要（level>0）：`threshold=4`** ✗ ← 第一版漏了这条 ⇒
+        会把"只有 5 条上层摘要、又不够冷"的会话**误杀** ✓（实测对拍 0 → 有漏 ✓）
+    ⇒ 现在取**各分支门槛里最松的那个**做 OR ✓：
+      任何一条分支可能触发 ⇒ 就放行 ✓（宁可多放行让真判定去否 ✓ 绝不误杀 ✓）
     """
-    count, oldest, newest = result
+    total, upper, oldest, newest = result
     cfg_now = now or time.time()
     rounds = int(getattr(cfg, "compress_rounds", 12) or 12)
-    if count >= rounds:
-        return True                                  # 正常路径的必要条件 ✓
-    if not count:
-        return False
-    if not boost_allowed:
+    threshold = int(getattr(cfg, "threshold", 50) or 50)
+    mode = str(getattr(cfg, "compress_batch_mode", "rounds") or "rounds")
+    if upper >= 4:                                   # 上层摘要分支（threshold=4 ✓）
+        return True
+    if mode == "records" and total >= threshold:     # 原始层按条 ✓
+        return True
+    if total >= min(rounds, threshold):              # 原始层按轮（轮的行的下界 = 轮数 ✓）
+        return True
+    if not total or not boost_allowed:
         return False
     days = int(getattr(cfg, "compress_stale_after_days", 3) or 0)
     hours = int(getattr(cfg, "compress_idle_after_hours", 6) or 0)

@@ -1286,7 +1286,7 @@ class Store:
         为什么需要它：`active(sid)` 要把**整表可用行**搬进 Python 并转成 dict ✓
         实测 3000 条记录的群 ≈ **65 ms** ✓（SQL 32 + 转 dict 32 ✓）；
         而"这条消息到底要不要排压缩任务"只需要**三个数** ✓
-        ⇒ 这条查询只回 (非永久行数, 最早 end, 最新 end) ✓ 走 (sid,active,deleted) 索引 ✓
+        ⇒ 这条查询只回 (非永久行数, 上层摘要行数, 最早 end, 最新 end) ✓ 走覆盖索引 ✓
           ⇒ 毫秒级 ✓（它只**放行**、不否决 ✓：宁可多放行让真判定去否 ✓ 绝不误杀 ✓）
 
         ⚠️ 口径必须与 `compression_plan` **完全一致** ✗✓：
@@ -1297,11 +1297,13 @@ class Store:
         with self.connect() as db:
             row = db.execute(
                 "SELECT SUM(CASE WHEN permanent=0 THEN 1 ELSE 0 END),"
+                " SUM(CASE WHEN permanent=0 AND level>0 THEN 1 ELSE 0 END),"
                 " MIN(end), MAX(end) FROM records"
                 " WHERE sid=? AND active=1 AND deleted=0",
                 (sid,),
             ).fetchone()
-        return (int(row[0] or 0), row[1], row[2])
+        #   返回 (非永久行数, 其中上层摘要行数, 最早 end, 最新 end) ✓
+        return (int(row[0] or 0), int(row[1] or 0), row[2], row[3])
 
     def active(self, sid):
         """该会话全部可用（未删 / 未归档）记录 ✓
