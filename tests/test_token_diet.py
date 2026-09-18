@@ -2013,3 +2013,60 @@ class TidyAuditUntouchedCase(unittest.TestCase):
             ("与用户冲突以用户为准", "提取的冲突规则 ✓"),
         ):
             self.assertIn(needle, src, "tidy/audit 的关键约定消失了 ✗：%s" % why)
+
+
+class IdentityMapCase(unittest.TestCase):
+    """`identity_map()`：给显示/分组用的**全量解析映射** ✓（2026-09-18 批次 3 第二步）
+
+    规则**只在后端一处**（`identity.canonical_key`）✓ 前端只查表 ⇒ 不会前后端漂移 ✓
+    拿不到映射的键 ⇒ 前端原样显示 ✓（= 未绑定 ✓ 与改造前完全一致 ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, "s:1", ["周武", "qq:dm:769690776", "qq:gm:427674145"])
+            self.store._add_fact(db, "s:1", {
+                "category": "profile", "subject": "周武", "content": "爱喝美式",
+                "reason": "测试", "scenario": "", "relations": [], "tags": [],
+                "source_ids": [], "importance": 6,
+            })
+            db.commit()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_structured_and_manual_resolution(self):
+        self.store.link_entity("周武", "qq:769690776", "cooccur", "群 A 同现")
+        m = self.store.identity_map()
+        self.assertEqual(m.get("周武"), "qq:769690776", "绑定表优先 ✓")
+        self.assertEqual(m.get("qq:dm:769690776"), "qq:769690776",
+                         "私聊会话要归到**归属人** ✓")
+        self.assertNotIn("qq:gm:427674145", m, "群**不许**归到同号的人 ✓（保持原样 ✓）")
+
+    def test_unbound_keys_absent_from_map(self):
+        m = self.store.identity_map()
+        self.assertNotIn("qq:gm:427674145", m)
+        self.assertNotIn("周武", m, "没绑定 ⇒ 不出现在映射里 ⇒ 前端原样显示 ✓")
+
+    def test_link_never_touches_data(self):
+        """用户强调：**不能让 tidy / audit 失效** ⇒ 绑定只增删**映射** ✓ 不动数据 ✓"""
+        def counts():
+            with self.store.connect() as db:
+                return (
+                    db.execute("SELECT count(*) FROM facts").fetchone()[0],
+                    db.execute("SELECT count(*) FROM records").fetchone()[0],
+                    db.execute("SELECT count(*) FROM entity_links").fetchone()[0],
+                )
+        before = counts()
+        self.store.link_entity("周武", "qq:769690776", "manual", "人工")
+        self.store.link_entity("武哥", "qq:769690776", "manual", "人工")
+        mid = counts()
+        self.assertEqual(mid[:2], before[:2], "绑定**不许**改动 facts / records ✓")
+        self.assertEqual(mid[2], before[2] + 2)
+        self.store.unlink_entity("周武")
+        self.store.unlink_entity("武哥")
+        after = counts()
+        self.assertEqual(after, before, "解绑后应完全回到原样 ✓")

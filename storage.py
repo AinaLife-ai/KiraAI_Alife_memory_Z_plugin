@@ -1256,6 +1256,37 @@ class Store:
                 for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
             }
 
+    def identity_map(self, self_id="", legacy_adapter="qq"):
+        """**全量解析映射** raw → canonical ✓（2026-09-18 批次 3）
+
+        给"显示/分组"用 ✓：前端只要 `map[raw] || raw` 就能得到规范键 ✓
+        ⇒ 规则**只在后端一处**（`identity.canonical_key` ✓）不会前后端漂移 ✓
+
+        覆盖范围（够用即可 ✓）：
+          · 已登记的实体 id（`entities` ✓ 名字就是在这里学的 ✓）
+          · 事实里出现过的 subject ✓（没登记过的也算 ✓）
+          · 已有绑定记录的 raw ✓
+        **解析不了的键不会出现在映射里** ✓（前端拿不到就原样显示 ✓ 与"未绑定"一致 ✓）
+        """
+        from . import identity                       # 局部导入，避免任何循环风险 ✓
+        with self.connect() as db:
+            raws = {r[0] for r in db.execute("SELECT id FROM entities").fetchall()}
+            raws |= {r[0] for r in db.execute(
+                "SELECT DISTINCT subject FROM facts WHERE subject<>''"
+            ).fetchall()}
+            links = {r[0]: r[1] for r in db.execute(
+                "SELECT raw, canonical FROM entity_links"
+            ).fetchall()}
+        out = {}
+        for raw in raws:
+            if not raw or raw in links:
+                continue
+            key = identity.canonical_key(raw, self_id=self_id, legacy_adapter=legacy_adapter)
+            if key and key != raw:
+                out[raw] = key
+        out.update(links)
+        return out
+
     def links_of_canonical(self, canonical):
         """某个规范实体下**挂着的所有写法** ✓（图谱/画像用 ✓）"""
         with self.connect() as db:

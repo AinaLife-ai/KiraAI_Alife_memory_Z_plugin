@@ -3356,6 +3356,37 @@ class AlifeMemoryPlugin(BasePlugin):
             raise HTTPException(404, "entity not found")
         return result
 
+    # ── 身份绑定（2026-09-18 批次 3）──────────────────────────────
+    #  ⚠️ tidy / audit / 合并 / 压缩的输入**一点没变** ✓
+    #     这里只新增"显示与人工指认"用的接口 ✓ 规则全在 storage.identity_map 一处 ✓
+    @register.api(method="GET", path="/entity_links", auth=True)
+    async def api_entity_links(self):
+        """raw → canonical 的全量映射 ✓（含结构化归一：dm 会话归到人、群仍是群 ✓）"""
+        return {"links": await self.store.call("identity_map")}
+
+    @register.api(method="POST", path="/entity_link", auth=True)
+    async def api_entity_link(self, request: Request):
+        """人工指认：把某个写法绑到某个人 ✓（优先级最高 ✓ 随时可解绑 ✓）"""
+        payload = await request.json()
+        raw = str((payload or {}).get("raw") or "").strip()
+        canonical = str((payload or {}).get("canonical") or "").strip()
+        if not raw or not canonical or len(raw) > 200 or len(canonical) > 200:
+            raise HTTPException(422, "invalid link")
+        if raw == canonical:
+            raise HTTPException(422, "nothing to link")
+        ok = await self.store.call("link_entity", raw, canonical, "manual", "工作台人工指认")
+        return {"ok": bool(ok), "raw": raw, "canonical": canonical}
+
+    @register.api(method="POST", path="/entity_unlink", auth=True)
+    async def api_entity_unlink(self, request: Request):
+        """解绑 ✓（只删映射，**不动任何事实/记录** ✓）"""
+        payload = await request.json()
+        raw = str((payload or {}).get("raw") or "").strip()
+        if not raw:
+            raise HTTPException(422, "invalid raw")
+        ok = await self.store.call("unlink_entity", raw)
+        return {"ok": bool(ok), "raw": raw}
+
     @register.api(method="GET", path="/job/{job_id}", auth=True)
     async def api_job_detail(self, job_id: str):
         """后台任务明细：这次压缩/审计具体处理了哪几条，能直接跳去编辑。"""

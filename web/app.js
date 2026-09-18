@@ -1983,6 +1983,23 @@ const displayNames = {};
 // 2026-09-18：关系/主体里常见**原始 ID**（qq:769690776）✗ 而名字表早就有 ✓
 //   ⇒ 统一解析成名字显示 ✓ 原始 ID 放进 title 备查 ✓
 //   ⚠️ 必须在**模块作用域**定义 ✓（早前版本误放在某个函数里 ⇒ 别处调用会 ReferenceError ✓）
+// 身份绑定（2026-09-18 批次 3）：raw → 规范键 ✓ 由后端一处算好 ✓
+//   前端只做**查表** ✓ 规则不重复实现 ⇒ 不会前后端漂移 ✓
+let entityLinks = {};
+async function ensureLinks() {
+  if (Object.keys(entityLinks).length) return;
+  try {
+    const data = await api("/entity_links");
+    entityLinks = (data && data.links) || {};
+  } catch (e) {
+    /* 静默 ✓ 拿不到就当作"都没绑定" ⇒ 显示与原来完全一致 ✓ */
+  }
+}
+const canonicalOf = (value) => entityLinks[String(value == null ? "" : value)] ||
+  String(value == null ? "" : value);
+// 显示名：先归一到规范键，再查名字表 ✓（拿不到就原样 ✓）
+const labelOf = (value) => nameOf(canonicalOf(value));
+
 const nameOf = (value) => displayNames[String(value == null ? "" : value)] ||
   String(value == null ? "" : value);
 
@@ -2462,6 +2479,7 @@ let profileData = null;
 
 async function openProfile(entityId) {
   await ensureNames();                       // ★ 先把名字表补上 ✓ 关系行才显示人名 ✓
+  await ensureLinks();                       // ★ 身份绑定表 ✓ 合并后的写法才显示成同一个人 ✓
   const p = await api("/profile?entity_id=" + encodeURIComponent(entityId));
   profileData = p;
   const stats = p.stats || {};
@@ -2492,7 +2510,7 @@ async function openProfile(entityId) {
   const relations = (p.relations || [])
     .map(
       (r) =>
-        `<div class="task" title="${esc(r.subject)} → ${esc(r.object)}"><strong>${esc(nameOf(r.subject))} —${esc(r.predicate)}→ ${esc(nameOf(r.object))}</strong></div>`,
+        `<div class="task" title="${esc(r.subject)} → ${esc(r.object)}"><strong>${esc(labelOf(r.subject))} —${esc(r.predicate)}→ ${esc(labelOf(r.object))}</strong></div>`,
     )
     .join("");
   const names = (p.entity.history || [])
