@@ -2321,8 +2321,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 n = out.pop("already_seen", None)
             else:
                 out.pop("already_seen", None)
-            if n:
-                out["seen"] = n                      # 合一 ✓ 省一个字段 ✓
+            # ⚠️ `seen: 0` 是**有意义**的值（"什么都没有被排除" ✓）⇒ 不能当空值滤掉 ✗
+            out["seen"] = int(n or 0)                # 合一 ✓ 省一个字段 ✓
         arch = out.get("archive")
         if isinstance(arch, dict):
             arch = dict(arch)

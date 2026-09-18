@@ -228,10 +228,10 @@ async def test_followup_facts_excluded_before_limit(tmp_path):
                 return sum(len(rows) for rows in facts.values())
             return len(facts)
 
-        assert _total(first) == 50 and first["already_seen"] == 0
-        assert _total(second) == 5 and second["already_seen"] == 50
+        assert _total(first) == 50 and first["seen"] == 0
+        assert _total(second) == 5 and second["seen"] == 50
         third = json.loads(await plugin.overview(event))
-        assert _total(third) == 0 and third["already_seen"] == 55
+        assert _total(third) == 0 and third["seen"] == 55
     finally:
         await plugin.terminate()
 
