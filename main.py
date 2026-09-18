@@ -39,6 +39,7 @@ from .contracts import (
 )
 from . import identity
 from .engine import Engine, compression_plan
+from .identity import subject_variants
 from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
@@ -2788,6 +2789,28 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
+        # ★ 身份绑定（批次 3 第四步）：同一人的**其它写法**也一起搜 ✓
+        #   例：问「周武」时，记成 `qq:7696` 的事实也要能找到 ✓
+        #   多跑的查询都在 try 里 ⇒ 扩展失败**绝不影响**主结果 ✓
+        _variants = subject_variants(subject, _links)
+        if len(_variants) > 1:
+            _seen_ids = {row["id"] for row in rows}
+            for _variant in _variants[1:]:
+                try:
+                    _more = await self.store.call(
+                        "facts", event.sid, subject=_variant, offset=0, limit=50,
+                        global_scope=self.settings.recall_scope == "global",
+                        users=user_ids(event), include_shared=True,
+                        exclude_ids=seen, hide_pending=self.settings.merge_pending_hide,
+                        importance_first=True,
+                    )
+                except Exception:
+                    logger.debug("[记忆·Z] 主体变体检索失败：%s", _variant, exc_info=True)
+                    continue
+                for _row in _more:
+                    if _row["id"] not in _seen_ids:
+                        _seen_ids.add(_row["id"])
+                        rows.append(_row)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(

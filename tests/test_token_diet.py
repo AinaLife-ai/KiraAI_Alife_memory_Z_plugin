@@ -2002,6 +2002,11 @@ class TidyAuditUntouchedCase(unittest.TestCase):
                              "tidy/audit 的专项测试并更新本守卫 ✓" % name)
             self.assertNotIn("normalize_structured", src,
                              "%s 里出现了 normalize_structured ✗ ⇒ 同上 ✓" % name)
+            self.assertNotIn("subject_variants", src.replace(
+                'from .identity import subject_variants',
+                '').replace('subject_variants,', '').replace(
+                'subject_variants(subject, _links)', ''),
+                             "%s 里出现了 subject_variants ✗ ⇒ 接线必须连测试一起 ✓" % name)
 
     def test_tidy_and_audit_prompts_still_intact(self):
         """顺手钉住：tidy / audit 的关键约定**不许被改掉** ✓"""
@@ -2178,3 +2183,33 @@ class IdentityGroupingCase(unittest.TestCase):
         text = json.dumps(packed, ensure_ascii=False)
         self.assertIn("爱喝美式", text)
         self.assertIn("养了只猫", text)
+
+
+class SubjectVariantsCase(unittest.TestCase):
+    """检索侧主体扩展 ✓（2026-09-18 批次 3 第四步）
+
+    动机：检索工具是按 `subject=` **精确查**的 ✓ ⇒ 问「周武」找不到记成 `qq:7696` 的事实 ✗
+    ⇒ 先归一，再把**所有写法**一起搜 ✓（两个方向都成立 ✓）
+    ⚠️ 没绑定 / 空提问 ⇒ **只有它自己** ⇒ 行为与改造前完全一致 ✓
+    """
+
+    def test_expands_both_directions(self):
+        links = {"周武": "qq:7696"}
+        self.assertEqual(sorted(i.subject_variants("周武", links)), ["qq:7696", "周武"])
+        self.assertEqual(sorted(i.subject_variants("qq:7696", links)), ["qq:7696", "周武"],
+                         "反过来问也要能找到名字写法的那些 ✓")
+
+    def test_unbound_keeps_original_behavior(self):
+        self.assertEqual(i.subject_variants("周武", {}), ["周武"])
+        self.assertEqual(i.subject_variants("周武", None), ["周武"])
+        self.assertEqual(i.subject_variants("", {"周武": "qq:7696"}), [],
+                         "空提问 ⇒ 不扩展（也不该乱查 ✓）")
+
+    def test_limit_guards_runaway(self):
+        links = {"n%d" % n: "qq:1" for n in range(50)}
+        self.assertLessEqual(len(i.subject_variants("n0", links, limit=6)), 6)
+
+    def test_unrelated_names_not_pulled_in(self):
+        links = {"周武": "qq:7696", "爱奈丽": "qq:1437"}
+        self.assertEqual(i.subject_variants("周武", links), ["周武", "qq:7696"],
+                         "不许把别人也拉进来 ✗")

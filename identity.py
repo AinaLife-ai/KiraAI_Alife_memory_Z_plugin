@@ -257,3 +257,27 @@ def canonical_key(key, links=None, self_id="", legacy_adapter="qq"):
     if raw.lower() in SELF_ALIASES:
         return self_id or "self"               # 没有别的归属 ⇒ 归自身 ✓（可撤销 ✓）
     return raw
+
+
+def subject_variants(subject, links=None, limit=6):
+    """把一个提问里的**主体**展开成它的**所有写法** ✓（2026-09-18 批次 3 第四步）
+
+    例：绑定表里有 {"周武": "qq:7696"} ✓
+      · 问「周武」⇒ ["周武", "qq:7696"] ✓（问名字也能找到记成 QQ 的事实 ✓）
+      · 问「qq:7696」⇒ ["qq:7696", "周武"] ✓（反过来也行 ✓）
+    **不传 / 没绑定 / 空提问** ⇒ 原样返回（只含它自己 ✓）⇒ 行为与改造前一致 ✓
+    `limit` 是为了防"某个规范键下挂了几百个写法"时打出太多查询 ✓
+    """
+    key = str(subject or "").strip()
+    if not key:
+        return []
+    canonical = (links or {}).get(key, key)
+    variants = [key]
+    for raw, canon in (links or {}).items():
+        if canon == canonical and raw not in variants:
+            variants.append(raw)
+        if len(variants) >= max(1, int(limit)):
+            break
+    if canonical not in variants:
+        variants.append(canonical)
+    return variants[: max(1, int(limit))]
