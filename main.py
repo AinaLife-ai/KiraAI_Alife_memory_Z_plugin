@@ -2300,7 +2300,50 @@ class AlifeMemoryPlugin(BasePlugin):
         row["calls"] += 1
         row["chars"] += len(text)
 
+    def slim_payload(self, value):
+        """把**发给模型**的载荷里内部物去掉 ✓（2026-09-18 用户实测：工具返回泄漏内部字段 ✗）
+
+        定点清理，**不做递归通杀** ✗ —— 别的工具真的需要 `id` 才能做纠正/评分 ✓
+        · 同值冗余计数合一（excluded_count / already_seen ⇒ seen ✓ 用户批的第 ④ 项 ✓）
+        · 存档对象的空值/内部标记（sp / versions / legacy_sources / ci / next ✗）
+        · 画像实体压成 `{"i": id, "n": 名字}` ✓
+          （丢 revision / updated / label / identity_note / lookup_id / history ✓
+           其中 label 是常量 ✗ identity_note 是**同一句重复 N 遍** ✗ lookup_id 是 id 的复制 ✗
+           history 里带 `observed` 时间戳 ✗ —— 就是用户说的"ob 一串数字" ✓）
+        ⚠️ 存储层**一个字都不动** ✓（名字编辑页/历史记录照旧有这些字段 ✓）
+        """
+        if not isinstance(value, dict):
+            return value
+        out = dict(value)
+        if "excluded_count" in out or "already_seen" in out:
+            n = out.pop("excluded_count", None)
+            if n is None:
+                n = out.pop("already_seen", None)
+            else:
+                out.pop("already_seen", None)
+            if n:
+                out["seen"] = n                      # 合一 ✓ 省一个字段 ✓
+        arch = out.get("archive")
+        if isinstance(arch, dict):
+            arch = dict(arch)
+            for key in ("sp", "versions", "legacy_sources", "ci", "next"):
+                arch.pop(key, None)
+            out["archive"] = arch
+        names = out.get("names")
+        if isinstance(names, list):
+            slim = [
+                {"i": n.get("id"), "n": n.get("name")}
+                for n in names
+                if isinstance(n, dict) and n.get("name")
+            ]
+            if slim:
+                out["names"] = slim
+            else:
+                out.pop("names", None)
+        return out
+
     def recall_result(self, event, value):
+        value = self.slim_payload(value)        # ★ 统一出口处瘦身 ✓ 所有工具一致 ✓
         text = dump(value)
         # v2.18 第6项：召回用量计数（工作台可见）——懒创建，避免动 __init__ ✓
         self.note_recall(event.sid, text)

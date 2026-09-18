@@ -92,10 +92,11 @@ async def test_search_returns_only_new_memories(tmp_path):
             ],
         )
     first = json.loads(await plugin.search_archive(event, keyword="喵梓"))
-    assert len(first["items"]) == 3 and first["already_seen"] == 0
+    # 2026-09-18：excluded_count / already_seen 同值冗余 ⇒ 合并成 seen ✓（用户批的第 ④ 项）
+    assert len(first["items"]) == 3 and first.get("seen", 0) == 0
 
     second = json.loads(await plugin.search_archive(event, keyword="喵梓"))
-    assert second["items"] == [] and second["already_seen"] == 3
+    assert second["items"] == [] and second.get("seen", 0) == 3
     # 2026-09-18：这里原来断言 hint 里含 **ReadMemoryArchive** ✗ —— 那是**幽灵工具名** ✗
     # （该工具从未注册 ✓ 真实名字是 SearchMemoryArchive ✓；test_tidy_29 里它本来就被列在"已删除"里 ✓）
     # ⇒ 当年改名时漏改了这句 hint ✓ 现已修正 ⇒ 断言跟着改成真实工具名 ✓
