@@ -69,11 +69,17 @@ def test_spaced_text_is_not_over_normalized():
 
 def test_trim_nested_clips_but_keeps_conversation():
     long_desc = "这是一段很长的图片描述" * 20
+    # 2026-09-18（用户）：媒体描述预算 100 → **30** ✓；Reply 去掉 msgid 且压平嵌套 ✓
     out = r.trim_nested(f"[Sticker {long_desc}]")
     assert out.startswith("[Sticker 这是一段很长的图片描述")
-    assert out.endswith("…]") and len(out) < 130
+    assert out.endswith("…]") and len(out) < 60
     out = r.trim_nested("[Reply ID: 42 content: " + "被引用的原文很长" * 20 + "]")
-    assert out.startswith("[Reply 42: ") and out.endswith("…]") and len(out) < 60
+    assert out.startswith("[Reply: ") and out.endswith("]") and len(out) < 60
+    assert "42" not in out, "无意义的 msgid 不许出现 ✗（模型没有按它查的能力 ✓）"
+    assert "需要保留 msgid" not in out
+    # 引用里是**媒体** ⇒ 按更小预算裁（30 ✓）
+    out = r.trim_nested("[Reply ID: 7 content: [Image " + "猫在窗台上" * 30 + "]]")
+    assert out.startswith("[Reply: ") and len(out) < 60, out
     # 正常短文本不受影响
     assert r.trim_nested("普通摘要，没有嵌套") == "普通摘要，没有嵌套"
 

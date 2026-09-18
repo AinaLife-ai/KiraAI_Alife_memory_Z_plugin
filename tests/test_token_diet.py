@@ -2021,3 +2021,32 @@ class ToolResultNotRotatedCase(unittest.TestCase):
                       "**主动检索**没排除工具结果 ✗")
         # 既有约定（v2.18.19：`category='tool'` 的工具步也要全链路过滤 ✓）在档案路径上也要在 ✓
         self.assertIn('and not is_tool_step(r)', src, "档案路径没装**既有**的工具步过滤 ✗")
+
+
+class ShellNotRecalledCase(unittest.TestCase):
+    """「只有壳」的条目不许进召回/轮换 ✓（2026-09-18 用户实测）
+
+    现象：轮换槽注入出「[Reply ID: -13」这种**废条目** ✗（后面没有正文 ✓）
+    根因：项目里**早就有** `media_only()`（v2.18.14：只有引用壳 / at 壳 / 媒体块 ⇒ 不算内容 ✓）
+          但**没装在档案池 / 轮换池 / 主动检索**上 ✗ —— 只装在记录级的那几处 ✓
+    ⇒ 现已补全 ✓（`archive_pool` 由 `fresh` 派生 ⇒ 一处过滤覆盖主召回与轮换 ✓）
+    """
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parent.parent
+
+    def test_media_only_catches_shells(self):
+        self.assertTrue(r.media_only("[Reply ID: -13"))
+        self.assertTrue(r.media_only("[Reply ID: -13 content: []]"))
+        self.assertTrue(r.media_only("[At 3991867505(nickname: 紫小贱)]"))
+        self.assertFalse(r.media_only("[Reply ID: 12 content: []] 你可得记住勒"))
+        self.assertFalse(r.media_only("周武喜欢喝美式"))
+
+    def test_pools_apply_it(self):
+        src = (self.root / "main.py").read_text(encoding="utf-8")
+        self.assertIn('and not media_only(r.get("summary") or "", keep_names)', src,
+                      "档案池（含由它派生的轮换档案池）没装壳过滤 ✗")
+        self.assertIn('and not media_only(x.get("content") or "", keep_names)', src,
+                      "轮换·事实池没装壳过滤 ✗")
+        self.assertIn('if media_only(r.get("summary") or "", keep_names):', src,
+                      "主动检索没装壳过滤 ✗")

@@ -451,11 +451,21 @@ def clean_text(text, keep=()):
     return out
 
 
-def trim_nested(text, reply_chars=40, desc_chars=100):
+
+
+# ★ 2026-09-18（用户）：媒体描述的预算 **30** ✓（召回侧=后台侧**统一** ✓）
+#   理由：压缩/审计发生在"接近的轮" ✓ 原消息还在近期窗口 ⇒ 摘要不需要整段描述 ✓
+DESC_CHARS_RECALL = 30
+
+
+def trim_nested(text, reply_chars=40, desc_chars=DESC_CHARS_RECALL):
     """压缩嵌套的长文本：引用里的原文、表情/图片的视觉描述。
 
     只截断「嵌套段落」，正文摘要不动；括号用配对扫描，不会被内容里的 ``]`` 提前截断。
     日志实测：表情包的视觉描述平均 276 字符，是摘要里最大的单块开销。
+
+    ⚠️ 2026-09-18（用户）：`desc_chars` 100 → **30** ✓
+    理由：引用/正文里的**媒体描述**只需要"是个啥" ✓ 整段机器描述纯烧 token ✗
     """
     if not text:
         return ""
@@ -467,8 +477,19 @@ def trim_nested(text, reply_chars=40, desc_chars=100):
             if end < 0:
                 out.append(text[i:])
                 break
-            inner = text[reply.end() : end]
-            out.append(f"[Reply {reply.group(1)}: {_clip(inner, reply_chars)}]")
+            raw_inner = text[reply.end() : end].strip()
+            inner = raw_inner.strip("[]").strip()
+            # ⚠️ 判"引用里是不是媒体"要用**没剥括号**的原样 ✓
+            #   （剥了 `[` 就匹配不上 `_MEDIA_HEAD` ✗ —— 实测踩到 ✓）
+            # ★ 2026-09-18（用户）：**去掉无意义的 msgid、压平嵌套** ✓
+            #   `[Reply 120366828: [你好呀]]` ⇒ `(回复：你好呀)` ✓
+            #   模型**没有**按 msgid 查询的能力 ⇒ 号码纯噪声 ✗（每条省 ~12 字符 ✓）
+            #   引用里若是**媒体块** ⇒ 按更小的预算裁（`desc_chars` ✓ 默认 30 ✓
+            #     —— 视觉描述只需要"是个啥" ✓ 不用整段 ✓）
+            if _MEDIA_HEAD.match(raw_inner):
+                out.append("[Reply: %s]" % _clip(inner, desc_chars))
+            else:
+                out.append("[Reply: %s]" % _clip(inner, reply_chars))
             i = end + 1
             continue
         media = _MEDIA_HEAD.match(text, i)
@@ -490,7 +511,7 @@ def trim_nested(text, reply_chars=40, desc_chars=100):
     return "".join(out)
 
 
-def model_text(text, keep=(), reply_chars=40, desc_chars=100):
+def model_text(text, keep=(), reply_chars=40, desc_chars=DESC_CHARS_RECALL):
     """统一入口：剥思考块 + 剥包裹 + 压空白 + 截断嵌套长描述（只影响模型看到的样子）。
 
     这里**比落库多剥一层思考块**：落库要保原文（用户可能真的引用了 Bot 的思考块），
@@ -1121,6 +1142,14 @@ def is_tool_step(row):
 
 
 
+# ★ 2026-09-18（用户实测）：**未闭合/被截断的壳** ✗
+#   例：`[Reply ID: -13`（没有右括号 ✓ 是数据被截断的样子 ✓）
+#   `_ENVELOPE` 要求闭合 ⇒ 剥不掉它 ⇒ 会被误判成"有内容" ✗
+#   ⇒ 轮换槽曾注入这种废条目 ✓ 这里补一个"尾部未闭合标记"的剥离 ✓
+#   ⚠️ 只剥**行尾未闭合**的 ✓ —— `[Reply x] 你好呀`（闭合 + 有正文 ✓）绝不能被误杀 ✓
+_ENVELOPE_OPEN = re.compile(r"\[(?:Reply|At\b|CQ:at\b)[^\]]*$|<at[^>]*$", re.I)
+
+
 def media_only(content, names=()):
     """是不是"只有引用壳/at 壳/媒体块、没有实质文字"的消息 ✓（默认不进召回 ✓ 数据保留 ✓）
 
@@ -1134,7 +1163,8 @@ def media_only(content, names=()):
     #    注意**不包含**引用壳 ✓ 所以 `[Reply x] 你好呀` 不会被误杀 ✓
     if _MEDIA_HEAD_ANY.match(raw):
         return True
-    text = _ENVELOPE.sub(" ", raw)
+    text = _ENVELOPE_OPEN.sub(" ", raw)          # 先剥"行尾未闭合"的壳 ✓（截断残留 ✓）
+    text = _ENVELOPE.sub(" ", text)
     text = _MEDIA_BLOCK.sub(" ", text)
     kept = []
     for part in text.split():
@@ -1144,5 +1174,9 @@ def media_only(content, names=()):
             who = part[1:].rstrip("，。！？、,.!?~～:：;；\"'）)】]")
             if who.isdigit() or who in names:
                 continue          # 已知的 at 壳 ✓ 丢掉
+        # ★ 2026-09-18：**纯括号/标点的残渣不算内容** ✗
+        #   例：完整壳被剥掉后只剩 `[]` / `()` ⇒ 也该判为"只有壳" ✓
+        if not re.search(r"[0-9A-Za-z\u4e00-\u9fff]", part):
+            continue
         kept.append(part)
     return not kept
