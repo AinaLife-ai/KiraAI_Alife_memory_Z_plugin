@@ -1256,6 +1256,81 @@ class Store:
                 for r in db.execute("SELECT raw, canonical FROM entity_links").fetchall()
             }
 
+    def infer_links(self, self_id="", limit=4000):
+        """从事实里**自动推断**「名字 → QQ」绑定 ✓（2026-09-18 批次 3 第三步）
+
+        用户拍板的判据（**宁可少绑，不可绑错** ✓）：
+          · 只看"**同一会话里，这个名字只被一个 QQ 说过**" ✓ 出现第二个说话人 ⇒ **歧义 ⇒ 不绑** ✓
+          · 跨会话再核一次：不同会话给出的 QQ 必须**一致** ✓ 不一致 ⇒ 不绑 ✓
+          · 说话人必须是**人**（`adapter:数字` ✓）且**不是助手自己** ✗
+            （这点很关键：机器人说"周武喜欢猫"不能把"周武"绑到机器人头上 ✗）
+          · **人工绑定优先** ✓ 已有的 manual 一律不动 ✓
+        返回报告：新增 / 歧义（给人指认）/ 跳过 ✓
+        """
+        from . import identity                       # 局部导入（与 observe_name 等处一致 ✓）
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, sid, subject, sources FROM facts"
+                " WHERE deleted=0 AND subject<>'' AND subject NOT LIKE '%:%'"
+                " LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        facts = [
+            {"id": r[0], "sid": r[1], "subject": r[2],
+             "sources": json.loads(r[3] or "[]")}
+            for r in rows
+        ]
+        if not facts:
+            return {"added": 0, "considered": 0, "ambiguous": [], "skipped": 0}
+        self.attach_evidence(facts)                  # ← 复用既有口径（说话人 ✓）
+        per_session = {}                             # (sid, 名字) -> {说话人}
+        for fact in facts:
+            speaker = str(fact.get("src_user") or "")
+            adapter, number, session_type = (identity.split_adapter(speaker)
+                                              if speaker else ("", "", ""))
+            if not adapter or not number or not number.isdigit() or session_type:
+                continue                             # 不是"人"的 ID ⇒ 不作为证据 ✓
+            if self_id and speaker == self_id:
+                continue                             # 助手自己说的 ⇒ 不算证据 ✓
+            per_session.setdefault((fact["sid"], fact["subject"]), set()).add(speaker)
+        by_name = {}                                 # 名字 -> {候选 QQ} / 标记歧义
+        ambiguous = set()
+        for (_sid, name), speakers in per_session.items():
+            if len(speakers) > 1:
+                ambiguous.add(name)                  # 同一会话里两个说话人 ⇒ 歧义 ✓
+                continue
+            by_name.setdefault(name, set()).update(speakers)
+        existing = self.entity_links()
+        added = skipped = 0
+        for name, speakers in by_name.items():
+            if name in ambiguous or len(speakers) != 1:
+                ambiguous.add(name)                  # 跨会话不一致 ⇒ 歧义 ✓
+                continue
+            canonical = next(iter(speakers))
+            current = existing.get(name)
+            if current == canonical:
+                skipped += 1
+                continue
+            if current is not None and self.link_source(name) == "manual":
+                skipped += 1                          # 人工绑定**不许**被自动覆盖 ✓
+                continue
+            self.link_entity(name, canonical, "cooccur", "同会话唯一说话人")
+            added += 1
+        return {
+            "added": added,
+            "considered": len(by_name),
+            "ambiguous": sorted(ambiguous),
+            "skipped": skipped,
+        }
+
+    def link_source(self, raw):
+        """这条绑定的来源 ✓（manual / cooccur ✓；没有则空串 ✓）"""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT source FROM entity_links WHERE raw=?", (str(raw or "").strip(),)
+            ).fetchone()
+        return row[0] if row else ""
+
     def identity_map(self, self_id="", legacy_adapter="qq"):
         """**全量解析映射** raw → canonical ✓（2026-09-18 批次 3）
 

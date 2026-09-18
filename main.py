@@ -3377,6 +3377,22 @@ class AlifeMemoryPlugin(BasePlugin):
         ok = await self.store.call("link_entity", raw, canonical, "manual", "工作台人工指认")
         return {"ok": bool(ok), "raw": raw, "canonical": canonical}
 
+    @register.api(method="POST", path="/entity_infer", auth=True)
+    async def api_entity_infer(self, request: Request):
+        """跑一次**自动推断**（同会话唯一说话人 ✓ 歧义一律不绑 ✓）"""
+        payload = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        self_id = str((payload or {}).get("self_id") or "")
+        report = await self.store.call("infer_links", self_id)
+        logger.info(
+            "[记忆·Z] 身份推断：新增 %s 条 · 歧义 %s 个 · 跳过 %s",
+            report.get("added"), len(report.get("ambiguous") or []), report.get("skipped"),
+        )
+        return {"report": report, "links": await self.store.call("identity_map")}
+
     @register.api(method="POST", path="/entity_unlink", auth=True)
     async def api_entity_unlink(self, request: Request):
         """解绑 ✓（只删映射，**不动任何事实/记录** ✓）"""

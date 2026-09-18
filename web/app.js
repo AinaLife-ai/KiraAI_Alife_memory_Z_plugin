@@ -2005,6 +2005,62 @@ const nameOf = (value) => displayNames[String(value == null ? "" : value)] ||
 
 // 名字表是"打开名字页才加载"的 ✗ ⇒ 画像页可能还没数据 ✓
 // 这里做一次**静默补载** ✓：拿不到就退回原始 ID ✓（绝不影响主流程 ✓）
+// ── 身份绑定面板（2026-09-18 批次 3）──────────────────────────
+// 规则全在后端 ✓ 这里只提交/展示 ✓ 拿不到数据时**什么都不做** ✓（显示与原来一致 ✓）
+async function loadBindings() {
+  const box = $("#bindList");
+  if (!box) return;
+  try {
+    const data = await api("/entity_links");
+    const links = (data && data.links) || {};
+    entityLinks = links;
+    const keys = Object.keys(links).sort();
+    box.innerHTML = keys.length
+      ? keys
+          .map(
+            (raw) =>
+              `<div class="card"><strong>${esc(labelOf(raw))}</strong>` +
+              ` <span class="muted">（原写法 ${esc(raw)}）</span>` +
+              ` <button data-unbind="${esc(raw)}">解绑</button></div>`
+          )
+          .join("")
+      : '<p class="muted">还没有绑定记录。点「自动推断一下」试试。</p>';
+  } catch (e) {
+    box.innerHTML = '<p class="muted">暂时读不到绑定表。</p>';
+  }
+}
+
+async function runInfer() {
+  try {
+    const data = await api("/entity_infer", { self_id: window.KIRA_SELF_ID || "" });
+    const rep = (data && data.report) || {};
+    const amb = rep.ambiguous || [];
+    toast(
+      "推断完成：新增 " + (rep.added || 0) + " 条" +
+        (amb.length ? "，" + amb.length + " 个说不准（见下方）" : "")
+    );
+    const pend = $("#bindPending");
+    if (pend) {
+      pend.innerHTML = amb.length
+        ? '<p class="muted">下面这些同名但证据不足，需要你指认（填目标 ID，如 qq:123456）：</p>' +
+          '<div class="cards">' +
+          amb
+            .map(
+              (name) =>
+                `<div class="card"><strong>${esc(name)}</strong>` +
+                ` <input placeholder="qq:123456" data-bindinput="${esc(name)}" />` +
+                ` <button data-dobind="${esc(name)}">绑定</button></div>`
+            )
+            .join("") +
+          "</div>"
+        : "";
+    }
+    await loadBindings();
+  } catch (e) {
+    toast("推断失败：" + e.message);
+  }
+}
+
 async function ensureNames() {
   if (Object.keys(displayNames).length) return;
   try {
@@ -2559,3 +2615,42 @@ $("#profileEditName").onclick = () =>
     $("#profileDialog").close();
     openName({ ...profileData.entity, identity_note: "" });
   });
+
+// 身份绑定面板的事件（委托 ✓ 面板是动态渲染的 ✓）
+document.addEventListener("click", (ev) => {
+  const t = ev.target;
+  if (!(t instanceof HTMLElement)) return;
+  if (t.id === "bindInfer") {
+    runInfer();
+    return;
+  }
+  if (t.id === "bindRefresh") {
+    loadBindings();
+    return;
+  }
+  const unbind = t.getAttribute("data-unbind");
+  if (unbind && t.tagName === "BUTTON") {
+    api("/entity_unlink", { raw: unbind })
+      .then(() => {
+        toast("已解绑：" + unbind);
+        loadBindings();
+      })
+      .catch((e) => toast("解绑失败：" + e.message));
+    return;
+  }
+  const dobind = t.getAttribute("data-dobind");
+  if (dobind && t.tagName === "BUTTON") {
+    const input = document.querySelector('[data-bindinput="' + CSS.escape(dobind) + '"]');
+    const target = input && input.value.trim();
+    if (!target) {
+      toast("先填目标 ID，例如 qq:123456");
+      return;
+    }
+    api("/entity_link", { raw: dobind, canonical: target })
+      .then(() => {
+        toast("已绑定：" + dobind + " → " + target);
+        loadBindings();
+      })
+      .catch((e) => toast("绑定失败：" + e.message));
+  }
+});

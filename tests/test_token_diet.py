@@ -2070,3 +2070,75 @@ class IdentityMapCase(unittest.TestCase):
         self.store.unlink_entity("武哥")
         after = counts()
         self.assertEqual(after, before, "解绑后应完全回到原样 ✓")
+
+
+class IdentityInferenceCase(unittest.TestCase):
+    """`infer_links()`：从事实里自动推断「名字 → QQ」✓（2026-09-18 批次 3 第三步）
+
+    判据（用户拍板）：同会话里这个名字**只被一个 QQ 说过** ⇒ 才绑 ✓
+    歧义（两个说话人 / 跨会话不一致）⇒ **一律不绑** ✓
+    ⚠️ 且：**助手自己说的话不算证据** ✓（否则机器人说"周武喜欢猫"会把"周武"绑到机器人头上 ✗）
+    """
+
+    SELF = "qq:9000"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _fact(self, sid, subject, speaker, tag):
+        """造一条事实：**说话人**通过它的来源记录的 users[0] 体现 ✓（与 attach_evidence 口径一致 ✓）"""
+        with self.store.connect() as db:
+            self.store._ensure_entities(db, sid, [speaker])
+            rid = "rec-%s" % tag
+            db.execute(
+                "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                "position,created,visibility,active,deleted,permanent,cold)"
+                " VALUES(?,?,'user',0,?,?,?,?,?,1,?, 'session',1,0,0,0)",
+                (rid, sid, time.time(), time.time(), "s", "c",
+                 json.dumps([speaker]), time.time()),
+            )
+            self.store._add_fact(db, sid, {
+                "category": "profile", "subject": subject, "content": "内容 " + tag,
+                "reason": "测试", "scenario": "", "relations": [], "tags": [],
+                "source_ids": [rid], "importance": 6,
+            })
+            db.commit()
+
+    def test_unique_speaker_gets_bound(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 1)
+        self.assertEqual(self.store.entity_links().get("周武"), "qq:7696")
+
+    def test_two_speakers_same_session_is_ambiguous(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self._fact("s:1", "周武", "qq:1437", "b")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 0, "同会话两个说话人 ⇒ 不许绑 ✗")
+        self.assertIn("周武", rep["ambiguous"], "要列进『待指认』清单 ✓")
+        self.assertEqual(self.store.entity_links(), {})
+
+    def test_assistant_speech_is_not_evidence(self):
+        """**助手自己说的话不算证据** ✓（用户最担心的"自我误导"在这一层的对应面 ✓）"""
+        self._fact("s:1", "周武", self.SELF, "a")
+        rep = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep["added"], 0, "机器人的话不能当绑定证据 ✗")
+        self.assertEqual(self.store.entity_links(), {})
+
+    def test_manual_link_is_never_overwritten(self):
+        self.store.link_entity("周武", "qq:1437", "manual", "人工指认")
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(self.store.entity_links()["周武"], "qq:1437", "人工优先 ✓ 不许被覆盖 ✗")
+
+    def test_idempotent(self):
+        self._fact("s:1", "周武", "qq:7696", "a")
+        self.store.infer_links(self_id=self.SELF)
+        rep2 = self.store.infer_links(self_id=self.SELF)
+        self.assertEqual(rep2["added"], 0, "重复跑不该重复加 ✓")
+        self.assertGreaterEqual(rep2["skipped"], 1)
