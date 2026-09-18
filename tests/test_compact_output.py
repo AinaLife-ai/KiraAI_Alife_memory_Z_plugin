@@ -111,3 +111,47 @@ def test_tool_items_use_compact_keys_and_who_table():
 def test_keyword_is_normalized_before_search():
     source = _main_source()
     assert "keyword, prompt = squeeze(keyword), squeeze(prompt)" in source
+
+
+def test_negative_reply_id_is_normalized_too():
+    """★ 2026-09-19 用户真机日志：archive 槽注入 `[Reply ID: -19 content: …]` 原样穿透 ✗
+    原因：旧正则只认 `\d+` ▶ 负数 id 匹配不上 ⇒ 永远走不到新格式 ✓"""
+    out = r.trim_nested(r.clean_text("[Reply ID: -19 content: [你好呀]]", ()))
+    assert out == "[Reply: 你好呀]", out
+    assert "Reply ID" not in out and "-19" not in out, "负 id 也必须被吃掉：%r" % out
+    # 引用里是媒体（真机同样出现过 -43）
+    out = r.trim_nested(r.clean_text("[Reply ID: -43 content: [Image 一只猫在窗台]] 看这个", ()))
+    assert out.startswith("[Reply: Image ") and "看这个" in out, out
+
+
+def test_at_ids_never_reach_the_model():
+    """★ 用户日志：`[At 3991867505]` 这种数字 id 原样进注入 ✗（模型拿它什么都做不了）"""
+    assert r.strip_at_ids("[At 3991867505(nickname: 爱奈丽)] 说话").strip() == "@爱奈丽 说话"
+    assert r.strip_at_ids("[At 3991867505] 说话").strip() == "说话"
+    assert r.strip_at_ids("[At -123] 嗯").strip() == "嗯"      # 负 id 同样处理 ✓
+    assert r.strip_at_ids("普通文本，没有 At ✓") == "普通文本，没有 At ✓"
+    assert r.strip_at_ids("") == ""
+
+
+def test_at_only_messages_never_reach_the_model_without_names():
+    """★ 2026-09-19（用户）：「像其他链路那样，不召回只有 at 的」
+    要点：**结构化 `[At …]` 壳不依赖名单表** ✓（与 [Reply]/[CQ:at]/<at> 同档 ✓）
+          ⇒ 空名单也必须判得出来 ✓（否则用户改名后就会漏 ✓）
+    """
+    for only in (
+        "[At 3991867505]",
+        "[At 3991867505(nickname: 爱奈丽)]",
+        "[At -19]",
+        "[At 123] [At 456]",
+    ):
+        assert r.media_only(only, ()) is True, "只有 at 的消息必须不召回：%r" % only
+    # 有真内容的一律保留 ✓（绝不能被 at 壳连累 ✗）
+    for keep in (
+        "[At 123] 你好呀",
+        "[At 3991867505(nickname: 爱奈丽)] 明天见",
+        "@他就好了",
+    ):
+        assert r.media_only(keep, ()) is False, "有内容的不能吃掉：%r" % keep
+    # 裸文本 `@` 才需要名单 ✓ 且**改名后是 fail-safe**：宁可多留，绝不吃真话 ✓
+    assert r.media_only("@爱奈丽", ()) is False
+    assert r.media_only("@爱奈丽", ("爱奈丽",)) is True

@@ -112,8 +112,11 @@ const manyRows = Array.from({ length: 300 }, (_, i) => ({
 }));
 sandbox.fetch = async (url, opts) => {
   healthCalls.push(String(url));
-  if (String(url).includes("fact_health"))
-    return { ok: true, status: 200, json: async () => ({ threshold: 12, count: 300, now: 0, rows: manyRows }) };
+  if (String(url).includes("fact_health")) {
+    const m = String(url).match(/offset=(\d+)/);
+    const off = m ? Number(m[1]) : 0;
+    return { ok: true, status: 200, json: async () => ({ threshold: 12, count: 300, offset: off, now: 0, rows: manyRows.slice(off, off + 50) }) };
+  }
   return { ok: true, status: 200, json: async () => ({ id: "f0", subject: "u-zhou", sid: "s1", versions: [], fields: {} }), text: async () => "" };
 };
 {
@@ -124,12 +127,23 @@ sandbox.fetch = async (url, opts) => {
   try { await sandbox.loadHealth(); ok("调用不抛错", true); }
   catch (e) { ok("调用不抛错", false, String((e && e.message) || e)); }
   ok("请求了 /fact_health", healthCalls.some((u) => u.includes("fact_health")));
+  ok("★ 服务端分页：请求带 limit=50&offset=0（不再一次拉 300 行）",
+    healthCalls.some((u) => u.includes("limit=50") && u.includes("offset=0")), healthCalls[0]);
   const metaText = String((memo["#healthMeta"] || {}).textContent || "");
   ok("meta 已更新（不再停在加载中）", metaText.includes("300") && !metaText.includes("正在加载"), metaText.slice(0, 46));
   const html = String((memo["#healthList"] || {}).innerHTML || "");
   const cards = (html.match(/<article class="card"/g) || []).length;
   ok("★ 分页：300 条只渲染 50 张（防卡死）", cards === 50, "渲染 " + cards + " 张");
-  ok("★ 有翻页控件", html.includes("data-hpage=") && html.includes("/ 6"));
+  ok("★ 有翻页控件（总数来自 count=300 ⇒ 6 页）", html.includes("data-hpage=") && html.includes("/ 6"), (html.match(/>\d+ \/ \d+</) || [""])[0]);
+  // 点「下一页」⇒ 应该用 offset=50 再拉一次（而不是本地切片）
+  const nxt = { dataset: { hpage: "next" }, onclick: null };
+  sandbox.document.querySelectorAll = (sel) => (String(sel).includes("data-hpage") ? [nxt] : []);
+  sandbox.paintHealth();
+  const before = healthCalls.length;
+  try { nxt.onclick && nxt.onclick(); } catch (e) {}
+  await new Promise((r) => setTimeout(r, 20));
+  ok("★ 翻页真的走服务端（请求 offset=50）",
+    healthCalls.slice(before).some((u) => u.includes("offset=50")), healthCalls.slice(before).join(","));
   ok("★ 对齐正常卡片的四要素（tag/strong/p/small）",
     html.includes('class="tag"') && html.includes("<strong>") && html.includes("<p>") && html.includes("<small>重要度"));
   ok("卡片带 data-hidx（可点开编辑器）", html.includes("data-hidx="));
@@ -152,6 +166,7 @@ sandbox.fetch = async (url, opts) => {
   const missing = must.filter(([, needle]) => !html.includes(needle)).map(([name]) => name);
   ok("★ 与事实卡片逐样对齐（缺一即红）", missing.length === 0, missing.length ? "缺：" + missing.join("、") : "13 样齐");
   // 点卡片 ⇒ 打开编辑器（openFact 会去拉 /fact/<id>）
+  await sandbox.loadHealth(0);   // ★ 回到第 1 页，免得上面翻页检查把状态留在第 2 页（测试隔离 ✓）
   const n0 = healthCalls.length;
   const cardEl = { dataset: { hidx: "0" }, onclick: null, closest: () => null };
   sandbox.document.querySelectorAll = (sel) => (String(sel).includes("data-hidx") ? [cardEl] : []);
