@@ -2701,6 +2701,15 @@ class AlifeMemoryPlugin(BasePlugin):
                     item["arch"] = 1
                 if r["permanent"]:
                     item["mem"] = 1
+                # ★ 2026-09-18：与被动侧补齐最后两项（默认值照旧省略 ⇒ 几乎不花 token ✓）
+                #   k = 重要度（被动侧是 `★7` ✓）—— 让模型能按重要度挑 ✓
+                #   l = 层号（被动侧是 `L2` ✓）—— 跨层搜索时分得清"摘要 vs 原文" ✓
+                #   ⚠️ 只影响**读**（发给模型的载荷 ✓）；压缩 / 审计 / 合并 / 提取
+                #     走的是 engine 的提示词与写路径 ⇒ **一行都没碰** ✓
+                if int(r["importance"] or 5) != 5:
+                    item["k"] = int(r["importance"] or 5)
+                if int(r["level"] or 0) > 0:
+                    item["l"] = int(r["level"])
                 if r["users"]:
                     shown, extra = self.named(entities, r["users"])
                     item["u"] = shown
