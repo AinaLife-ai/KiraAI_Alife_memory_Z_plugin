@@ -755,14 +755,14 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
     def test_queue_tidy_all_accepts_automatic_flag(self):
         import inspect
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
-        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True)", src)
-        self.assertIn('enqueue("tidy", owner, automatic=automatic)', src)
+        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True, force=False, ids=None)", src)
+        self.assertIn('enqueue("tidy", owner, automatic=automatic', src)
 
     def test_bot_and_workbench_call_it_as_manual(self):
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
         code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
-        self.assertIn("automatic=False,  # bot 发起的", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
-        self.assertIn("automatic=False  # 工作台按钮", code, "工作台按钮没标成手动 ✗")
+        self.assertIn("automatic=False,", code, "bot 的 tidy 没标成手动 ✗（会没日志 ✓）")
+        self.assertIn("automatic=False,        # 工作台按钮", code, "工作台按钮没标成手动 ✗")
         self.assertIn('enqueue("tidy", value.sid, automatic=False)', code,
                       "bot 写永久记忆后的整理没标成手动 ✗")
 
@@ -950,3 +950,135 @@ class ActiveBySessionEquivalenceCase(unittest.TestCase):
                 (now, now, "归档", "归档", "[]", 1, now, "session"))
             db.commit()
         self.assertNotIn("s:x", self.store.active_by_session(), "归档记录不该被带出来 ✗")
+
+
+class TidyForceWiringCase(unittest.TestCase):
+    """「无视冷却」必须真正传到引擎 ✓（2026-09-17 用户实测：三条链路都没生效 ✓）
+
+    实际故障：给 `queue_tidy_all` 加 `automatic` 时**把 `force` / `ids` 弄丢了** ✗
+    ⇒ bot 主动链路 + 工作台「全部重新整理」直接 **TypeError** ✗
+    ⇒ 而 `api_job` 又**没把** `value.force` 传下去 ✗ ⇒ 前端发的 force 被丢掉 ✓
+    ⇒ 用户看到的就成了"点全部重新整理也没有无视冷却" ✗
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_queue_tidy_all_accepts_force_and_ids(self):
+        code = self._code("main.py")
+        self.assertIn("force=False, ids=None", code,
+                      "queue_tidy_all 又丢了 force/ids ✗ ⇒ 调用方会 TypeError ✓")
+
+    def test_force_and_ids_go_into_job_detail(self):
+        code = self._code("main.py")
+        self.assertIn('"force": bool(force)', code, "force 没进任务 detail ✗（引擎就看不到 ✓）")
+        self.assertIn('"ids": list(ids or [])', code, "ids 没进任务 detail ✗")
+
+    def test_api_job_forwards_force(self):
+        code = self._code("main.py")
+        self.assertIn("force=value.force", code, "api_job 没把前端 force 传下去 ✗")
+        self.assertIn("ids=(value.ids or None)", code, "api_job 没把前端 ids 传下去 ✗")
+
+    def test_bot_path_forwards_force(self):
+        code = self._code("main.py")
+        self.assertIn("force=bool(force)", code, "bot 主动链路没传 force ✗")
+
+    def test_per_item_reextract_sends_force(self):
+        js = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("force: true", js, "单条「重新提取事实」没发 force ✗")
+
+    def test_engine_reads_force_from_detail(self):
+        code = self._code("engine.py")
+        self.assertIn('_force = bool(_d.get("force"))', code, "引擎没解析 force ✗")
+        self.assertIn("0 if force else cfg.permanent_tidy_days", code,
+                      "force 没被换成 0 天（=没无视冷却）✗")
+
+
+class TidyUnknownTargetCase(unittest.TestCase):
+    """模型编 id 时：**跳过那一条**，不能让整批整理作废 ✓（2026-09-17 用户要求核查 ✓）
+
+    原实现：`if record_id not in known: raise ValueError("unknown tidy target")` ✗
+    ⇒ 一条坏输出 ⇒ **整批作废**（前面已应用的条目白做 ✗）⇒ 还进重试 ⇒ 多半整体失败 ✓
+    对比：compress 故意 raise（source 可疑就该重试 ✓）；但 tidy 的 id 是**处置目标** ✗
+    ⇒ 一个坏目标不该连累其它条目 ✓（跳过 = 那条记录保持不动 ✓ 等价 keep ✓）
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = s.Store(Path(self.temp.name) / "db")
+        self.store.initialize()
+        self.eng = e.Engine(self.store, lambda: c.Settings(), None, None, None)
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        self.loop.close()
+        self.temp.cleanup()
+
+    def _seed(self):
+        now = time.time()
+        with self.store.connect() as db:
+            for i in (1, 2):
+                db.execute(
+                    "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+                    "position,created,visibility,active,deleted,permanent,cold) "
+                    "VALUES(?,'s:1','assistant',9,?,?,?,?,?,?,?,?,1,0,1,0)",
+                    ("r%d" % i, now, now, "摘要 %d" % i, "摘要 %d" % i, "[]", i, now, "session"))
+            db.commit()
+        return self.store.permanent_records("s:1")
+
+    def test_unknown_id_is_skipped_not_raised(self):
+        rows = self._seed()
+        cands = [r for r in rows if r["id"] in ("r1", "r2")]
+        aliases = {"p1": "r1", "p2": "r2"}
+        output = {"items": [
+            {"id": "p1", "action": "archive", "reason": "过期"},
+            {"id": "p9", "action": "archive", "reason": "编的"},   # ✗ 不存在的目标
+            {"id": "p2", "action": "keep", "reason": "保留"},
+        ]}
+        applied = self.loop.run_until_complete(
+            self.eng.apply_tidy("s:1", cands, aliases, {}, output))
+        self.assertEqual(applied, 1, "正常的那条应当照旧被应用 ✓（只有坏目标被跳过 ✓）")
+        with self.store.connect() as db:
+            act = dict(db.execute(
+                "SELECT id, active FROM records WHERE id IN ('r1','r2')").fetchall())
+        self.assertEqual(act, {"r1": 0, "r2": 1}, "应用结果不对 ✗（r1 归档 ✓ r2 保持 ✓）")
+        self.assertIn("跳过", self.eng.last_tidy_note or "",
+                      "跳过条数应当体现在提示里 ✓（否则用户看到条数对不上 ✓）")
+
+    def test_all_bad_ids_does_not_raise(self):
+        rows = self._seed()
+        cands = [r for r in rows if r["id"] in ("r1", "r2")]
+        applied = self.loop.run_until_complete(
+            self.eng.apply_tidy("s:1", cands, {"p1": "r1"}, {},
+                                {"items": [{"id": "zzz", "action": "archive", "reason": "x"}]}))
+        self.assertEqual(applied, 0, "全是坏目标时应当**安静跳过**而不是抛错 ✗")
+
+
+class TidyExtractMergesCase(unittest.TestCase):
+    """整理**提炼出的事实**必须照常参与去重合并 ✓（2026-09-17 用户要求核查 ✓）
+
+    缺口：`apply_tidy` 提炼事实后只 `add_facts` ✗ 没排合并 ✗
+    ⇒ 提炼出来的重复事实要一直等下一个触发点（压缩/分类/召回 ✓）才可能被并 ✓
+    ⇒ 对照：compress 的 job 包装层是会排的（`queue_fact_merges(sid, started_at)` ✓）
+    """
+
+    def _code(self, name):
+        src = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+        return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    def test_tidy_worker_queues_merges_after_extract(self):
+        code = self._code("engine.py")
+        self.assertIn('await self.queue_fact_merges(job["sid"], _wall)', code,
+                      "整理提炼出的事实没排合并 ✗（重复事实会一直躺着 ✓）")
+
+    def test_uses_wall_clock_not_monotonic(self):
+        """`since` 必须是**墙钟** ✗ —— monotonic 与事实的 created 不同源 ✓"""
+        code = self._code("engine.py")
+        self.assertIn("_wall = time.time()", code, "没取墙钟 ⇒ since 不可比 ✓")
+
+    def test_compact_schemas_cover_tidy_and_dedupe(self):
+        """两条**模型必经**的输出都要有紧凑声明 ✓（否则每次多带完整 schema ✓）"""
+        code = self._code("engine.py")
+        for purpose in ('"tidy"', '"dedupe"'):
+            self.assertIn(purpose + ":", code, "COMPACT_SCHEMAS 缺 %s ✗" % purpose)

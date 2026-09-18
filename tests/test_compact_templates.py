@@ -5,6 +5,7 @@
 """
 
 import importlib
+import re
 import sys
 import types
 from pathlib import Path
@@ -130,6 +131,8 @@ def test_compact_schema_does_not_invent_fields():
         ("compress", contracts.Compression),
         ("fact_merge", contracts.FactMerge),
         ("audit", contracts.Audit),
+        ("tidy", contracts.PermanentTidy),     # 2026-09-17 补：tidy 之前没有 ✗
+        ("dedupe", contracts.RecordMerge),    # 2026-09-17 补：dedupe 之前也没有 ✗
     ):
         allowed = _all_field_names(model)
         invented = {
@@ -173,3 +176,32 @@ def test_compression_prompt_pins_subject_attribution():
     for token in ("可见范围", "不是说话人", "说话人的实体 ID",
                   "严禁把 A 的话记到 B 名下", "source_ids 必须指向真正含该内容的**每条**记录"):
         assert token in src, "丢失归属语义：" + token
+
+
+def _engine_code() -> str:
+    """engine.py 的源码（**剥掉注释行** ✗✓ 免得被注释骗过）"""
+    src = (Path(__file__).resolve().parents[1] / "engine.py").read_text(encoding="utf-8")
+    return "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+
+def test_every_purpose_has_explicit_instruction_branch():
+    """每个**模型用途**都必须有**显式**指令分支 ✓（2026-09-17 用户要求全查 ✓）
+
+    ⚠️ 隐患：`build_instruction` 的兜底是 `return AUDIT_INSTRUCTION` ✗
+    ⇒ 新增用途忘加分支 ⇒ **静默**套用审计指令（按错的规矩干活还不报错 ✗✓）
+    """
+    code = _engine_code()
+    used = set(re.findall(r'structured\(\s*[\w.]+\s*,\s*"(\w+)"', code))
+    m = re.search(r'def build_instruction\(purpose, cfg\):(.*?)\ndef ', code, re.S)
+    assert m, "找不到 build_instruction ✗"
+    explicit = set(re.findall(r'purpose == "(\w+)"', m.group(1)))
+    missing = sorted(used - explicit)
+    assert not missing, "这些用途没有显式指令分支 ✗（会静默套用审计指令）：%s" % missing
+
+
+def test_every_purpose_has_compact_schema():
+    """每个模型用途都要有紧凑声明 ✓（否则每次多带完整 schema ✓）"""
+    code = _engine_code()
+    used = set(re.findall(r'structured\(\s*[\w.]+\s*,\s*"(\w+)"', code))
+    missing = sorted(p for p in used if p not in getattr(engine, "COMPACT_SCHEMAS", {}))
+    assert not missing, "这些用途缺紧凑声明 ✗：%s" % missing

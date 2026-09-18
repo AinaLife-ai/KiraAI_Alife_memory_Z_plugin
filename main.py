@@ -909,13 +909,26 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception as exc:  # 清理只是让老数据更好用，失败不影响任何功能
             logger.warning("[记忆·Z] 存量记录清理失败（下次启动会重试）：%s", exc)
 
-    async def queue_tidy_all(self, fallback_sid="", automatic=True):
-        """把所有有意久记忆的会话都排上整理（去重/提炼/归档都按归属会话执行）。"""
+    async def queue_tidy_all(self, fallback_sid="", automatic=True, force=False, ids=None):
+        """把所有有永久记忆的会话都排上整理（去重/提炼/归档都按归属会话执行）。
+
+        `force=True` ⇒ **无视冷却** ✓（工作台"全部重新整理" / bot 指定 ✓）
+        `ids`       ⇒ 只整理这几条 ✓（bot 指定单条 ✓）
+
+        ⚠️ 2026-09-17 修 ✗✓：上一版给本函数加 `automatic` 时**把 `force` / `ids` 弄丢了** ✗
+        ⇒ 两个传 force 的入口（bot 主动链路 + 工作台「全部重新整理」）直接 **TypeError**
+        ⇒ **"无视冷却"全程没生效** ✗（用户实测反馈 ✓）
+        """
         owners = set(await self.store.call("sessions_with_permanents"))
         if fallback_sid:
             owners.add(fallback_sid)
+        # 把 force / ids 塞进任务的 detail ✓（引擎会把 JSON 解出来 ✓）
+        detail = ""
+        if force or ids:
+            detail = json.dumps({"force": bool(force), "ids": list(ids or [])},
+                                ensure_ascii=False)
         for owner in sorted(owners):
-            await self.engine.enqueue("tidy", owner, automatic=automatic)
+            await self.engine.enqueue("tidy", owner, automatic=automatic, detail=detail)
         return sorted(owners)
 
     async def queue_compress_all(self, limit=2):
@@ -3373,7 +3386,12 @@ class AlifeMemoryPlugin(BasePlugin):
             # 任何会话都在付所有会话的永久记忆），所以工作台的这个按钮
             # 也按「所有有意久记忆的会话」排队，与 Bot 的 tidy 一致。
             owners = await self.queue_tidy_all(
-                value.sid, automatic=False  # 工作台按钮 ⇒ 手动 ✓ 必须有日志 ✓
+                value.sid,
+                automatic=False,        # 工作台按钮 ⇒ 手动 ✓ 必须有日志 ✓
+                # ⚠️ 2026-09-17 修 ✗✓：这两个**以前没传** ⇒ 前端发的 force/ids 被**丢掉** ✓
+                #   ⇒ 工作台的「全部重新整理」根本不会无视冷却 ✗（用户实测 ✓）
+                force=value.force,
+                ids=(value.ids or None),
             )
             return {
                 "id": "",
