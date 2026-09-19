@@ -1902,7 +1902,8 @@ class Engine:
             started = time.monotonic()
             _wall = time.time()          # 墙钟 ✗ 给 queue_fact_merges 当 since 用（monotonic 不能比 ✓）
             try:
-                _force, _ids = False, None
+                # ★ 每轮迭代**必须重置** ✗ 否则上一条的重提取状态会串到下一条 ✓
+                _force, _ids, _rebuild = False, None, False
                 _raw = (job.get("detail") or "").strip()
                 if _raw:
                     try:
@@ -1916,7 +1917,7 @@ class Engine:
                         self._note_tidy(job["sid"], "任务参数无法解析，已按默认（按冷却）执行")
                 applied = await self.tidy_permanents(
                     job["sid"], job["id"], force=_force, ids=_ids,
-                    rebuild=locals().get("_rebuild", False),
+                    rebuild=_rebuild,
                 )
                 if applied:
                     # ★ 整理会**提炼出事实**（extract/split ✓）⇒ 这些新事实要照常参与去重合并 ✓
