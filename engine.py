@@ -193,6 +193,15 @@ COMPACT_SCHEMAS = {
 }
 
 
+# ★ 2026-09-19（用户定的规矩）：**只有强制重提取时才附加这一段**
+#   强制 ⇒ 不允许 keep；不强制 ⇒ 原有的 tidy 规则与提示词**完全不动**
+REBUILD_BAN = (
+    "本次为手动强制重新提取：不允许输出 keep —— 必须给出 extract、archive 或 split 之一。"
+    "判断标准仍是上面那套原规则；若这条确实必须每轮在场，请用 split 把约束部分留下，"
+    "并在 reason 里说明为什么它必须每轮在场。"
+)
+
+
 def build_instruction(purpose, cfg):
     if purpose == "compress":
         return (
@@ -882,13 +891,13 @@ class Engine:
                 return entity_id
         return value
 
-    async def structured(self, contract, purpose, payload, cfg, retry_timeout=True):
+    async def structured(self, contract, purpose, payload, cfg, retry_timeout=True, extra=""):
         model = (
             cfg.compress_model
             if purpose in ("compress", "fact_merge")
             else cfg.audit_model
         )
-        instruction = COMMON_INSTRUCTION + build_instruction(purpose, cfg)
+        instruction = COMMON_INSTRUCTION + build_instruction(purpose, cfg) + (extra or "")
         # 先用手写紧凑声明（省 1000+ 字）；没有对应条目才退回自动 schema
         schema = COMPACT_SCHEMAS.get(purpose) or strip_schema_titles(
             contract.model_json_schema()
@@ -1719,7 +1728,7 @@ class Engine:
         """
         self.last_tidy_notes[sid] = text
 
-    async def tidy_permanents(self, sid, job_id=None, force=False, ids=None):
+    async def tidy_permanents(self, sid, job_id=None, force=False, ids=None, rebuild=False):
         """整理永久记忆：逐条 keep / extract / archive / split（只归档不删除）✓
 
         v2.18.19：加两个参数 ✓
@@ -1727,6 +1736,13 @@ class Engine:
             用途：用户觉得不准、或想再提取一次事实 ✓（前端按钮 / 后台弹窗 / bot 传参 ✓）
           · `ids=[...]` → **只整理这几条** ✓（前端"重新提取事实"按钮 ✓）
         ⚠️ `force` 也受 **10 秒防抖** ✗ —— 防手抖连点与 token 爆炸 ✓
+
+        v2.18.52（用户定的规矩 ✓）：加 `rebuild` ✓
+          · `rebuild=True` → **本次不允许 keep** ✓（只对**单条**有效 ✓ 必须带 ids ✓）
+            ⇒ 模型必须给出 extract/archive/split 之一 ⇒ 不会"点了等于没点" ✓
+          · ⚠️ 它**只应有单条入口** ✗（全局强制会把本来好好的事实也重写一遍 ⇒ 质量风险 ✓）
+            ⇒ /jobs 与 bot 侧都会拦"无 ids 的 rebuild" ✓
+          · ⚠️ 待接：把上面的禁令写进 tidy 提示词（下一步 ✓）
         """
         cfg = self.settings()
         if not cfg.permanent_tidy_enabled:
@@ -1789,6 +1805,9 @@ class Engine:
                 ],
             },
             cfg,
+            # ★ 2026-09-19：**只有 rebuild（强制）时**才追加"不允许 keep"
+            #   正常 tidy ⇒ extra="" ⇒ 指令与行为**一个字节都不变**
+            extra=(REBUILD_BAN if rebuild else ""),
         )
         return await self.apply_tidy(sid, candidates, aliases, names, output, job_id)
 
@@ -1891,10 +1910,13 @@ class Engine:
                         _d = _json.loads(_raw)
                         _force = bool(_d.get("force"))
                         _ids = _d.get("ids") or None
+                        # ★ 2026-09-19：完全重提取（本次不允许 keep ✓）只对单条有效 ✓
+                        _rebuild = bool(_d.get("rebuild")) and bool(_ids)
                     except Exception:
                         self._note_tidy(job["sid"], "任务参数无法解析，已按默认（按冷却）执行")
                 applied = await self.tidy_permanents(
-                    job["sid"], job["id"], force=_force, ids=_ids
+                    job["sid"], job["id"], force=_force, ids=_ids,
+                    rebuild=locals().get("_rebuild", False),
                 )
                 if applied:
                     # ★ 整理会**提炼出事实**（extract/split ✓）⇒ 这些新事实要照常参与去重合并 ✓

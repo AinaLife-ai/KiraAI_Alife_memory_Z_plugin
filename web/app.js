@@ -106,6 +106,8 @@ const fields = {
   profile_summary_count: "画像摘要条数",
   search_active_only: "检索默认只搜常驻",
   cold_after_days: "归档转入冷归档天数",
+  tidy_rebuild_bot_enabled: "允许 Bot 强制重提取单条事实",
+  tidy_rebuild_bot_cooldown_minutes: "Bot 强制重提取的间隔（分钟）",
 };
 let ctx = null,
   tab = "home",
