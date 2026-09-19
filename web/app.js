@@ -425,7 +425,11 @@ async function openJob(id) {
                 ? [item.before, text]
                 : item.action === "correct" && item.before && item.before !== text
                   ? [item.before, text]
-                  : null;
+                  : item.action === "extract" && item.kind === "record" && item.before
+                    ? [item.before, "已提炼为事实（原条移出常驻）"]
+                    : item.action === "archive" && item.kind === "record" && item.before
+                      ? [item.before, "已归档（移出常驻）"]
+                      : null;
           const arrow = shifted
             ? '<div class="arrow"><span class="from">' +
               esc(shifted[0]) +

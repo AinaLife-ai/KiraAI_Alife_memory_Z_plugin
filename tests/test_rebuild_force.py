@@ -150,3 +150,29 @@ def test_four_paths_are_distinguished():
     # ④ bot 三道闸门 ✓
     for gate in ("rebuild_requires_single_id", "rebuild_disabled_by_setting", "rebuild_cooldown"):
         assert gate in MAIN, "bot 缺闸门：%s" % gate
+
+
+def test_tidy_detail_records_extracted_facts():
+    """★ 用户要求：整理明细要像"事实合并"那样细
+
+    被提取为事实 ⇒ 明细里要**每条事实一行**（弹窗就显示 主体 · 类别 · 重要度 ✓）
+    被归档 ⇒ 记「已归档」✓ 原条用划线表示移出 ✓
+    """
+    assert 'fact_ids = await self.store.call("add_facts", sid, facts)' in ENG, "必须拿到新事实 id ✓"
+    assert '"kind": "fact",' in ENG and '"action": "extract",' in ENG, "必须把事实记成明细条目 ✓"
+    # 归档/提取的记录条目要能划线 ⇒ 前端 shift 分支要有 ✓
+    assert 'item.action === "extract" && item.kind === "record"' in APP
+    assert '已提炼为事实（原条移出常驻）' in APP
+    assert 'item.action === "archive" && item.kind === "record"' in APP
+    assert '已归档（移出常驻）' in APP
+
+
+def test_recall_merge_check_on_both_paths():
+    """★ 用户确认题：召回发现可合并的会不会排合并
+
+    被动（每轮注入）⇒ 有 ✓；主动（bot 调工具）⇒ 本次补上 ✓
+    """
+    assert 'dropped = await self.queue_recall_merges(sid, facts)' in MAIN, "被动侧必须排 ✓"
+    assert 'asyncio.create_task(' in MAIN and 'self.queue_recall_merges(event.sid' in MAIN, \
+        "主动侧也要排（同步出口 ⇒ create_task ✓）"
+    assert 'value.get("facts")' in MAIN, "主动侧要从返回载荷里取事实 id ✓"

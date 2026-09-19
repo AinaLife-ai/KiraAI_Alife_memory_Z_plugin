@@ -1881,7 +1881,19 @@ class Engine:
                     }
                 )
             if facts:
-                await self.store.call("add_facts", sid, facts)
+                fact_ids = await self.store.call("add_facts", sid, facts)
+                # ★ 2026-09-19（用户要求）：把"提炼出的事实"也记成明细条目 ✓
+                #   整理明细里就会像"事实合并"那样显示：主体 · 类别 · 重要度 N ✓
+                for _fid in fact_ids or []:
+                    items.append(
+                        {
+                            "kind": "fact",
+                            "target": _fid,
+                            "action": "extract",
+                            "note": reason,
+                            "before": "",
+                        }
+                    )
             items.append(
                 {
                     "kind": "record",
