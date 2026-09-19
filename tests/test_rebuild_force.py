@@ -62,3 +62,17 @@ def test_frontend_offers_both_modes_with_rebuild_default():
     assert 'value="rule"' in APP, "也要能选「按规则」"
     assert 'rebuild: mode === "rebuild"' in APP, "选择要真的传到后端"
     assert "可在永久记忆页面对单条强制重新提取事实" in APP, "全局那行小字（用户原话）"
+
+
+def test_no_locals_in_engine_worker():
+    """🔴 2026-09-19 **实际抓到过**的 bug：运行器循环里用 locals() 会**跨迭代泄漏** ✗
+
+    上一条「完全重新提取」把 _rebuild=True 留在作用域 ⇒
+    下一条**普通**整理若 detail 为空 / 解析失败 ⇒ 带着重提取跑 ⇒
+    把本来好好的常驻记忆强制重写 ✗（正是本功能最该避免的事 ✗）
+
+    ⇒ 判据：引擎里**不许出现 locals()** ✓ + 运行器每轮必须重置 ✓
+    """
+    assert 'locals()' not in ENG, '引擎里不许用 locals() ✗（循环内不随迭代清空 ✓）'
+    assert '_force, _ids, _rebuild = False, None, False' in ENG, '运行器每轮必须重置三个变量 ✓'
+    assert 'rebuild=_rebuild,' in ENG, '必须直接引用 ✓'
