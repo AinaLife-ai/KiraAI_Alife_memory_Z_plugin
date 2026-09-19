@@ -33,6 +33,8 @@ def test_forced_instruction_is_self_consistent():
     assert "split=" not in forced, "强制版里不许出现 split ✗"
     assert "keep_content" not in forced, "强制版里不许出现 keep_content ✗"
     assert "extract=" in forced and "archive=" in forced, "必须给出 extract/archive 两条路 ✓"
+    # 用户追问：强制里也要说清"能不能顺带修正类别/重要度" ✓（契约里两者都是独立字段 ✓）
+    assert "顺带修正这条的 category / importance" in forced, "强制版必须写明可顺带修正 ✓"
     # 调用点必须真的把 forced 传下去 ✓
     assert "forced=rebuild" in ENG, "引擎必须按 rebuild 切换清单 ✓"
     assert "_TIDY_ACTIONS_FORCED if forced else _TIDY_ACTIONS_ALL" in ENG, "必须二选一 ✓"
