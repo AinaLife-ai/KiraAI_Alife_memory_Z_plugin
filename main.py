@@ -994,7 +994,10 @@ class AlifeMemoryPlugin(BasePlugin):
         ⇒ **"无视冷却"全程没生效** ✗（用户实测反馈 ✓）
         """
         owners = set(await self.store.call("sessions_with_permanents"))
-        if fallback_sid:
+        # ★ 2026-09-19（用户实测）：只有「指定单条(ids)」时才需要把发起会话并进来 ✓
+        #   全局整理把它并进来 ✗ ⇒ 若该会话没有永久记忆 ⇒ 白排一个「本次跳过」的任务 ✓
+        #   ⇒ 全局整理本来就覆盖"所有**有永久记忆**的会话" ✓ 不会漏 ✓
+        if ids and fallback_sid:
             owners.add(fallback_sid)
         # 把 force / ids 塞进任务的 detail ✓（引擎会把 JSON 解出来 ✓）
         detail = ""
@@ -3896,6 +3899,23 @@ class AlifeMemoryPlugin(BasePlugin):
         value = await self.body(request, Job)
         if value.kind == "reindex" and not self.settings.semantic_enabled:
             raise HTTPException(409, "optional vector search is disabled")
+        if value.kind == "dedupe":
+            # ★ 2026-09-19（用户实测）：工作台的「合并相似永久记忆」**原来不是全局的** ✗
+            #   它落到下面兜底 ⇒ enqueue("dedupe", value.sid) ⇒ **只合并选中的那个会话** ✗
+            #   （其它会话只能靠定时调度慢慢轮 ✓ 用户点了"全局"却只跑一个 ✗）
+            #   ⇒ 与「整理永久记忆」同一套：按**所有有永久记忆的会话**排队 ✓
+            if not self.settings.permanent_dedupe:
+                raise HTTPException(409, "永久记忆去重已关闭（设置里开启后再试）")
+            owners = set(await self.store.call("sessions_with_permanents"))
+            if value.ids and value.sid:
+                owners.add(value.sid)      # 指定单条时才并发起会话 ✓（与 tidy 同规则 ✓）
+            for owner in sorted(owners):
+                await self.engine.enqueue("dedupe", owner, automatic=False)   # 手动 ⇒ 有日志 ✓
+            return {
+                "id": "",
+                "state": "queued",
+                "sessions": len(owners),
+            }
         if value.kind == "tidy":
             # ★ 2026-09-19（用户定的规矩）：完全重提取**只能对单条** ✓
             #   全局强制会把"本来好好的"事实也重写一遍 ✗（质量风险 ✓）
@@ -3905,6 +3925,17 @@ class AlifeMemoryPlugin(BasePlugin):
                     "「完全重新提取」只能针对单条永久记忆：请在「永久记忆」页面"
                     "对具体一条操作。全局整理请用「忽略冷却整理」或「按冷却整理」。",
                 )
+            # ★ 2026-09-19（用户实测）：单条指定里若有**冷归档/已停用/不存在**的 ⇒ 明确拒绝 ✓
+            #   （前端已隐藏按钮 ✓ 这里是 bot / 手搓请求的兜底 ✓）
+            if value.ids:
+                _bad = await self.store.call("untidyable_ids", value.ids)
+                if _bad:
+                    raise HTTPException(
+                        400,
+                        "这几条不在可整理集合里（冷归档 / 已停用 / 不存在）："
+                        + "、".join(_bad)
+                        + "。冷归档只按 ID 可读、不参与整理；如需处理请先恢复。",
+                    )
             # 永久记忆的成本是全局的（默认 recall_scope=global 时，
             # 任何会话都在付所有会话的永久记忆），所以工作台的这个按钮
             # 也按「所有有意久记忆的会话」排队，与 Bot 的 tidy 一致。

@@ -2374,6 +2374,29 @@ class Store:
                 )
             ]
 
+    def untidyable_ids(self, ids):
+        """指定的这几条里，**不参与整理**的（冷归档 / 已停用 / 已删除 / 不存在）✓
+
+        ⚠️ 2026-09-19（用户实测）：单条「重新提取事实」点到**冷归档**的条 ⇒
+        引擎只会回"指定的永久记忆不在可整理集合里，本次跳过" ✗
+        （前端已隐藏按钮 ✓ 这里再兜一层 ⇒ bot / 手搓请求得到明确 400 ✓）
+        可整理集合 = ``tidy_candidates`` 的 WHERE：permanent=1 AND deleted=0 AND active=1 AND cold=0 ✓
+        """
+        ids = [str(i) for i in (ids or []) if i]
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        with self.connect() as db:
+            ok = {
+                str(r[0])
+                for r in db.execute(
+                    "SELECT id FROM records WHERE id IN (" + ph + ") "
+                    "AND permanent=1 AND deleted=0 AND active=1 AND cold=0",
+                    tuple(ids),
+                )
+            }
+        return [i for i in ids if i not in ok]
+
     def sessions_with_any_permanent(self):
         """有意久记忆的会话（哪怕只有一条）——跨会话去重需要它们都能被扫到。"""
         with self.connect() as db:
