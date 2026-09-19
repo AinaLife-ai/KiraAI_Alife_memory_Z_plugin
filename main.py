@@ -994,7 +994,10 @@ class AlifeMemoryPlugin(BasePlugin):
         ⇒ **"无视冷却"全程没生效** ✗（用户实测反馈 ✓）
         """
         owners = set(await self.store.call("sessions_with_permanents"))
-        if fallback_sid:
+        # ★ 2026-09-19（用户实测）：只有「指定单条(ids)」时才需要把发起会话并进来 ✓
+        #   全局整理把它并进来 ✗ ⇒ 若该会话没有永久记忆 ⇒ 白排一个「本次跳过」的任务 ✓
+        #   ⇒ 全局整理本来就覆盖"所有**有永久记忆**的会话" ✓ 不会漏 ✓
+        if ids and fallback_sid:
             owners.add(fallback_sid)
         # 把 force / ids 塞进任务的 detail ✓（引擎会把 JSON 解出来 ✓）
         detail = ""
@@ -3905,6 +3908,17 @@ class AlifeMemoryPlugin(BasePlugin):
                     "「完全重新提取」只能针对单条永久记忆：请在「永久记忆」页面"
                     "对具体一条操作。全局整理请用「忽略冷却整理」或「按冷却整理」。",
                 )
+            # ★ 2026-09-19（用户实测）：单条指定里若有**冷归档/已停用/不存在**的 ⇒ 明确拒绝 ✓
+            #   （前端已隐藏按钮 ✓ 这里是 bot / 手搓请求的兜底 ✓）
+            if value.ids:
+                _bad = await self.store.call("untidyable_ids", value.ids)
+                if _bad:
+                    raise HTTPException(
+                        400,
+                        "这几条不在可整理集合里（冷归档 / 已停用 / 不存在）："
+                        + "、".join(_bad)
+                        + "。冷归档只按 ID 可读、不参与整理；如需处理请先恢复。",
+                    )
             # 永久记忆的成本是全局的（默认 recall_scope=global 时，
             # 任何会话都在付所有会话的永久记忆），所以工作台的这个按钮
             # 也按「所有有意久记忆的会话」排队，与 Bot 的 tidy 一致。

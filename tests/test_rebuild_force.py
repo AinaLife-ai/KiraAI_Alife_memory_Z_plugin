@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENG = (ROOT / "engine.py").read_text(encoding="utf-8")
 MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
 APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+STOR = (ROOT / "storage.py").read_text(encoding="utf-8")
 SCHEMA = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
 
 
@@ -176,3 +177,27 @@ def test_recall_merge_check_on_both_paths():
     assert 'asyncio.create_task(' in MAIN and 'self.queue_recall_merges(event.sid' in MAIN, \
         "主动侧也要排（同步出口 ⇒ create_task ✓）"
     assert 'value.get("facts")' in MAIN, "主动侧要从返回载荷里取事实 id ✓"
+
+
+def test_cold_records_cannot_be_force_tidied():
+    """★ 用户实测：单条强制整理点到**冷归档** ⇒ 只会得到"本次跳过"✗
+
+    冷归档只按 ID 可读、不参与整理（tidy_candidates 的 WHERE 里 cold=0 ✓）
+    ⇒ 前端隐藏按钮 ✓ + /jobs 明确 400 ✓（两条都守 ✓）
+    """
+    assert 're.classList.toggle("hide", !r.permanent || !!r.cold);' in APP, "冷归档必须隐藏按钮 ✓"
+    assert "def untidyable_ids" in STOR, "需要【不可整理】判定 ✓"
+    assert "AND permanent=1 AND deleted=0 AND active=1 AND cold=0" in STOR, "判定条件要与 tidy_candidates 一致 ✓"
+    assert 'await self.store.call("untidyable_ids", value.ids)' in MAIN, "/jobs 必须拦 ✓"
+    assert "冷归档只按 ID 可读、不参与整理" in MAIN, "400 要给出说明 ✓"
+
+
+def test_global_tidy_does_not_union_selected_session():
+    """★ 用户实测的疑问：点全局整理时，界面选中的会话会不会被**额外照顾**一次
+
+    原来：`if fallback_sid: owners.add(fallback_sid)` ✗ ⇒ 全局整理也会把"选中会话"并进来
+    ⇒ 若该会话**没有永久记忆** ⇒ 白排一个"本次跳过"的任务 ✗（任务明细噪声 ✓）
+    现在：只有**指定单条(ids)**时才并 ✓ —— 全局本来就覆盖"所有有永久记忆的会话" ✓ 不会漏 ✓
+    """
+    assert "if ids and fallback_sid:" in MAIN, "只有指定单条时才 fallback ✓"
+    assert "if fallback_sid:\n            owners.add(fallback_sid)" not in MAIN, "旧的全局并入必须去掉 ✓"

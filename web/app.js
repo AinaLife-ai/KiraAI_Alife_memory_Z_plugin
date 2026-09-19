@@ -1171,7 +1171,9 @@ function renderRecord() {
     });
 
   if (re) {
-    re.classList.toggle("hide", !r.permanent);
+    // ★ 2026-09-19（用户实测）：冷归档不参与整理（引擎侧 cold=0 才可整理 ✓）
+    //   按钮留着只会点了得到"本次跳过"✗ ⇒ 冷归档时一并隐藏 ✓（卡片自带「冷归档 · 仅按ID可读」= 说明 ✓）
+    re.classList.toggle("hide", !r.permanent || !!r.cold);
     re.onclick = () =>
       guard(async () => {
         const mode = await askReextractMode();
