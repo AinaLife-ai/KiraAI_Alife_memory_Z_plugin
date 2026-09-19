@@ -195,14 +195,33 @@ COMPACT_SCHEMAS = {
 
 # ★ 2026-09-19（用户定的规矩）：**只有强制重提取时才附加这一段**
 #   强制 ⇒ 不允许 keep；不强制 ⇒ 原有的 tidy 规则与提示词**完全不动**
-REBUILD_BAN = (
-    "本次为手动强制重新提取：不允许输出 keep —— 必须给出 extract、archive 或 split 之一。"
-    "判断标准仍是上面那套原规则；若这条确实必须每轮在场，请用 split 把约束部分留下，"
-    "并在 reason 里说明为什么它必须每轮在场。"
+
+# ★ 2026-09-19（用户要求）：处置清单拆两版 ✓
+#   不强制 ⇒ _TIDY_ACTIONS_ALL，**逐字保持原样** ✗ 一个字符都不动 ✓
+#   强制（手动"完全重新提取"）⇒ _TIDY_ACTIONS_FORCED：
+#     只给 extract / archive ✗ **完全不出现 keep 与 split**
+#     （原来是在原指令后**追加一句禁令** ✗ ⇒ 模型同时看到"keep=…split=…"与"不允许 keep/split"
+#       两套互相冲突的话 ⇒ 容易选错 ✗ 用户实测就选了 split ✗）
+_TIDY_ACTIONS_ALL = (
+    "keep=继续常驻；"
+    "extract=这条信息已能被事实覆盖 → 用 facts 提炼出来，原条移出常驻；"
+    "archive=不再需要常驻（过期、一次性、已被取代）→ 直接移出常驻；"
+    "split=一条里既有必须留下的约束、又有可转事实的内容 → 给 facts + keep_content（只留约束那段）。"
+    "每条都可以顺带修正 category / importance"
+    "（觉得该换类别、或其实更重要，就一并改掉）。"
+    "判断标准：能按需召回的信息不该占每轮的席位，只有必须每轮在场的约束才 keep。"
+)
+
+_TIDY_ACTIONS_FORCED = (
+    "这条是用户手动指定的，**必须离开活跃记忆**，所以只有两种处置："
+    "extract=这条信息已能被事实覆盖 → 用 facts 提炼出来，原条移出常驻（**信息还有用就选它**）；"
+    "archive=确实不再需要常驻（过期、一次性、已被取代）→ 直接移出常驻。"
+    "两种都可以顺带修正 category / importance。"
+    "约束也照此办：其中的规矩、偏好、要求，用 extract 写成事实（写完整、给相应 importance）。"
 )
 
 
-def build_instruction(purpose, cfg):
+def build_instruction(purpose, cfg, forced=False):
     if purpose == "compress":
         return (
             "压缩输出只含summary和facts；至多12条事实。"
@@ -220,14 +239,11 @@ def build_instruction(purpose, cfg):
             + cfg.compress_instruction
         )
     if purpose == "tidy":
+        # 不强制 ⇒ 原清单（逐字不变 ✓）；强制 ⇒ 只有 extract/archive 的自洽清单 ✓
         return (
             "整理输出只含 items，每条给一个处置："
-            "keep=继续常驻（可顺带修正 category/importance）；"
-            "extract=这条信息已能被事实覆盖 → 用 facts 提炼出来，原条移出常驻；"
-            "archive=不再需要常驻（过期、一次性、已被取代）→ 直接移出常驻；"
-            "split=一条里既有必须留下的约束、又有可转事实的内容 → 给 facts + keep_content（只留约束那段）。"
-            "判断标准：能按需召回的信息不该占每轮的席位，只有必须每轮在场的约束才 keep。"
-            "facts[].subject 用 who 表里的稳定实体 ID；每条都要写 reason。"
+            + (_TIDY_ACTIONS_FORCED if forced else _TIDY_ACTIONS_ALL)
+            + "facts[].subject 用 who 表里的稳定实体 ID；每条都要写 reason。"
             "不要为了省事整批 archive：留下真正约束性的内容。"
         )
     if purpose == "fact_merge":
@@ -891,13 +907,13 @@ class Engine:
                 return entity_id
         return value
 
-    async def structured(self, contract, purpose, payload, cfg, retry_timeout=True, extra=""):
+    async def structured(self, contract, purpose, payload, cfg, retry_timeout=True, forced=False):
         model = (
             cfg.compress_model
             if purpose in ("compress", "fact_merge")
             else cfg.audit_model
         )
-        instruction = COMMON_INSTRUCTION + build_instruction(purpose, cfg) + (extra or "")
+        instruction = COMMON_INSTRUCTION + build_instruction(purpose, cfg, forced=forced)
         # 先用手写紧凑声明（省 1000+ 字）；没有对应条目才退回自动 schema
         schema = COMPACT_SCHEMAS.get(purpose) or strip_schema_titles(
             contract.model_json_schema()
@@ -1806,8 +1822,8 @@ class Engine:
             },
             cfg,
             # ★ 2026-09-19：**只有 rebuild（强制）时**才追加"不允许 keep"
-            #   正常 tidy ⇒ extra="" ⇒ 指令与行为**一个字节都不变**
-            extra=(REBUILD_BAN if rebuild else ""),
+            #   正常 tidy ⇒ 走 _TIDY_ACTIONS_ALL ⇒ 指令与行为**一个字节都不变** ✓
+            forced=rebuild,   # ★ 强制 ⇒ 用自洽清单（只有 extract/archive ✓）
         )
         return await self.apply_tidy(sid, candidates, aliases, names, output, job_id)
 

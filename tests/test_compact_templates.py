@@ -192,7 +192,9 @@ def test_every_purpose_has_explicit_instruction_branch():
     """
     code = _engine_code()
     used = set(re.findall(r'structured\(\s*[\w.]+\s*,\s*"(\w+)"', code))
-    m = re.search(r'def build_instruction\(purpose, cfg\):(.*?)\ndef ', code, re.S)
+    # ⚠️ 别写死签名 ✗（2026-09-19 实际踩到：给 build_instruction 加了个可选参数
+    #    forced=False ⇒ 写死 (purpose, cfg) 的守卫立刻匹配不到 ⇒ 整条守卫失效 ✗）
+    m = re.search(r'def build_instruction\(purpose, cfg[^)]*\):(.*?)\ndef ', code, re.S)
     assert m, "找不到 build_instruction ✗"
     explicit = set(re.findall(r'purpose == "(\w+)"', m.group(1)))
     missing = sorted(used - explicit)
