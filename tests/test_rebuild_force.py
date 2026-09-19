@@ -21,7 +21,11 @@ SCHEMA = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
 
 def test_rebuild_ban_exists_and_forbids_keep():
     assert "REBUILD_BAN = (" in ENG, "必须有强制用的附加指令"
-    assert "不允许输出 keep" in ENG, "强制时必须**明确禁止 keep**"
+    assert "不允许输出 keep" in ENG, "强制时必须明确禁止 keep"
+    # 2026-09-19 用户追加要求（实测踩到）：split 会留一条活跃的 ⇒ 目的落空
+    assert "也不允许输出 split" in ENG, "强制时还必须禁止 split（否则原条仍活跃）"
+    assert "只能给 extract 或 archive" in ENG, "必须指明只剩两条路"
+    assert "请用 split 把约束部分留下" not in ENG, "旧的用 split 留约束的逃生门必须删掉"
 
 
 def test_normal_tidy_gets_no_extra_instruction():
@@ -62,6 +66,9 @@ def test_frontend_offers_both_modes_with_rebuild_default():
     assert 'value="rule"' in APP, "也要能选「按规则」"
     assert 'rebuild: mode === "rebuild"' in APP, "选择要真的传到后端"
     assert "可在永久记忆页面对单条强制重新提取事实" in APP, "全局那行小字（用户原话）"
+    # ★ 确认后必须离开编辑界面 ✓（用户要求）
+    assert '$("#editor").close();' in APP, "确认后必须关掉编辑弹窗 ✓"
+    assert "这条一定会离开活跃记忆" in APP, "弹窗里要有取舍说明 ✓（用户要求补说明 ✓）"
 
 
 def test_no_locals_in_engine_worker():

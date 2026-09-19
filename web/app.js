@@ -1144,7 +1144,7 @@ function renderRecord() {
         '<label class="field tidy-opt"><input type="radio" name="remode" value="rule">' +
         '<span>按规则整理<small class="muted">模型可以判定"这条不用动"，token 花得更少</small></span></label>' +
         '<label class="field tidy-opt"><input type="radio" name="remode" value="rebuild" checked>' +
-        '<span>完全重新提取<small class="muted">本次不允许保留原样，一定会给出处理动作；token 花得更多</small></span></label>' +
+        '<span>完全重新提取<small class="muted">本次不允许保留原样，一定会给出处理动作；token 花得更多。这条一定会离开活跃记忆（信息会落成事实保留）；想让它继续活跃请选「按规则整理」。</small></span></label>' +
         '<div class="actions"><button id="reCancel">取消</button>' +
         '<button id="reOk" class="primary">开始</button></div>';
       document.body.appendChild(d);
@@ -1181,10 +1181,15 @@ function renderRecord() {
         });
         toast(
           mode === "rebuild"
-            ? "已开始完全重新提取（本次不允许保留原样）· 稍后看任务明细"
+            ? "已开始完全重新提取（这条会离开活跃记忆，信息落成事实保留）· 稍后看任务明细"
             : "已开始重新提取（按规则）· 稍后看任务明细",
         );
+        // ★ 用户要求：确认后**不要停留在编辑界面** ⇒ 关弹窗 + 回永久记忆列表并刷新 ✓
+        $("#editor").close();
         await poll();
+        // 与"保存后"同一套约定 ✓（tab 为模块级变量 ✓ 与既有代码一致 ✓）
+        if (tab === "archives") await loadArchives();
+        if (tab === "profiles") await loadFacts();
       });
   }
   $("#delete").classList.remove("hide");
