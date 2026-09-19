@@ -107,3 +107,37 @@ def test_no_locals_in_engine_worker():
     assert 'locals()' not in ENG, '引擎里不许用 locals() ✗（循环内不随迭代清空 ✓）'
     assert '_force, _ids, _rebuild = False, None, False' in ENG, '运行器每轮必须重置三个变量 ✓'
     assert 'rebuild=_rebuild,' in ENG, '必须直接引用 ✓'
+
+
+def test_queue_tidy_all_detail_carries_rebuild():
+    """★ 静默丢参检查（2026-09-19 自查发现）
+
+    `queue_tidy_all` 原来只在 `if force or ids:` 时才构造 detail ✗
+    ⇒ 若将来有人"只传 rebuild"⇒ detail 为空 ⇒ 引擎解出来 rebuild=False
+    ⇒ **静默退化成普通整理** ✗（最难查的那种 bug ✓）
+    ⇒ 判据：detail 的条件里必须有 rebuild ✓ 且 detail 内容要带 rebuild ✓
+    """
+    assert "if force or ids or rebuild:" in MAIN, "detail 条件必须含 rebuild ✓"
+    assert '"rebuild": bool(rebuild)' in MAIN, "detail 里必须带 rebuild ✓"
+
+
+def test_four_paths_are_distinguished():
+    """★ 四条链路的"区分"守住（用户要求逐条确认 ✓）
+
+    ① 自动链路（冷却/容量/合并后）⇒ 只 enqueue，**不带 detail** ✓
+    ② 入库后顺手整理 ⇒ automatic=False ✓ 不带 detail ✓
+    ③ 前端全局 ⇒ 只可能 force ✓ **绝不 rebuild** ✓
+    ④ bot ⇒ rebuild 需 单条 + 开关 + 冷却 ✓
+    """
+    # ①
+    assert 'enqueue("tidy", job["sid"], automatic=True)' in ENG
+    assert 'enqueue("tidy", sid, automatic=True)' in ENG
+    # ②
+    assert 'enqueue("tidy", value.sid, automatic=False)' in MAIN
+    # ③ 前端全局：force 由模式决定，但没有 rebuild ✓
+    assert 'payload.force = mode === "all";' in APP
+    assert "rebuild" not in APP[APP.index('payload.force = mode === "all"') - 400 : APP.index('payload.force = mode === "all"') + 400], \
+        "全局整理那段不许出现 rebuild ✗"
+    # ④ bot 三道闸门 ✓
+    for gate in ("rebuild_requires_single_id", "rebuild_disabled_by_setting", "rebuild_cooldown"):
+        assert gate in MAIN, "bot 缺闸门：%s" % gate

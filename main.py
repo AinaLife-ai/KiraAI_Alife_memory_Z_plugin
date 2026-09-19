@@ -998,7 +998,8 @@ class AlifeMemoryPlugin(BasePlugin):
             owners.add(fallback_sid)
         # 把 force / ids 塞进任务的 detail ✓（引擎会把 JSON 解出来 ✓）
         detail = ""
-        if force or ids:
+        # ★ 2026-09-19：`rebuild` 也必须进 detail ✗ 否则"单传 rebuild"会被**静默丢成普通整理** ✓
+        if force or ids or rebuild:
             detail = json.dumps({"force": bool(force), "ids": list(ids or []), "rebuild": bool(rebuild)},
                                 ensure_ascii=False)
         for owner in sorted(owners):
