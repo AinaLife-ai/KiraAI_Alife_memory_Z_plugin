@@ -106,6 +106,8 @@ const fields = {
   profile_summary_count: "画像摘要条数",
   search_active_only: "检索默认只搜常驻",
   cold_after_days: "归档转入冷归档天数",
+  tidy_rebuild_bot_enabled: "允许 Bot 强制重提取单条事实",
+  tidy_rebuild_bot_cooldown_minutes: "Bot 强制重提取的间隔（分钟）",
 };
 let ctx = null,
   tab = "home",
@@ -1128,17 +1130,60 @@ function renderRecord() {
     re.textContent = "重新提取事实";
     $("#forget").insertAdjacentElement("afterend", re);
   }
+  // ★ 2026-09-19（用户要求）：同风格弹窗 ⇒ 让用户选"按规则"还是"完全重新提取"
+  //   完全重新提取 = 本次**不允许 keep** ⇒ 一定会给出动作（不会再"点了没反应"）
+  //   用仓库既有的 <dialog class="dialog"> + 既有 class ✓ 保持风格一致
+  const askReextractMode = () =>
+    new Promise((resolve) => {
+      const d = document.createElement("dialog");
+      d.className = "dialog";
+      d.innerHTML =
+        '<div class="panel-title"><h2>重新提取事实</h2>' +
+        '<button id="reClose" aria-label="关闭">×</button></div>' +
+        '<p class="muted">这会针对这一条常驻记忆重新核对它与原文的关系。</p>' +
+        '<label class="field tidy-opt"><input type="radio" name="remode" value="rule">' +
+        '<span>按规则整理<small class="muted">模型可以判定"这条不用动"，token 花得更少</small></span></label>' +
+        '<label class="field tidy-opt"><input type="radio" name="remode" value="rebuild" checked>' +
+        '<span>完全重新提取<small class="muted">本次不允许保留原样，一定会给出处理动作；token 花得更多</small></span></label>' +
+        '<div class="actions"><button id="reCancel">取消</button>' +
+        '<button id="reOk" class="primary">开始</button></div>';
+      document.body.appendChild(d);
+      const done = (v) => {
+        d.close();
+        d.remove();
+        resolve(v);
+      };
+      d.querySelector("#reClose").onclick = () => done(null);
+      d.querySelector("#reCancel").onclick = () => done(null);
+      d.querySelector("#reOk").onclick = () => {
+        const picked = d.querySelector('input[name="remode"]:checked');
+        done(picked ? picked.value : "rebuild");
+      };
+      d.addEventListener("cancel", (ev) => {
+        ev.preventDefault();
+        done(null);
+      });
+      d.showModal();
+    });
+
   if (re) {
     re.classList.toggle("hide", !r.permanent);
     re.onclick = () =>
       guard(async () => {
+        const mode = await askReextractMode();
+        if (!mode) return;
         await api("/jobs", {
           kind: "tidy",
           sid: r.sid,
-          force: true,        // 无视冷却 ✓
-          ids: [r.id],        // 只这一条 ✓
+          force: true,                 // 无视冷却 ✓
+          ids: [r.id],                 // 只这一条 ✓
+          rebuild: mode === "rebuild", // 完全重新提取 ⇒ 本次不允许 keep ✓
         });
-        toast("已开始重新提取（无视冷却）· 稍后看任务明细");
+        toast(
+          mode === "rebuild"
+            ? "已开始完全重新提取（本次不允许保留原样）· 稍后看任务明细"
+            : "已开始重新提取（按规则）· 稍后看任务明细",
+        );
         await poll();
       });
   }
@@ -1994,6 +2039,10 @@ function askTidyMode() {
       '<span><b>全部重新整理</b>' +
       '<small class="muted">无视冷却，把每个会话常驻的永久记忆都过一遍；' +
       'token 花得更多，但会重新提取事实</small></span></label>' +
+      // ★ 2026-09-19（用户要求）：全局**不做**"完全重新提取"（会连本来好好的事实一起重写），
+      //   这里只给一句指引小字 ✓
+      '<p class="muted">如果有你认为没有提取到位、想重复自动提取的，' +
+      '可在永久记忆页面对单条强制重新提取事实。</p>' +
       '<div class="actions"><button id="tidyCancel">取消</button>' +
       '<button id="tidyGo" class="primary">开始</button></div>';
     document.body.appendChild(d);

@@ -983,7 +983,7 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception as exc:  # 清理只是让老数据更好用，失败不影响任何功能
             logger.warning("[记忆·Z] 存量记录清理失败（下次启动会重试）：%s", exc)
 
-    async def queue_tidy_all(self, fallback_sid="", automatic=True, force=False, ids=None):
+    async def queue_tidy_all(self, fallback_sid="", automatic=True, force=False, ids=None, rebuild: bool = False):
         """把所有有永久记忆的会话都排上整理（去重/提炼/归档都按归属会话执行）。
 
         `force=True` ⇒ **无视冷却** ✓（工作台"全部重新整理" / bot 指定 ✓）
@@ -999,7 +999,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # 把 force / ids 塞进任务的 detail ✓（引擎会把 JSON 解出来 ✓）
         detail = ""
         if force or ids:
-            detail = json.dumps({"force": bool(force), "ids": list(ids or [])},
+            detail = json.dumps({"force": bool(force), "ids": list(ids or []), "rebuild": bool(rebuild)},
                                 ensure_ascii=False)
         for owner in sorted(owners):
             await self.engine.enqueue("tidy", owner, automatic=automatic, detail=detail)
@@ -2801,6 +2801,14 @@ class AlifeMemoryPlugin(BasePlugin):
                         "把常驻的永久记忆整个重新过一遍（会重新提取事实 ✗ 更耗 token ✓）"
                     ),
                 },
+                "rebuild": {
+                    "type": "boolean",
+                    "description": (
+                        "仅 action=tidy 且带 ids（单条）时有效：true = 本次强制重新提取，"
+                        "不允许保留原样，一定会给出处理动作（更耗 token）。"
+                        "不带 ids 会被拒绝——全局强制会把本来好好的事实也重写一遍。"
+                    ),
+                },
                 "ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -3257,8 +3265,7 @@ class AlifeMemoryPlugin(BasePlugin):
         patch=None,
         content="",
         reason="",
-        force=False,
-    ):
+        force=False, rebuild: bool = False):
         """记忆维护的统一入口：改字段 / 合并 / 软删 / 恢复 / 归档 / 刷新昵称 / 触发整理。"""
         cfg = self.runtime_settings()
         if not cfg.enabled:
@@ -3272,6 +3279,43 @@ class AlifeMemoryPlugin(BasePlugin):
 
         if action == "tidy":
             cfg = self.runtime_settings()
+            # ★ 2026-09-19（用户定的规矩）：完全重新提取（禁 keep）**只准单条**
+            #   + 两个设置门：开关、冷却（设置必须真被用上——判据会查）
+            #   ⚠️ 兼容具名参数 / **kwargs 两种形态；取不到就当 False，绝不影响其它 action
+            _rebuild = bool(rebuild)   # 具名参数（见 correct 的签名 ✓）
+            if _rebuild:
+                if not targets:
+                    return dump(
+                        {
+                            "ok": False,
+                            "error": "rebuild_requires_single_id",
+                            "hint": "「完全重新提取」只能针对单条：请带上 ids（某一条永久记忆）。"
+                            "全局整理请用 force=true。",
+                        }
+                    )
+                if not getattr(cfg, "tidy_rebuild_bot_enabled", True):
+                    return dump(
+                        {
+                            "ok": False,
+                            "error": "rebuild_disabled_by_setting",
+                            "hint": "面板设置里已关闭「允许 Bot 强制重提取单条事实」。",
+                        }
+                    )
+                _cool = int(getattr(cfg, "tidy_rebuild_bot_cooldown_minutes", 60) or 0)
+                if _cool > 0:
+                    if not hasattr(self, "_rebuild_at"):
+                        self._rebuild_at = {}
+                    _key = tuple(sorted(targets))[:1]
+                    _last = self._rebuild_at.get(_key, 0)
+                    if time.time() - _last < _cool * 60:
+                        return dump(
+                            {
+                                "ok": False,
+                                "error": "rebuild_cooldown",
+                                "hint": "距上次强制重新提取不足 %d 分钟，请稍后再试。" % _cool,
+                            }
+                        )
+                    self._rebuild_at[_key] = time.time()
             reset = [await self.store.call("real_id", value) for value in targets]
             owners = set()
             if reset:
@@ -3287,14 +3331,18 @@ class AlifeMemoryPlugin(BasePlugin):
             # ⚠️ 强制时必须 automatic=False ✗ 否则会被调度门（can_schedule）挡掉 ✓
             import json as _json
             _detail = _json.dumps(
-                {"force": bool(force), "ids": targets or []}, ensure_ascii=False
+                {"force": bool(force), "ids": targets or [], "rebuild": bool(_rebuild)}, ensure_ascii=False
             )
             if not owners:
                 if cfg.recall_scope == "global":
                     owners = set(
                         await self.queue_tidy_all(
                             automatic=False,  # bot 发起的 ⇒ 要有日志 ✓
-                            fallback_sid=event.sid, force=bool(force), ids=targets or None)
+                            fallback_sid=event.sid,
+                            force=bool(force),
+                            ids=targets or None,
+                            rebuild=_rebuild,
+                        )
                     )
                 else:
                     owners.add(event.sid)
@@ -3834,6 +3882,14 @@ class AlifeMemoryPlugin(BasePlugin):
         if value.kind == "reindex" and not self.settings.semantic_enabled:
             raise HTTPException(409, "optional vector search is disabled")
         if value.kind == "tidy":
+            # ★ 2026-09-19（用户定的规矩）：完全重提取**只能对单条** ✓
+            #   全局强制会把"本来好好的"事实也重写一遍 ✗（质量风险 ✓）
+            if value.rebuild and not value.ids:
+                raise HTTPException(
+                    400,
+                    "「完全重新提取」只能针对单条永久记忆：请在「永久记忆」页面"
+                    "对具体一条操作。全局整理请用「忽略冷却整理」或「按冷却整理」。",
+                )
             # 永久记忆的成本是全局的（默认 recall_scope=global 时，
             # 任何会话都在付所有会话的永久记忆），所以工作台的这个按钮
             # 也按「所有有意久记忆的会话」排队，与 Bot 的 tidy 一致。
@@ -3844,6 +3900,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   ⇒ 工作台的「全部重新整理」根本不会无视冷却 ✗（用户实测 ✓）
                 force=value.force,
                 ids=(value.ids or None),
+                rebuild=bool(value.rebuild and value.ids),   # 只对单条生效 ✓
             )
             return {
                 "id": "",

@@ -762,7 +762,9 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
     def test_queue_tidy_all_accepts_automatic_flag(self):
         import inspect
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
-        self.assertIn("async def queue_tidy_all(self, fallback_sid=\"\", automatic=True, force=False, ids=None)", src)
+        self.assertIn(
+            "async def queue_tidy_all(self, fallback_sid=\"\", automatic=True, force=False, ids=None", src
+        )
         self.assertIn('enqueue("tidy", owner, automatic=automatic', src)
 
     def test_bot_and_workbench_call_it_as_manual(self):

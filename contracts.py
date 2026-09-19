@@ -322,6 +322,11 @@ class Settings(Strict):
     permanent_budget_chars: int = Field(default=3000, ge=200, le=100000)
     permanent_tidy_batch: int = Field(default=10, ge=1, le=100)
     permanent_tidy_days: int = Field(default=14, ge=0, le=3650)
+    # ★ 2026-09-19（用户定的规矩）：**完全重新提取**只能对**单条** ✓
+    #   全局（工作台弹窗 / Bot 全局）一律禁止 ✗ ⇒ /jobs 会拦 ✓
+    #   理由：全局强制会把"本来好好的"事实也重写一遍 ✗（质量风险 ✓ 不只是 token ✓）
+    tidy_rebuild_bot_enabled: bool = True
+    tidy_rebuild_bot_cooldown_minutes: int = Field(default=60, ge=0, le=10080)
     fact_merge_cross_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     fact_merge_evidence: bool = True
     # 轮换槽位：在"同样相关"的候选里，优先把还没被召回过的那几条补进来
@@ -522,6 +527,10 @@ class Job(Strict):
     # 前端「立即重新整理」/ 后台弹窗「全部重新整理」/ 单条「重新提取事实」都用它 ✓
     force: bool = False
     ids: list[str] | None = None
+    # ★ 2026-09-19（用户定的规矩）：**完全重新提取**（本次"不允许 keep"⇒ 一定会给出动作 ✓）
+    #   ⚠️ **只能对单条** ✗（必须带 ids ✓）—— 全局强制会把"本来好好的"事实
+    #      也重写一遍 ✗（质量风险 ✓ 不只是 token ✓）⇒ /jobs 直接拦 ✓
+    rebuild: bool = False
     # tidy 也允许手动排队：Bot 用 CorrectMemory(action=tidy) 触发，
     # 工作台的这个按钮走同一条链路。
     kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite"]
