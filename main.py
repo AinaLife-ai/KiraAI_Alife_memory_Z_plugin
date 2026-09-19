@@ -3899,6 +3899,23 @@ class AlifeMemoryPlugin(BasePlugin):
         value = await self.body(request, Job)
         if value.kind == "reindex" and not self.settings.semantic_enabled:
             raise HTTPException(409, "optional vector search is disabled")
+        if value.kind == "dedupe":
+            # ★ 2026-09-19（用户实测）：工作台的「合并相似永久记忆」**原来不是全局的** ✗
+            #   它落到下面兜底 ⇒ enqueue("dedupe", value.sid) ⇒ **只合并选中的那个会话** ✗
+            #   （其它会话只能靠定时调度慢慢轮 ✓ 用户点了"全局"却只跑一个 ✗）
+            #   ⇒ 与「整理永久记忆」同一套：按**所有有永久记忆的会话**排队 ✓
+            if not self.settings.permanent_dedupe:
+                raise HTTPException(409, "永久记忆去重已关闭（设置里开启后再试）")
+            owners = set(await self.store.call("sessions_with_permanents"))
+            if value.ids and value.sid:
+                owners.add(value.sid)      # 指定单条时才并发起会话 ✓（与 tidy 同规则 ✓）
+            for owner in sorted(owners):
+                await self.engine.enqueue("dedupe", owner, automatic=False)   # 手动 ⇒ 有日志 ✓
+            return {
+                "id": "",
+                "state": "queued",
+                "sessions": len(owners),
+            }
         if value.kind == "tidy":
             # ★ 2026-09-19（用户定的规矩）：完全重提取**只能对单条** ✓
             #   全局强制会把"本来好好的"事实也重写一遍 ✗（质量风险 ✓）

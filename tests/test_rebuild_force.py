@@ -201,3 +201,19 @@ def test_global_tidy_does_not_union_selected_session():
     """
     assert "if ids and fallback_sid:" in MAIN, "只有指定单条时才 fallback ✓"
     assert "if fallback_sid:\n            owners.add(fallback_sid)" not in MAIN, "旧的全局并入必须去掉 ✓"
+
+
+def test_global_dedupe_button_is_global():
+    """★ 用户实测：工作台「合并相似永久记忆」原来**只合并选中的那个会话** ✗
+
+    它落到 /jobs 的兜底 `enqueue(value.kind, value.sid)` ⇒ 其它会话要等定时调度 ✗
+    现在与「整理永久记忆」同一套：按**所有有永久记忆的会话**排队 ✓
+    """
+    assert 'if value.kind == "dedupe":' in MAIN, "必须有独立的 dedupe 分支 ✓"
+    seg = MAIN.split('if value.kind == "dedupe":')[1][:900]
+    assert "sessions_with_permanents" in seg, "必须按所有会话排队 ✓"
+    assert 'enqueue("dedupe", owner' in seg, "每个会话各排一个 ✓"
+    assert "permanent_dedupe" in seg, "关闭去重时要明确拒绝（别排空任务 ✗）"
+    # tidy 那条也要保持全局 ✓（两条对齐）
+    seg2 = MAIN.split('if value.kind == "tidy":')[1][:2000]
+    assert "queue_tidy_all" in seg2, "整理仍是全局 ✓"
