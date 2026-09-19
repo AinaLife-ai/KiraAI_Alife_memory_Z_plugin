@@ -427,10 +427,10 @@
         "maximum": 3650
       },
       "tidy_rebuild_bot_enabled": {
-        "type": "boolean",
+        "type": "switch",
         "name": "允许 Bot 强制重提取单条事实",
         "default": true,
-        "description": "允许 Bot 对单条永久记忆强制重新提取事实。开启后她可以要求本次不许保留原样，所以一定会给出处理动作。只对单条生效，避免把本来好好的事实也重写一遍。"
+        "description": "允许 Bot 对单条永久记忆强制重新提取事实。开启后她可以要求本次不许保留原样，所以一定会给出处理动作。这条一定会离开活跃记忆（信息落成事实保留）；想让它继续活跃请用【按规则整理】。只对单条生效，避免把本来好好的事实也重写一遍。"
       },
       "tidy_rebuild_bot_cooldown_minutes": {
         "type": "integer",

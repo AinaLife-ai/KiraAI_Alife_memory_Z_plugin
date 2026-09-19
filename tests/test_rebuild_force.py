@@ -19,23 +19,47 @@ APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 SCHEMA = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))
 
 
-def test_rebuild_ban_exists_and_forbids_keep():
-    assert "REBUILD_BAN = (" in ENG, "必须有强制用的附加指令"
-    assert "不允许输出 keep" in ENG, "强制时必须明确禁止 keep"
-    # 2026-09-19 用户追加要求（实测踩到）：split 会留一条活跃的 ⇒ 目的落空
-    assert "也不允许输出 split" in ENG, "强制时还必须禁止 split（否则原条仍活跃）"
-    assert "只能给 extract 或 archive" in ENG, "必须指明只剩两条路"
-    assert "请用 split 把约束部分留下" not in ENG, "旧的用 split 留约束的逃生门必须删掉"
+def test_forced_instruction_is_self_consistent():
+    """★ 2026-09-19（用户要求）：强制那次不能同时出现互相冲突的选项
+
+    原来做法 = 原指令 + 追加一句禁令 ✗ ⇒ 模型同时看到"keep=…split=…"与
+    "不允许 keep/split" ⇒ 两套冲突的话 ⇒ 用户实测就选了 split ✗
+    现在 = **换一套自洽清单** ✓ 强制版里**完全不出现** keep= / split= ✓
+    """
+    assert "_TIDY_ACTIONS_FORCED = (" in ENG, "必须有强制专用清单"
+    forced = ENG[ENG.index("_TIDY_ACTIONS_FORCED = (") :]
+    forced = forced[: forced.index("\n)\n")]
+    assert "keep=" not in forced, "强制版里不许出现 keep ✗（会与'必须离开活跃'冲突 ✓）"
+    assert "split=" not in forced, "强制版里不许出现 split ✗"
+    assert "keep_content" not in forced, "强制版里不许出现 keep_content ✗"
+    assert "extract=" in forced and "archive=" in forced, "必须给出 extract/archive 两条路 ✓"
+    # 调用点必须真的把 forced 传下去 ✓
+    assert "forced=rebuild" in ENG, "引擎必须按 rebuild 切换清单 ✓"
+    assert "_TIDY_ACTIONS_FORCED if forced else _TIDY_ACTIONS_ALL" in ENG, "必须二选一 ✓"
 
 
-def test_normal_tidy_gets_no_extra_instruction():
-    """★ ② 不强制 ⇒ 一个字节都不变（用户最在意的一条）"""
-    assert 'extra=(REBUILD_BAN if rebuild else "")' in ENG, "只有 rebuild 才追加禁令"
-    # 正常路径绝不带禁令
-    assert 'extra=REBUILD_BAN' not in ENG, "不许无条件追加 ✗"
-    # 正常 tidy 的提示词原文仍在（未被改动）
-    assert "keep=继续常驻" in ENG and "只有必须每轮在场的约束才 keep" in ENG, \
-        "原有 tidy 规则必须原样保留 ✗"
+def test_normal_tidy_instruction_is_byte_identical():
+    """★ 用户最在意的一条：**不强制时，规则与提示词一个字都不动** ✓
+
+    强制那次换成自洽清单 ✓，但"不强制"必须仍走**原清单**（逐字保留 ✓）
+    """
+    assert "_TIDY_ACTIONS_ALL = (" in ENG, "必须保留原始清单常量"
+    allb = ENG[ENG.index("_TIDY_ACTIONS_ALL = (") :]
+    allb = allb[: allb.index("\n)\n")]
+    # 原版四件事必须一字不少 ✓
+    for piece in (
+        "keep=继续常驻（可顺带修正 category/importance）；",
+        "extract=这条信息已能被事实覆盖 → 用 facts 提炼出来，原条移出常驻；",
+        "archive=不再需要常驻（过期、一次性、已被取代）→ 直接移出常驻；",
+        "split=一条里既有必须留下的约束、又有可转事实的内容 → 给 facts + keep_content（只留约束那段）。",
+        "判断标准：能按需召回的信息不该占每轮的席位，只有必须每轮在场的约束才 keep。",
+    ):
+        assert piece in allb, "原清单缺了：%s" % piece
+    # 分支必须真的二选一（不强制走原版 ✓）
+    assert "_TIDY_ACTIONS_FORCED if forced else _TIDY_ACTIONS_ALL" in ENG
+    # 两版共用的尾巴仍在 ✓
+    assert "facts[].subject 用 who 表里的稳定实体 ID；每条都要写 reason。" in ENG
+    assert "不要为了省事整批 archive：留下真正约束性的内容。" in ENG
 
 
 def test_bot_rebuild_only_accepts_single_id():
