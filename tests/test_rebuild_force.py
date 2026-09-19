@@ -34,7 +34,11 @@ def test_forced_instruction_is_self_consistent():
     assert "keep_content" not in forced, "强制版里不许出现 keep_content ✗"
     assert "extract=" in forced and "archive=" in forced, "必须给出 extract/archive 两条路 ✓"
     # 用户追问：强制里也要说清"能不能顺带修正类别/重要度" ✓（契约里两者都是独立字段 ✓）
-    assert "顺带修正这条的 category / importance" in forced, "强制版必须写明可顺带修正 ✓"
+    assert "顺带修正 category / importance" in forced, "强制版必须写明可顺带修正 ✓"
+    # 取向必须与"非强制版"一致 ✓（用户点出的坑：别让模型以为"只有约束才提取"✗）
+    assert "信息还有用就选它" in forced, "extract 必须写明是默认取向 ✓"
+    assert "若其中还含着" not in forced, "不许再出现\"若…才 extract\"的误导写法 ✗"
+    assert "约束也照此办" in forced, "约束要并入同一套规则（不是特殊通道 ✓）"
     # 调用点必须真的把 forced 传下去 ✓
     assert "forced=rebuild" in ENG, "引擎必须按 rebuild 切换清单 ✓"
     assert "_TIDY_ACTIONS_FORCED if forced else _TIDY_ACTIONS_ALL" in ENG, "必须二选一 ✓"
@@ -50,11 +54,14 @@ def test_normal_tidy_instruction_is_byte_identical():
     allb = allb[: allb.index("\n)\n")]
     # 原版四件事必须一字不少 ✓
     for piece in (
-        "keep=继续常驻（可顺带修正 category/importance）；",
+        "keep=继续常驻；",
         "extract=这条信息已能被事实覆盖 → 用 facts 提炼出来，原条移出常驻；",
         "archive=不再需要常驻（过期、一次性、已被取代）→ 直接移出常驻；",
         "split=一条里既有必须留下的约束、又有可转事实的内容 → 给 facts + keep_content（只留约束那段）。",
         "判断标准：能按需召回的信息不该占每轮的席位，只有必须每轮在场的约束才 keep。",
+        # 注意：源码里是**两段拼接** ⇒ 判据按片段匹配 ✗ 别写成一整行 ✓
+        "每条都可以顺带修正 category / importance",
+        "（觉得该换类别、或其实更重要，就一并改掉）。",
     ):
         assert piece in allb, "原清单缺了：%s" % piece
     # 分支必须真的二选一（不强制走原版 ✓）
