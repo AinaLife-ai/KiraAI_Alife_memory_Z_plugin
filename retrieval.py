@@ -774,6 +774,11 @@ try:
     import jieba  # type: ignore
 
     _JIEBA_AVAILABLE = True
+    # 静音 jieba 自己的 DEBUG 输出（每次建词典会打 4 行 ✗ 对用户是噪声 ✓）
+    try:
+        jieba.setLogLevel(logging.WARNING)
+    except Exception:  # pragma: no cover - 老版本没有这个方法
+        pass
 except ImportError:  # pragma: no cover - 取决于环境
     jieba = None  # type: ignore
     _JIEBA_AVAILABLE = False
@@ -781,6 +786,25 @@ except ImportError:  # pragma: no cover - 取决于环境
         "jieba 未安装 ⇒ 中文检索降级为按字切分（功能不受影响，查准率略低）。"
         "建议: pip install jieba（KiraAI 装插件时会自动装 ✓）"
     )
+
+
+def warm_jieba():
+    """**预热**分词词典 ✓ —— 由插件加载时调用（后台线程 ✓ 不阻塞启动 ✓）
+
+    为什么要在加载时做（用户实测）：
+        jieba 首次分词才建词典 ⇒ 日志里出现 `Loading model cost **1.340 seconds**` ✗
+        而且它是**对话进行中**才发生 ✗ ⇒ 那 1.3 秒砸在一次真实回复的链路上 ✓
+    ⇒ 和 KiraOS 一样，把这一步放在**插件初始化**阶段 ✓✓
+    （词典有本地缓存 ✓ 之后每次启动都快 ✓ 这里只是"提前疼一下"✓）
+    """
+    if not _JIEBA_AVAILABLE:
+        return False
+    try:
+        jieba.initialize()
+        return True
+    except Exception:  # pragma: no cover - 预热失败不影响功能（首次用时再建 ✓）
+        _log.warning("jieba 预热失败（不影响功能 ✓ 首次检索时会再尝试 ✓）")
+        return False
 
 
 def score_tokens(query):
