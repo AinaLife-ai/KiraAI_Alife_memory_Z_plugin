@@ -573,6 +573,18 @@ class AlifeMemoryPlugin(BasePlugin):
             "[记忆·Z] 启动中：版本 %s · 加载自 %s",
             self._plugin_version() or "未知", Path(__file__).parent,
         )
+        # ★ 2026-09-19：**预热中文分词词典** ✓（用户实测：首次分词要 1.34s ✗
+        #   而它偏偏发生在**对话进行中** ✗ ⇒ 那 1.3 秒砸在一次真实回复的链路上 ✓）
+        #   ⇒ 放到插件**加载阶段**、且用**后台线程** ✓（不阻塞启动 ✓）
+        #   与 KiraOS 的 initialize() 约定一致 ✓（它也是在这个钩子里做准备 ✓）
+        try:
+            import threading
+
+            from .retrieval import warm_jieba
+
+            threading.Thread(target=warm_jieba, name="z-jieba-warm", daemon=True).start()
+        except Exception:  # pragma: no cover - 预热只是优化，失败绝不影响加载 ✓
+            logger.exception("[记忆·Z] 分词预热启动失败（不影响功能 ✓）")
         try:
             await self.apply_config_migrations()
         except Exception:

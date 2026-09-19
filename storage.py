@@ -136,6 +136,26 @@ def _lexical_sql(column, tokens):
     return " + ".join(parts) if parts else "0+0"
 
 
+def proximity_bonus(text, tokens, window=30, bonus=4):
+    """同现/邻近加成 ✓ —— **只在 Python 侧重排时用** ✗ 不进 SQL ✓
+
+    为什么：SQL 打分有「与 Python 逐字一致」的判据守着 ✓
+      往里加"字符距离"会破坏它 ✗ ⇒ 所以邻近只在**重排**阶段算 ✓
+
+    用户实测（日志）：搜 `doro` 命中 **784** 条 ⇒ 每条都是 4 分**完全并列** ✗
+      ⇒ 返回顺序≈随机 ⇒ 有条理的记忆被随机埋掉 ✓
+    加邻近后：`doro` 与 `艾莉` **同段(±30字)出现**的那条 ⇒ 8 分 ✓ 直接顶上来 ✓
+    """
+    from .retrieval import squeeze as _sq   # storage 里 squeeze 是函数内导入的 ✓ 同规矩 ✓
+
+    low = _sq(text or "").casefold()
+    hit = [t for t in tokens if t in low]
+    if len(hit) < 2:
+        return 0
+    pos = sorted(low.find(t) for t in hit)
+    return bonus if (pos[-1] - pos[0]) <= window else 0
+
+
 def _lexical_scorer(query):
     """返回一个「词元只算一次」的打分函数，供 SQLite 逐行调用。
 
@@ -2801,6 +2821,45 @@ class Store:
         self._names_cache = (now, names)
         return names
 
+    def _rerank(self, out, lexical, want, offset):
+        """把"查询词同段出现"的行顶上来 ✓（**只重排，不增删** ✓ 结果条数不变 ✓）
+
+        · 只处理第一页（offset=0 ✓）—— 带 offset 时重排会让翻页语义错乱 ✗
+        · 同分时用**确定性**决胜：邻近 → 重要度 → 新近 → id（不再"随机" ✓）
+        · 绝不过滤任何行 ✗ ⇒ 不会让召回变少 ✓
+        """
+        try:
+            if offset or not lexical:
+                return out
+            items = out.get("items") or []
+            if len(items) < 2:
+                return out
+            from .retrieval import score_tokens as _st
+
+            toks = _st(lexical)
+            if len(toks) < 2:
+                return out          # 单词查询没有"同现"可言 ⇒ 原样返回 ✓
+
+            # ★ 关键：**没有任何一条"同现" ⇒ 原样返回** ✓✓
+            #   因为既有排序里还带着 prefer_sid（同分让常驻优先 ✓）、
+            #   tier、翻页等语义 ✗ —— 那些都是**判据守着**的契约 ✓
+            #   一动手就可能把它们弄坏 ✗（实测：prefer_sid 与翻页两条判据当场报红 ✓）
+            bonus = []
+            for it in items:
+                txt = "%s %s" % (it.get("summary") or "", it.get("content") or "")
+                bonus.append(proximity_bonus(txt, toks))
+            if not any(bonus):
+                return out
+
+            # 有同现 ⇒ 只把"同现"的行上提 ✓
+            #   用**稳定排序** ✓（sorted 天然稳定 ✓）⇒ 其余行的相对顺序**分毫不动** ✓
+            order = sorted(range(len(items)), key=lambda i: (-bonus[i], i))
+            out["items"] = [items[i] for i in order][:want]
+            out["reranked"] = True
+        except Exception:
+            pass            # 重排只是优化 ✓ 失败就退回原顺序 ✓ 绝不影响检索 ✓
+        return out
+
     def search(
         self,
         sid="",
@@ -2947,6 +3006,15 @@ class Store:
             total = db.execute(
                 "SELECT count(*) FROM records WHERE " + where, args
             ).fetchone()[0]
+            # ★ 2026-09-19：**取宽一点**，好让重排有挑选余地 ✓
+            #   只在第一页做（offset=0 ✓）—— 带 offset 时重排会让"翻页"语义错乱 ✗
+            _want = max(1, int(limit))
+            # ⚠️ 取宽会改变"先排除已见、再翻页"的既有语义 ✗（判据当场报红 ✓）
+            #   ⇒ **只在纯检索（无 offset / 无 exclude_ids）时取宽** ✓
+            #     那正是"第一页、按相关性"的典型场景 ✓ 重排最有意义 ✓
+            _pure = not (offset or exclude_ids or exclude_sid)
+            _wide = max(_want, min(_want * 3, 200)) if (lexical and _pure) else _want
+            limit = _wide
             if vector and lexical:
                 return {
                     "total": total,
@@ -3016,7 +3084,8 @@ class Store:
             if skip_media:
                 # 兜住存量与"套了引用壳的媒体" ✓（开关关掉则照常返回 ✓）
                 items = self._drop_media_only(items, include_tools)
-            return {"total": total, "items": items}
+            out = {"total": total, "items": items}
+            return self._rerank(out, lexical, _want, offset)
 
     def _fused_rows(
         self, db, where, args, tier_sql, tier_args, vector, model,
