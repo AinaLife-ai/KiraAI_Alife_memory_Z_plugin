@@ -2654,6 +2654,20 @@ class AlifeMemoryPlugin(BasePlugin):
         self._own_outputs.add(digest)
         while len(self._own_outputs) > 256:
             self._own_outputs.pop()
+        # ★ 2026-09-19（用户要求）：**主动召回**也顺手排合并检查 ✓（与被动侧同一套零成本判定 ✓）
+        #   出口是同步函数 ✗ ⇒ 用 create_task 不阻塞回复 ✓（与 __init__ 里那几处同一手法 ✓）
+        try:
+            _fids = [
+                f["id"]
+                for f in (value.get("facts") or [])
+                if isinstance(f, dict) and isinstance(f.get("id"), str)
+            ]
+            if len(_fids) >= 2:
+                asyncio.create_task(
+                    self.queue_recall_merges(event.sid, [{"id": i} for i in _fids])
+                )
+        except Exception:
+            logger.debug("[记忆·Z] 主动召回排合并跳过", exc_info=True)
         return text
 
     @on.tool_result(priority=Priority.LOW)
