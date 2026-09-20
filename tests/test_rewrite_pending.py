@@ -288,7 +288,7 @@ class RewriteEngineCase(RewriteCase):
     """引擎侧：降级要打标记，重做要走完整流水线。"""
 
     def test_fallback_marks_rewrite_pending(self):
-        ids = self.seed()
+        _ = self.seed()
 
         async def boom(*args, **kwargs):
             raise ValueError("model output unusable")
@@ -330,7 +330,7 @@ class RewriteEngineCase(RewriteCase):
         线上实测：三组都因为一条多余的「≥2」校验被拒 → 全部降级拼接 ✗
         （merge_facts 本来就会把 target 并进组，所以 ≥2 是多余且自相矛盾的）
         """
-        ids = self.seed(["星月喜欢草莓蛋糕", "星月最爱草莓蛋糕，不吃巧克力的"])
+        _ = self.seed(["星月喜欢草莓蛋糕", "星月最爱草莓蛋糕，不吃巧克力的"])
 
         async def model(*args, **kwargs):
             group = args[-1]["groups"][0]
@@ -361,7 +361,7 @@ class RewriteEngineCase(RewriteCase):
 
     def test_redo_merges_properly_and_clears_flag(self):
         ids = self.seed()
-        target = self.concat_merge(ids)
+        _ = self.concat_merge(ids)
         engine = e.Engine(
             self.store, lambda: c.Settings(), self.merged_reply("星月最爱草莓蛋糕，不吃巧克力"), None, None
         )

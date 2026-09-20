@@ -183,7 +183,6 @@ def main():
 
     print()
     print("═══ VACUUM（无损）═══")
-    before = mb(pathB)
     dbB.execute("delete from records where rowid % 20 = 0")
     dbB.commit()
     mid = mb(pathB)

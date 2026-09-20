@@ -35,7 +35,7 @@ async def test_audit_invalid_record_id_retries_before_store_write(tmp_path):
     rid = store.memorize("a:dm:u", "喜欢猫", ["a:u"], 1.0, 1.0)
     user_src = _user_record(store, "a:dm:u", "我喜欢猫", ["a:u"], 2.0)
     with store.connect() as db:
-        fid = store._add_fact(
+        _ = store._add_fact(
             db,
             "a:dm:u",
             dict(

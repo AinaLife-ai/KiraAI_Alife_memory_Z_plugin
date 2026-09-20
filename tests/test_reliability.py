@@ -398,7 +398,6 @@ async def test_memo_cache_hits_until_write(tmp_path):
     if not os.environ.get("KIRA_CORE"):
         pytest.skip("set KIRA_CORE for host integration")
     import sys as _sys
-    import types
     from pathlib import Path as _Path
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))

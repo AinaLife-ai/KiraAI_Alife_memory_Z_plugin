@@ -9,7 +9,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 package = types.ModuleType("alife_compact_test")
@@ -115,7 +114,7 @@ def test_keyword_is_normalized_before_search():
 
 def test_negative_reply_id_is_normalized_too():
     """★ 2026-09-19 用户真机日志：archive 槽注入 `[Reply ID: -19 content: …]` 原样穿透 ✗
-    原因：旧正则只认 `\d+` ▶ 负数 id 匹配不上 ⇒ 永远走不到新格式 ✓"""
+    原因：旧正则只认 `\\d+` ▶ 负数 id 匹配不上 ⇒ 永远走不到新格式 ✓"""
     out = r.trim_nested(r.clean_text("[Reply ID: -19 content: [你好呀]]", ()))
     assert out == "[Reply: 你好呀]", out
     assert "Reply ID" not in out and "-19" not in out, "负 id 也必须被吃掉：%r" % out

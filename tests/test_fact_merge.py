@@ -195,7 +195,7 @@ class MergeCase(unittest.TestCase):
                 for i in range(4)
             ],
         )
-        rows = [r for r in self.store.active("qq:gm:1") if r["level"] == 0][-4:]
+        _ = [r for r in self.store.active("qq:gm:1") if r["level"] == 0][-4:]
         cfg = c.Settings(compress_batch_mode="records", threshold=4, batch_size=2, probability=1.0)
 
         async def model(*args):
@@ -338,7 +338,7 @@ def test_fact_merge_records_job_items_for_detail_view(tmp_path):
     case.calls = []
     case.setUp = lambda: None
     case.tearDown = lambda: None
-    ids = case.seed()
+    _ = case.seed()
     job_id = store.enqueue("fact_merge", "qq:gm:1")
     store.claim(kind="fact_merge")
 

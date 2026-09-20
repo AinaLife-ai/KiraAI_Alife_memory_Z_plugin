@@ -102,7 +102,7 @@ async def test_followup_recall_returns_new_records_and_tools_continue(tmp_path):
         event = make_event()
         req = LLMRequest()
         await plugin.on_request(event, req)
-        first = json.loads(
+        _ = json.loads(
             next(p.content for p in req.user_prompt if p.name == "alife_memory")
         )
         # v2.18.19：简报不再带码 ✗ → 直接问插件"这次实际注入了哪些 id"✓（等价且更准 ✓）
@@ -158,7 +158,6 @@ async def test_own_recall_result_is_not_captured_as_new_experience(tmp_path):
 
 @pytest.mark.asyncio
 async def test_continuation_excludes_local_context_and_direct_reads(tmp_path):
-    import json
 
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
@@ -189,7 +188,6 @@ async def test_continuation_excludes_local_context_and_direct_reads(tmp_path):
 
 @pytest.mark.asyncio
 async def test_followup_facts_excluded_before_limit(tmp_path):
-    import json
 
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
@@ -503,7 +501,6 @@ async def test_real_core_capture_inject_edit_reload(tmp_path, monkeypatch):
         req.assemble_prompt()
         assert req.messages[-1].role == "user"
         result = await plugin.memorize(event, "一起看流星的约定")
-        import json
 
         record_id = recall_view(result)["id"]
         assert recall_view(await plugin.forget(event, record_id))["ok"]
@@ -623,7 +620,6 @@ class LegacyManager:
 
 @pytest.mark.asyncio
 async def test_safe_migration_disables_after_commit_and_yields_to_user_switch(tmp_path):
-    import json
 
     root = tmp_path / "host-data/memory"
     root.mkdir(parents=True)
@@ -805,7 +801,6 @@ async def test_dynamic_memory_keeps_system_and_history_stable(tmp_path):
 @pytest.mark.asyncio
 async def test_optional_vectors_never_call_provider_when_disabled(tmp_path):
     import asyncio
-    import json
     from fastapi import HTTPException
 
     def forbidden(*args, **kwargs):
@@ -1092,7 +1087,6 @@ def json_request(payload):
 
 @pytest.mark.asyncio
 async def test_profile_tool_and_restore_api(tmp_path):
-    import json
 
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
@@ -1274,9 +1268,9 @@ async def test_injection_hides_pending_and_prefers_important_subjects(tmp_path):
                 )
 
         plugin.store.observe_name("test:firefly", "萤火", source="admin")
-        high = add("test:firefly", "萤火对花生过敏", 9)
-        mid = add("test:firefly", "萤火喜欢甜口蛋糕", 4)
-        low = add("test:other", "另一个人喜欢甜食", 2)
+        _ = add("test:firefly", "萤火对花生过敏", 9)
+        _ = add("test:firefly", "萤火喜欢甜口蛋糕", 4)
+        _ = add("test:other", "另一个人喜欢甜食", 2)
         pending = add("test:firefly", "萤火对坚果也过敏", 8)
         plugin.store.mark_merge_pending([pending])
 
@@ -1748,7 +1742,7 @@ async def test_trash_lists_cold_and_restores(tmp_path):
 
 def make_single_event():
     """on.im_message 收到的是**单条消息**事件（KiraMessageEvent），只有 .message。"""
-    session = Session(adapter_name="test", session_type="dm", session_id="u")
+    _ = Session(adapter_name="test", session_type="dm", session_id="u")
     msg = KiraIMMessage(
         message_id="single",
         self_id="bot",

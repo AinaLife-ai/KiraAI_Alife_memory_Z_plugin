@@ -170,7 +170,7 @@ def test_recall_usage_is_rendered():
 
     且必须在 poll() 内使用返回值（写在函数外会导致 next 未定义 → 按钮全死 ✗，2.17.4 的教训）
     """
-    js = (APP / "app.js").read_text(encoding="utf-8") if "APP" in dir() else (WEB / "app.js").read_text(encoding="utf-8")
+    js = (WEB / "app.js").read_text(encoding="utf-8")
     assert "next.recall_usage" in js and "recallTag" in js
     assert "total_calls" in js and "total_chars" in js
     poll = js[js.index("async function poll()"):]

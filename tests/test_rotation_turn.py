@@ -186,7 +186,7 @@ class TurnRaceCase(unittest.TestCase):
             await main.AlifeMemoryPlugin.rotation_extras(
                 stub, "s", cfg, rows, "k1", text_of, "archive", turn=(1, 111))
             # ★ 模拟"另一个请求把实例属性改脏了" ✗
-            TURN = (9, 999)
+            _ = (9, 999)
             # 传入 (2, 222) → 必须按**参数**判定为新一轮 ✓（而不是被脏值影响）
             await main.AlifeMemoryPlugin.rotation_extras(
                 stub, "s", cfg, rows, "k1", text_of, "archive", turn=(2, 222))
