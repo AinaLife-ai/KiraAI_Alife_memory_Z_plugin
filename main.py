@@ -1830,6 +1830,9 @@ class AlifeMemoryPlugin(BasePlugin):
         asyncio.create_task(
             self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
         )
+        # ★ 冷归档（P7）：后台自动跑一次（内部有 6 小时节流 ✓ 未启用则立刻返回 ✓
+        #   真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
+        asyncio.create_task(self._cold_auto_once())
 
     @on.llm_request(priority=Priority.LOW)
     async def on_request(self, event, req: LLMRequest, *_):
@@ -3742,6 +3745,45 @@ class AlifeMemoryPlugin(BasePlugin):
                         "kind": kind,
                     })
         return {"models": result}
+
+    async def _cold_auto_once(self, force=False):
+        """自动冷归档（P7）：后台把到期的正文搬进冷库 —— **不阻塞对话** ✓ 失败静默 ✓
+
+        · 只在 cold_archive_enabled AND cold_archive_auto 时工作 ✓
+        · 节流：默认 6 小时才跑一次（force=True 供启动时用一次 ✓）
+        · 真正干活在线程里（asyncio.to_thread ✓）⇒ 不占事件循环 ✓
+        · 只在**确实搬了东西**时才 VACUUM（否则白等 ✓）
+        """
+        try:
+            cfg = self.runtime_settings()
+            if not getattr(cfg, "cold_archive_enabled", False):
+                return
+            if not getattr(cfg, "cold_archive_auto", False) and not force:
+                return
+            now = time.time()
+            if not force and now - getattr(self, "_cold_last_auto", 0) < 6 * 3600:
+                return
+            self._cold_last_auto = now
+            p = self._cold_path_of(cfg)
+            if not p:
+                return
+            days = int(getattr(cfg, "cold_archive_days", 180) or 180)
+
+            def _run():
+                from . import cold as _cold
+                with self.store.connect() as db:
+                    res = _cold.spill(db, p, days)
+                    if res.get("moved"):
+                        db.execute("VACUUM")
+                        db.commit()
+                    return res
+
+            res = await asyncio.to_thread(_run)
+            if res.get("moved"):
+                logger.info("[cold] 自动冷归档：搬走 %d 条正文（释放约 %.1f MB ✓ 可随时整批取回 ✓）",
+                            res["moved"], res.get("bytes", 0) / 1048576)
+        except Exception:
+            logger.debug("[cold] 自动冷归档失败（忽略 ✓ 不影响任何功能 ✓）", exc_info=True)
 
     def _cold_path_of(self, cfg=None):
         """冷库路径：设置优先 ✓ 否则与热库同目录的 memory_cold.db

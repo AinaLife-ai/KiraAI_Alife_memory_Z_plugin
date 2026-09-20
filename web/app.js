@@ -48,9 +48,10 @@ const fields = {
   rotate_archive_enabled: "档案槽独立开关（不关事实槽）",
   rotate_archive_chars: "档案槽每批正文字数上限",
   rotate_archive_count: "档案槽每批条数",
-  cold_archive_enabled: "冷归档（默认关）",
+  cold_archive_enabled: "冷归档",
   cold_archive_days: "冷归档天数",
   cold_archive_path: "冷归档库文件路径",
+  cold_archive_auto: "冷归档自动执行",
   inject_budget_ms: "每轮注入时间预算（毫秒）",
   permanent_dedupe_cross_threshold: "永久记忆跨会话去重阈值",
   fact_recall_min_score: "事实内容匹配门槛",
@@ -2803,7 +2804,7 @@ async function coldAction(action) {
       const s = data.stats || {};
       msg.textContent = data.enabled
         ? "冷归档：已启用 · 冷库 " + (s.records || 0) + " 条 / " + mb(s.bytes) + " MB"
-        : "冷归档：未启用 —— 在「偏好设置」里打开「冷归档（默认关）」即可启用";
+        : "冷归档：未启用 —— 在「偏好设置」里打开「冷归档」即可启用";
     } else if (action === "preview") {
       msg.textContent = "可搬 " + (data.would_move || 0) + " 条，预计释放 " + mb(data.would_free_bytes) + " MB";
     } else if (action === "spill") {

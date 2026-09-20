@@ -179,3 +179,19 @@ def test_panel_cold_buttons_align_with_backend():
     assert '"/cold?action="' in a, "面板没调用 /cold 接口 ✗"
     assert a.count('["coldStats", "coldPreview", "coldSpill", "coldRestore"]') == 1, "按钮未绑定 ✗"
     assert 'id="coldMsg"' in h, "面板缺结果提示区 ✗"
+
+
+def test_cold_auto_is_wired_and_nonblocking():
+    """自动冷归档：必须在 ✓ 受两个开关控制 ✓ 且**不阻塞对话**（create_task 而非 await ✓）"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_auto_once(self" in m, "缺少自动执行方法 ✗"
+    assert "create_task(self._cold_auto_once())" in m, "自动执行没有触发点 ✗"
+    seg = m[m.index("async def _cold_auto_once"):]
+    seg = seg[:seg.index("def _cold_path_of")]
+    for need, why in (("cold_archive_enabled", "总开关"), ("cold_archive_auto", "自动开关"),
+                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里"),
+                      ("VACUUM", "搬完才释放空间")):
+        assert need in seg, "自动执行少了 %s（%s）✗" % (need, why)
+    c = (ROOT / "contracts.py").read_text(encoding="utf-8")
+    assert "cold_archive_enabled: bool = True" in c, "冷归档必须默认开 ✓"
+    assert "cold_archive_auto: bool = True" in c, "自动执行必须默认开 ✓"
