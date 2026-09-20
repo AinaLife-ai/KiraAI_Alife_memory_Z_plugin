@@ -337,7 +337,7 @@ def user_ids(event):
     )
 
 
-SLOT_TAIL_HINT = "…（已截断，可用 read_archive 取全文）"
+SLOT_TAIL_HINT = "…（已截断）"
 
 
 def trim_slot_rows(rows, text_of_row, char_budget=0, count=0):
