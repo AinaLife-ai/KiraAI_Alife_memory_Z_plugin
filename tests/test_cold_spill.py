@@ -138,6 +138,10 @@ def test_wiring_sites_are_present():
     assert 'result["items"] = await self._cold_fill' in main_src, \
         "面板浏览必须回填（且必须 await ✓ 否则阻塞事件循环 ✗）"
     assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
+    # ★ 回收站/冷归档页签（面板卡片拿它的行数据**预填编辑器** ✗）也必须回填 ✓
+    i = main_src.index('"trash", kind, category, keyword, offset, 50')
+    assert "await self._cold_fill" in main_src[i:i + 420], \
+        "/trash 没回填 ⇒ 面板点「查看与编辑」会看到空内容 ✗"
     assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
     assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
 
@@ -269,7 +273,7 @@ def test_cold_fill_never_blocks_event_loop():
     assert "async def _cold_fill(self" in m, "_cold_fill 必须是 async ✗"
     seg = m[m.index("async def _cold_fill"):][:1200]
     assert "await asyncio.to_thread(_work)" in seg, "必须走 to_thread（否则阻塞事件循环 ✗）"
-    assert m.count("await self._cold_fill") == 2, "两个调用点都必须 await ✗"
+    assert m.count("await self._cold_fill") >= 2, "调用点必须 await ✗"
     # 反向自检：把 await 去掉后，上面的判据必须不成立 ✓
     bad = m.replace("await self._cold_fill", "self._cold_fill")
     assert bad.count("await self._cold_fill") != 2, "守卫发现不了【漏 await】✗"
@@ -299,3 +303,59 @@ def test_split_queries_equal_or_version(tmp_path):
         "SELECT id FROM records WHERE cold=1 AND (archived_at=0 OR archived_at<=?) "
         "AND content IS NOT NULL AND content <> ''", (cut,))}, "关回收站时只取冷行 ✓"
     assert "both" in got and "trashA" in got and "oldcold" in got, got
+
+
+def test_cold_panel_api_never_blocks_event_loop():
+    """★ 面板四个按钮（stats/preview/spill/restore）都要读库 ⇒ **必须走线程** ✓
+    否则点一下，事件循环被占住 ⇒ 整个应用（含对话）都会停 ✗ —— 实测过这种卡顿 ✓"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    i = m.index("async def api_cold(")
+    seg = m[i : i + 2600]
+    assert seg.count("await asyncio.to_thread(") >= 3, "api_cold 的动作必须走 to_thread ✗"
+    offenders = [
+        ln.strip()[:60]
+        for ln in seg.split("\n")
+        if "with self.store.connect()" in ln and len(ln) - len(ln.lstrip()) == 8
+    ]
+    assert not offenders, "api_cold 顶层还有同步读库 ✗：%s" % offenders
+    assert "_cold.stats" in seg and "await asyncio.to_thread(_cold.stats" in seg, "stats 也要走线程 ✓"
+
+
+def test_no_blocking_io_directly_in_async_handlers():
+    """★ 通用守卫（同类 bug 的根治）：async 处理器里**直接**做阻塞 IO ⇒ 卡住整个应用 ✗
+
+    只查「直接体」✓ —— 嵌套 def 里的事不算（只要外面用 to_thread 调用它就没问题 ✓）
+    这条覆盖了之前两次真实事故：_cold_fill 与 api_cold ✗
+    """
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    BLOCK = (
+        "self.store.connect(", "sqlite3.connect(", "_cold.spill(", "_cold.restore(",
+        "_cold.preview(", "_cold.stats(", "_cold.content_of(", "_cold.fill_contents(",
+    )
+    bad = []
+
+    def direct_calls(fn):
+        def walk(stmt):
+            for child in ast.iter_child_nodes(stmt):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue          # 嵌套定义先跳过 ✓（它们可能在线程里被调用 ✓）
+                if isinstance(child, ast.Call):
+                    seg = ast.get_source_segment(src, child) or ""
+                    if any(b in seg for b in BLOCK):
+                        bad.append("%s() 行 %d：%s" % (fn.name, child.lineno, seg[:56]))
+                walk(child)
+
+        for stmt in fn.body:
+            # ★ 语句**本身就是**嵌套定义时也要跳过（否则会把 to_thread 里的活儿误判 ✗）
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            walk(stmt)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef):
+            direct_calls(node)
+    assert not bad, "async 里直接做阻塞 IO ⇒ 会卡住整个应用 ✗：%s" % bad[:3]
