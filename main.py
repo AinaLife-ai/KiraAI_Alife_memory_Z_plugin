@@ -3594,6 +3594,40 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             return ""
 
+    @register.api(method="GET", path="/cold", auth=True)
+    async def api_cold(self, action: str = "stats"):
+        """冷归档（P7）入口：action=stats | preview | spill | restore
+
+        · preview 只读 ⇒ 干跑看"将搬多少条 / 释放多少字节" ✓
+        · spill/restore 必须**已启用冷归档** ✓（否则直接拒绝 ✓）
+        · 全部走 cold.py 的引擎（事务 + 失败回滚 + 幂等 ✓）
+        """
+        from . import cold as _cold
+        cfg = self.runtime_settings()
+        enabled = bool(getattr(cfg, "cold_archive_enabled", False))
+        p = self._cold_path_of(cfg) or _cold.default_path(self.store.path)
+        days = int(getattr(cfg, "cold_archive_days", 180) or 180)
+        if action == "stats":
+            return {"ok": True, "enabled": enabled, "days": days, "stats": _cold.stats(p)}
+        if action == "preview":
+            with self.store.connect() as db:
+                info = _cold.preview(db, days)
+            return {"ok": True, "enabled": enabled, "days": days,
+                    "would_move": info["records"], "would_free_bytes": info["bytes"]}
+        if action == "spill":
+            if not enabled:
+                return {"ok": False, "error": "冷归档未启用：请先在设置里打开「冷归档（默认关）」"}
+            with self.store.connect() as db:
+                r = _cold.spill(db, p, days)
+            return {"ok": bool(r.get("ok")), "moved": r.get("moved", 0), "bytes": r.get("bytes", 0)}
+        if action == "restore":
+            if not enabled:
+                return {"ok": False, "error": "冷归档未启用"}
+            with self.store.connect() as db:
+                r = _cold.restore(db, p)
+            return {"ok": bool(r.get("ok")), "restored": r.get("restored", 0)}
+        return {"ok": False, "error": "unknown action"}
+
     @register.api(method="GET", path="/status", auth=True)
     async def api_status(self):
         status = await self.store.call("status")
