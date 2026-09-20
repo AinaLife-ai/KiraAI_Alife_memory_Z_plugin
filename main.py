@@ -1361,7 +1361,37 @@ class AlifeMemoryPlugin(BasePlugin):
                     kind, state["rounds"],
                 )
 
-    async def prewarm(self, sid, users, scope):
+    def _search_memo_key(self, sid, query, users, cfg, keyword_hit, prefer):
+        """P5-扩展：关键词召回的 memo 键 —— 预热与实时**必须共用本函数** ✓
+
+        任一处参数不同 ⇒ 键不同 ⇒ 不命中 ⇒ 自动回落实时查询（结果不变 ✓）
+        """
+        reach = cfg.top_k * (2 if keyword_hit else 1)
+        return ("search", sid, query, tuple(users or ()), cfg.recall_scope, reach * 2, sid,
+                cfg.search_active_only, cfg.cold_after_days, cfg.recall_skip_media,
+                tuple(sorted(prefer.items())))
+
+    async def _prefetch_search(self, sid, users, scope, query, cfg):
+        """P5-扩展：把「随消息变化」的关键词召回也提前算 —— 它是唯一真正贵的那条。
+
+        安全性：memo 按 store.revision 失效；命中 ⇒ 参数与 revision 都与实时一致
+        ⇒ 结果逐条相同；参数不符 / 期间有写入 ⇒ 自动回落实时查询 ✓
+        """
+        if cfg is None or not query.strip() or scope == "session":
+            return
+        prefer = ({"prefer_sid": sid, "prefer_users": tuple(users or ())}
+                  if cfg.session_affinity else {})
+        hit = any(w in query for w in cfg.recall_keywords)
+        await self.memo(
+            self._search_memo_key(sid, query, users, cfg, hit, prefer),
+            lambda: self.store.call("search", sid, lexical=query, scope=scope, users=users,
+                                    limit=cfg.top_k * (2 if hit else 1) * 2, exclude_sid=sid,
+                                    active=cfg.search_active_only,
+                                    cold_after_days=cfg.cold_after_days,
+                                    skip_media=cfg.recall_skip_media, **prefer),
+        )
+
+    async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
         消息一到就调用（此时用户还在打字、消息还要走网络），
@@ -1375,6 +1405,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     ("spaced_names",), lambda: self.store.call("spaced_names")
                 ),
             )
+            await self._prefetch_search(sid, users, scope, query, cfg)
         except Exception:
             logger.debug("[记忆·Z] 预热失败（不影响正常注入）", exc_info=True)
 
@@ -1795,8 +1826,9 @@ class AlifeMemoryPlugin(BasePlugin):
         if len(self._prewarm_seen) > 256:
             for key in sorted(self._prewarm_seen, key=self._prewarm_seen.get)[:128]:
                 self._prewarm_seen.pop(key, None)
+        _q = " ".join(capture_text(text_of(_m)) for _m in event_messages(event))
         asyncio.create_task(
-            self.prewarm(sid, user_ids(event), cfg.recall_scope)
+            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
         )
 
     @on.llm_request(priority=Priority.LOW)
@@ -1972,7 +2004,8 @@ class AlifeMemoryPlugin(BasePlugin):
         related, related_rows, related_shorts = [], [], {}
         if cfg.recall_scope != "session" and query.strip() and not over_budget:
             reach = cfg.top_k * (2 if keyword_hit else 1)
-            matches = await self.store.call(
+            _mkey = self._search_memo_key(sid, query, users, cfg, keyword_hit, prefer)
+            matches = await self.memo(_mkey, lambda: self.store.call(
                 "search",
                 sid,
                 lexical=query,
@@ -1985,7 +2018,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 # v2.18.9：表情/图片-only 的原文默认不进召回 ✗（数据在库里 ✓）
                 skip_media=cfg.recall_skip_media,
                 **prefer,
-            )
+            ))
             local_ids = {r["id"] for r in rows}
             fresh = [
                 r for r in matches["items"]
