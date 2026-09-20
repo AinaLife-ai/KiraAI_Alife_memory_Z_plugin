@@ -85,7 +85,7 @@ def test_compact_schema_falls_back_to_full_schema():
 def test_memory_rules_keeps_the_essential_tokens():
     """规则块精简后，这些关键 token 一个都不能少（否则模型会误读 payload ✗）。"""
     main_text = (ROOT / "main.py").read_text(encoding="utf-8")
-    _ = main_text.find("MEMORY_RULES = (")
+    start = main_text.find("MEMORY_RULES = (")
     block = main_text  # v2.17.2：规则块拆成两个常量（按模式选）+ 共享部分 ✓ 整文件即超集
     for token in (
         "next_batch",

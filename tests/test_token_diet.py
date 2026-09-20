@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import os
 import random
 import json
 import re
@@ -602,7 +603,7 @@ class SchedulerCompressCase(unittest.TestCase):
         cfg = self._cfg(0.0)
         e._BOOST_AT.pop(sid, None)
         import types as _t
-        _ = _t.SimpleNamespace(
+        plugin = _t.SimpleNamespace(
             runtime_settings=lambda: cfg, store=self.store, engine=None)
         # 直接验证判定：probability=0 时扫描应当**不排任何会话** ✓
         self.assertEqual(cfg.probability, 0.0)
@@ -759,6 +760,7 @@ class BotIssuedTaskVisibleCase(unittest.TestCase):
     """
 
     def test_queue_tidy_all_accepts_automatic_flag(self):
+        import inspect
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
         self.assertIn(
             "async def queue_tidy_all(self, fallback_sid=\"\", automatic=True, force=False, ids=None", src

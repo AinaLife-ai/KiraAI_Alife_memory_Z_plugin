@@ -115,7 +115,7 @@ class PacingCase(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_audit_can_correct_importance(self):
-        _ = self.add_fact()
+        fact_id = self.add_fact()
         cfg = c.Settings()
         calls = []
 

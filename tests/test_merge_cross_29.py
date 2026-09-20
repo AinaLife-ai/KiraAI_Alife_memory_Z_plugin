@@ -1,6 +1,8 @@
 """跨类别去重（v2.9.0 追加）：同主体分档阈值 + 三动作无 keep + 证据开关。"""
 
+import asyncio
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
