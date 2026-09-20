@@ -195,3 +195,16 @@ def test_cold_auto_is_wired_and_nonblocking():
     c = (ROOT / "contracts.py").read_text(encoding="utf-8")
     assert "cold_archive_enabled: bool = True" in c, "冷归档必须默认开 ✓"
     assert "cold_archive_auto: bool = True" in c, "自动执行必须默认开 ✓"
+
+
+def test_cold_auto_runs_at_startup():
+    """按用户要求：**启动后就搬** ⇒ 启动触发必须在；消息到达只作长会话兜底 ✓"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_auto_at_start(self" in m, "缺启动自动执行 ✗"
+    assert "create_task(self._cold_auto_at_start())" in m, "启动时没有触发 ✗"
+    i = m.index("async def build_search_index")
+    assert "_cold_auto_at_start" in m[i : i + 1000], "启动任务应挂在 build_search_index（存量升级用）✓"
+    seg = m[m.index("async def _cold_auto_at_start"):]
+    seg = seg[: seg.index("async def build_search_index")]
+    assert "await asyncio.sleep(6)" in seg, "启动触发必须延时（等应用起来 ✓）"
+    assert "force=False" in seg, "启动触发要走节流（不要绕过节流 ✓）"

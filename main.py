@@ -981,9 +981,25 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception as exc:
             logger.warning("[记忆·Z] 存量时间/发言人回填失败（下次启动会重试）：%s", exc)
 
+    async def _cold_auto_at_start(self):
+        """启动后**延时**跑一次自动冷归档（等应用起来再动 ✓ 失败静默 ✓）
+
+        为什么放启动而不是"第一次对话" ✓：
+          · 启动是自然的维护时机 ✓ 用户**对话时无感知** ✓
+          · 安装插件时库是空的 ⇒ 本函数是空操作 ✓（等价于"安装时不搬" ✓）
+          · 重启也无妨：节流在内存里 ⇒ 每次启动跑一次 ✓ 没东西可搬时开销极小 ✓
+        """
+        try:
+            await asyncio.sleep(6)
+            await self._cold_auto_once(force=False)
+        except Exception:
+            logger.debug("[cold] 启动自动冷归档失败（忽略 ✓ 不影响任何功能）", exc_info=True)
+
     async def build_search_index(self):
         """后台把检索索引补齐（存量用户首次升级时用；不阻塞启动）。"""
         await self.scrub_capture_text()
+        # ★ 冷归档（P7）：启动后就搬 ⇒ 不等"第一次对话"（用户无感知 ✓ 不阻塞启动 ✓）
+        asyncio.create_task(self._cold_auto_at_start())
         await self.backfill_time_provenance()
         if self.store.search_index_state() == "unavailable":
             logger.info("[记忆·Z] 本机 SQLite 无 FTS5，检索走全表（功能不受影响）")
@@ -1830,8 +1846,8 @@ class AlifeMemoryPlugin(BasePlugin):
         asyncio.create_task(
             self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
         )
-        # ★ 冷归档（P7）：后台自动跑一次（内部有 6 小时节流 ✓ 未启用则立刻返回 ✓
-        #   真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
+        # ★ 冷归档（P7）：长会话的兜底 —— 启动已跑过一次，这里按 6 小时节流补跑 ✓
+        #   （内部节流 ✓ 真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
         asyncio.create_task(self._cold_auto_once())
 
     @on.llm_request(priority=Priority.LOW)
