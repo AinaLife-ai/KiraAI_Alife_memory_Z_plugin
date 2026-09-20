@@ -3818,14 +3818,20 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             return None
 
-    def _cold_fill(self, items, cfg=None):
-        """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）"""
-        try:
+    async def _cold_fill(self, items, cfg=None):
+        """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）
+
+        ★ 2026-09-20：改成 async + to_thread —— 读冷库是**阻塞 IO** ✗
+          绝不能直接在事件循环里做（哪怕只有几毫秒 ✓ 也不能开这个头 ✓）
+        """
+        def _work():
             p = self._cold_path_of(cfg)
             if not p or not p.exists():
                 return items
             from . import cold as _cold
             return _cold.fill_contents(items, p)
+        try:
+            return await asyncio.to_thread(_work)
         except Exception:
             logger.debug("[cold] 回填正文失败（忽略 ✓）", exc_info=True)
             return items
@@ -3851,7 +3857,7 @@ class AlifeMemoryPlugin(BasePlugin):
             skip_media=False,
         )
         # ★ 冷归档（P7）：浏览页要看到**完整原文** ⇒ 冷行的正文从冷库回填 ✓
-        result["items"] = self._cold_fill(result.get("items") or [])
+        result["items"] = await self._cold_fill(result.get("items") or [])
         ids = {u for r in result["items"] for u in r["users"]} | {
             r["sid"] for r in result["items"]
         }
@@ -3864,7 +3870,7 @@ class AlifeMemoryPlugin(BasePlugin):
         result = await self.store.call("get", record_id, include_deleted=True)
         # ★ 冷归档（P7）：单条详情同样要看到完整原文 ✓
         if isinstance(result, dict):
-            result = self._cold_fill([result])[0]
+            result = (await self._cold_fill([result]))[0]
         if result is None:
             raise HTTPException(404, "archive not found")
         return result

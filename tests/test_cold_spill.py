@@ -135,7 +135,8 @@ def test_wiring_sites_are_present():
     stor_src = (ROOT / "storage.py").read_text(encoding="utf-8")
     assert "def _cold_path_of(self" in main_src and "def _cold_fill(self" in main_src
     assert main_src.count("self._cold_fill(") >= 2, "浏览/详情两处都要回填 ✓"
-    assert 'result["items"] = self._cold_fill' in main_src, "面板浏览必须回填 ✓"
+    assert 'result["items"] = await self._cold_fill' in main_src, \
+        "面板浏览必须回填（且必须 await ✓ 否则阻塞事件循环 ✗）"
     assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
     assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
     assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
@@ -259,3 +260,15 @@ def test_vacuum_only_for_large_moves(tmp_path):
     assert res["moved"] == 100, res
     assert res.get("vacuumed") is True, "≥5MB 应触发 VACUUM ✓"
     assert db2.execute("PRAGMA freelist_count").fetchone()[0] == 0, "VACUUM 后不应有空闲页 ✓"
+
+
+def test_cold_fill_never_blocks_event_loop():
+    """★ 冷库读是阻塞 IO ⇒ 必须在 to_thread 里（绝不能在事件循环上直接做 ✗）"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_fill(self" in m, "_cold_fill 必须是 async ✗"
+    seg = m[m.index("async def _cold_fill"):][:1200]
+    assert "await asyncio.to_thread(_work)" in seg, "必须走 to_thread（否则阻塞事件循环 ✗）"
+    assert m.count("await self._cold_fill") == 2, "两个调用点都必须 await ✗"
+    # 反向自检：把 await 去掉后，上面的判据必须不成立 ✓
+    bad = m.replace("await self._cold_fill", "self._cold_fill")
+    assert bad.count("await self._cold_fill") != 2, "守卫发现不了【漏 await】✗"
