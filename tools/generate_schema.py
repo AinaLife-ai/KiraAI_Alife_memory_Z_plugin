@@ -156,24 +156,6 @@ for key, p in schema["properties"].items():
         field["type"] = "model_select"
         field["model_type"] = "embedding" if key == "embedding_model" else "llm"
     fields[key] = field
-def _strip_bold(node):
-    """★ 2026-09-20：面板按**纯文本**渲染 ⇒ 写盘前把 schema 里字符串的 ** 去掉 ✓
-
-    关键：**只净化这份"要被显示"的拷贝** ✓
-         contracts.py 里的提示词**保持原样** ✓（模型仍看到原来的强调 ✓ 语义零改动 ✓）
-    """
-    if isinstance(node, dict):
-        for k, v in list(node.items()):
-            if isinstance(v, str) and "**" in v:
-                node[k] = v.replace("**", "")
-            else:
-                _strip_bold(v)
-    elif isinstance(node, list):
-        for v in node:
-            _strip_bold(v)
-
-
-_strip_bold(schema)
 (root / "schema.json").write_text(
     json.dumps(
         {
