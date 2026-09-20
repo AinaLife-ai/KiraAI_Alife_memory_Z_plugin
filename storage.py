@@ -409,6 +409,14 @@ class Store:
                 db.execute(
                     "ALTER TABLE records ADD COLUMN rotate_used INTEGER NOT NULL DEFAULT 0"
                 )
+            # ★ 冷归档（P7）：此索引必须建在 cold / archived_at **确实存在之后** ✓
+            #   （上面 368/372 行已补齐这两列 ✓；try 兜底 ⇒ 万一失败也只是慢一点 ✗ 不影响初始化 ✓）
+            try:
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS record_cold ON records(cold, archived_at)"
+                )
+            except sqlite3.Error:
+                logger.debug("[cold] record_cold 索引创建失败（忽略 ✓ 只是每次检查慢一点）")
             # ★ 2026-09-18：**事实侧也要记账** ✓
             #   原来 `mark_rotation` / `rotation_stats` / `rotation_pick` 只认 records ✗
             #   而事实轮换的候选是 facts 的行 ✓ ⇒ 用事实 id 去 UPDATE records

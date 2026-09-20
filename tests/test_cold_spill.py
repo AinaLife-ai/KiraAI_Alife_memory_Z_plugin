@@ -208,3 +208,27 @@ def test_cold_auto_runs_at_startup():
     seg = seg[: seg.index("async def build_search_index")]
     assert "await asyncio.sleep(6)" in seg, "启动触发必须延时（等应用起来 ✓）"
     assert "force=False" in seg, "启动触发要走节流（不要绕过节流 ✓）"
+
+
+def _storage_mod():
+    """storage.py 里有相对导入 ⇒ 必须先造出"包"上下文 ✓"""
+    pkg = "cold_test_pkg"
+    if pkg not in sys.modules:
+        m = type(sys)(pkg)
+        m.__path__ = [str(ROOT)]
+        sys.modules[pkg] = m
+    spec = importlib.util.spec_from_file_location(pkg + ".storage", ROOT / "storage.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cold_index_really_created(tmp_path):
+    """冷行索引必须**真的**建出来 ✓ —— 它决定"检查有没有可搬的"走索引还是全表扫"""
+    st = _storage_mod().Store(tmp_path / "x.db")
+    st.initialize()
+    with st.connect() as db:
+        names = [r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")]
+    assert "record_cold" in names, "缺 record_cold 索引 ⇒ 检查会退化成全表扫 ✗"
