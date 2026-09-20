@@ -915,6 +915,27 @@ class Store:
         self._fts_state = "unavailable"
         return self._fts_state
 
+    def _note_fts(self, path, detail):
+        """记录本轮召回的取数路径（**只写日志 + 记一个内部标记，不参与任何逻辑** ✓）
+
+        ★ 2026-09-20：用于"卡回复"排查 —— 让人一眼看出本轮到底走了哪条路、为什么。
+          设计要点：
+            · 同一 (path, reason) **只在变化时记一条 info** ⇒ 不会每轮刷屏 ✓
+            · 每轮都记一条 debug ⇒ 需要细节时把日志级别调到 DEBUG ✓
+            · 绝不影响返回结果（不读也不写业务数据 ✓）
+        """
+        last = getattr(self, "_fts_last_note", None)
+        key = (path, detail if path != "fast" else "")
+        if key != last:
+            self._fts_last_note = key
+            if path == "fast":
+                logger.info("[recall] 索引快路径生效（%s）", detail)
+            else:
+                logger.info(
+                    "[recall] 本轮走全表参照路径（%s）—— 结果与快路径逐条一致，只是速度较慢；"
+                    "索引就绪后会自动回到快路径", detail)
+        logger.debug("[recall] path=%s %s", path, detail)
+
     def _fts_hits(self, tokens, cap=1200):
         """用 FTS 索引取候选 rowid；索引不可用/命中过宽时返回 None（走全表）。
 
@@ -927,12 +948,15 @@ class Store:
         所以这里直接把它们的 rowid 并进候选列表。
         """
         if not tokens or self._fts_state != "ready":
+            self._note_fts("fallback", "fts_state=%s" % self._fts_state)
             return None
         from .retrieval import fts_match_query
 
         match = fts_match_query(tokens)
         if not match:
+            self._note_fts("fallback", "no-match-expr")
             return None
+        t0 = time.perf_counter()
         try:
             with self.connect() as db:
                 rows = db.execute(
@@ -945,9 +969,13 @@ class Store:
                 ).fetchall()
         except sqlite3.Error:
             self._fts_state = "unavailable"
+            self._note_fts("fallback", "sqlite-error -> unavailable")
             return None
         if len(rows) > cap or len(missing) > cap:
+            self._note_fts("fallback", "too-broad rows=%d missing=%d cap=%d" % (len(rows), len(missing), cap))
             return None
+        _n = len(rows) + len(missing)
+        self._note_fts("fast", "hits=%d ms=%.2f" % (_n, (time.perf_counter() - t0) * 1000))
         return [row["rowid"] for row in rows] + [row["rowid"] for row in missing]
 
     def revision(self):
@@ -2976,6 +3004,10 @@ class Store:
             )
             tier_args = [prefer_sid, dump(list(prefer_users))]
         with self.connect() as db:
+            # ★ 2026-09-20 观测：记录本轮**走哪条取数分支**（纯日志 ✓ 不影响逻辑）
+            logger.debug("[recall] 分支=%s lexical=%r vector=%s fts_state=%s",
+                         "lexical" if (lexical and not vector) else ("vector" if vector else "none"),
+                         (lexical or "")[:40], bool(vector), self._fts_state)
             from .retrieval import squeeze
 
             db.create_function("squeeze", 1, squeeze)
