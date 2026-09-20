@@ -288,6 +288,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS fact_scan ON facts(deleted,merge_pending);
             CREATE INDEX IF NOT EXISTS record_permanent ON records(permanent)
               WHERE permanent=1;
+            -- 冷归档（P7）：让"有哪些冷行可以外置"的检查走索引（否则全表扫 ✓ 还要读 content 列 ✗）
+            CREATE INDEX IF NOT EXISTS record_cold ON records(cold, archived_at);
             CREATE TABLE IF NOT EXISTS versions (
               id INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL,
               snapshot TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL);
