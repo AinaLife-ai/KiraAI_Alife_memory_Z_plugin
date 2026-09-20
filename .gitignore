@@ -1,4 +1,16 @@
 __pycache__/
+.pytest_cache/
 *.pyc
+*.sqlite3*
+.venv/
+data/
+demo_*.py
+AUDIT_*.md
+
+# 运行/测试产生的日志（不提交）
 tests/data/*.log
 tests/data/*.log.*
+data/*.log
+data/*.log.*
+__pycache__/
+*.pyc
