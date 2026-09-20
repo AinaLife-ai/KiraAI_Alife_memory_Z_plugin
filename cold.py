@@ -38,20 +38,24 @@ def ensure_cold(cold_path):
     return p
 
 
-def _cold_ids(src, days, now):
-    """要搬的 id：cold=1 且 content 非空 且（archived_at=0 或已满 days 天）—— 只读 ✓
+def _cold_ids(src, days, now, include_deleted=True):
+    """要搬的 id：① `cold=1` 且（archived_at=0 或已满 days 天）② 回收站里的（`deleted=1`）
 
-    条件里带 `content <> ''` ⇒ 已搬过的自然跳过 ⇒ **天然幂等** ✓
+    为什么回收站也能外置 ✓：回收站的行**不参与召回**（search 里 `deleted=0` ✓）
+    且 `undelete()` 会在还原时**从冷库取回正文**（已接线 ✓）⇒ 用户无感 ✓
+    条件带 `content <> ''` ⇒ 已搬过的自然跳过 ⇒ **天然幂等** ✓
     """
+    cond = "cold=1 AND (archived_at=0 OR archived_at<=?)"
+    args = []
     if days and int(days) > 0:
-        cut = now - int(days) * 86400
-        rows = src.execute(
-            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> '' "
-            "AND (archived_at=0 OR archived_at<=?)", (cut,)).fetchall()
+        args.append(now - int(days) * 86400)
     else:
-        rows = src.execute(
-            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> ''"
-        ).fetchall()
+        cond = "cold=1"
+    if include_deleted:
+        cond = "(%s OR deleted=1)" % cond
+    rows = src.execute(
+        "SELECT id FROM records WHERE %s AND content IS NOT NULL AND content <> ''" % cond,
+        args).fetchall()
     return [r[0] for r in rows]
 
 

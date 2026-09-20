@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 DDL = """
 CREATE TABLE records (id TEXT PRIMARY KEY, sid TEXT, content TEXT, summary TEXT,
-  cold INTEGER NOT NULL DEFAULT 0, archived_at REAL NOT NULL DEFAULT 0, active INTEGER DEFAULT 1);
+  cold INTEGER NOT NULL DEFAULT 0, archived_at REAL NOT NULL DEFAULT 0, active INTEGER DEFAULT 1,
+  deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE edges (rowid INTEGER PRIMARY KEY, from_id TEXT REFERENCES records(id),
   to_id TEXT REFERENCES records(id), kind TEXT);
 CREATE TABLE vectors (rowid INTEGER PRIMARY KEY, record_id TEXT REFERENCES records(id), vec BLOB);
@@ -138,3 +139,43 @@ def test_wiring_sites_are_present():
     assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
     assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
     assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
+
+
+def test_recycle_bin_rows_are_included(tmp_path):
+    """回收站（deleted=1）的行也应可外置 ✓ —— 它不参与召回，且 undelete 会取回 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=0)
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trash1", "S1", "被删的正文", "被删摘要"))
+    db.commit()
+    info = m.preview(db, days=180)
+    assert info["records"] == 1 and info["ids"] == ["trash1"], info
+    assert m.spill(db, tmp_path / "cold.db", days=180)["moved"] == 1
+    assert db.execute("SELECT content FROM records WHERE id='trash1'").fetchone()[0] == ""
+    assert db.execute("SELECT COUNT(*) FROM records WHERE id='trash1'").fetchone()[0] == 1, "行必须保留 ✓"
+
+
+def test_exclude_deleted_option(tmp_path):
+    """关掉 include_deleted 时回收站不动 ✓（保留可配置性 ✓）"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=0)
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trash2", "S1", "x", "y"))
+    db.commit()
+    assert m._cold_ids(db, 180, time.time(), include_deleted=False) == []
+    assert m._cold_ids(db, 180, time.time(), include_deleted=True) == ["trash2"]
+
+
+def test_panel_cold_buttons_align_with_backend():
+    """前后端一致性：面板 4 个按钮 ↔ 后端 4 个 action，缺一即红 ✓"""
+    h = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    a = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    for bid, act in (("coldStats", "stats"), ("coldPreview", "preview"),
+                     ("coldSpill", "spill"), ("coldRestore", "restore")):
+        assert ('id="%s"' % bid) in h, "面板缺按钮 %s ✗" % bid
+        assert ('"%s"' % act) in m, "后端缺动作 %s ✗" % act
+    assert "async function coldAction(" in a, "面板缺处理函数 ✗"
+    assert '"/cold?action="' in a, "面板没调用 /cold 接口 ✗"
+    assert a.count('["coldStats", "coldPreview", "coldSpill", "coldRestore"]') == 1, "按钮未绑定 ✗"
+    assert 'id="coldMsg"' in h, "面板缺结果提示区 ✗"
