@@ -303,3 +303,19 @@ def test_split_queries_equal_or_version(tmp_path):
         "SELECT id FROM records WHERE cold=1 AND (archived_at=0 OR archived_at<=?) "
         "AND content IS NOT NULL AND content <> ''", (cut,))}, "关回收站时只取冷行 ✓"
     assert "both" in got and "trashA" in got and "oldcold" in got, got
+
+
+def test_cold_panel_api_never_blocks_event_loop():
+    """★ 面板四个按钮（stats/preview/spill/restore）都要读库 ⇒ **必须走线程** ✓
+    否则点一下，事件循环被占住 ⇒ 整个应用（含对话）都会停 ✗ —— 实测过这种卡顿 ✓"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    i = m.index("async def api_cold(")
+    seg = m[i : i + 2600]
+    assert seg.count("await asyncio.to_thread(") >= 3, "api_cold 的动作必须走 to_thread ✗"
+    offenders = [
+        ln.strip()[:60]
+        for ln in seg.split("\n")
+        if "with self.store.connect()" in ln and len(ln) - len(ln.lstrip()) == 8
+    ]
+    assert not offenders, "api_cold 顶层还有同步读库 ✗：%s" % offenders
+    assert "_cold.stats" in seg and "await asyncio.to_thread(_cold.stats" in seg, "stats 也要走线程 ✓"

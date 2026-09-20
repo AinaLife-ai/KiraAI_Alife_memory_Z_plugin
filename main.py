@@ -3626,24 +3626,37 @@ class AlifeMemoryPlugin(BasePlugin):
         enabled = bool(getattr(cfg, "cold_archive_enabled", False))
         p = self._cold_path_of(cfg) or _cold.default_path(self.store.path)
         days = int(getattr(cfg, "cold_archive_days", 180) or 180)
+        # ★ 2026-09-20：四个动作都要读库/写库 ⇒ **阻塞 IO** ✗
+        #   全部丢到线程里做 ✓ 否则面板点一下，整个应用（含对话）都会停住 ✗
         if action == "stats":
-            return {"ok": True, "enabled": enabled, "days": days, "stats": _cold.stats(p)}
+            st = await asyncio.to_thread(_cold.stats, p)
+            return {"ok": True, "enabled": enabled, "days": days, "stats": st}
         if action == "preview":
-            with self.store.connect() as db:
-                info = _cold.preview(db, days)
+            def _preview():
+                with self.store.connect() as db:
+                    return _cold.preview(db, days)
+
+            info = await asyncio.to_thread(_preview)
             return {"ok": True, "enabled": enabled, "days": days,
                     "would_move": info["records"], "would_free_bytes": info["bytes"]}
         if action == "spill":
             if not enabled:
                 return {"ok": False, "error": "冷归档未启用：请先在设置里打开「冷归档（默认关）」"}
-            with self.store.connect() as db:
-                r = _cold.spill(db, p, days)
-            return {"ok": bool(r.get("ok")), "moved": r.get("moved", 0), "bytes": r.get("bytes", 0)}
+            def _spill():
+                with self.store.connect() as db:
+                    return _cold.spill(db, p, days)
+
+            r = await asyncio.to_thread(_spill)
+            return {"ok": bool(r.get("ok")), "moved": r.get("moved", 0), "bytes": r.get("bytes", 0),
+                    "vacuumed": bool(r.get("vacuumed"))}
         if action == "restore":
             if not enabled:
                 return {"ok": False, "error": "冷归档未启用"}
-            with self.store.connect() as db:
-                r = _cold.restore(db, p)
+            def _restore():
+                with self.store.connect() as db:
+                    return _cold.restore(db, p)
+
+            r = await asyncio.to_thread(_restore)
             return {"ok": bool(r.get("ok")), "restored": r.get("restored", 0)}
         return {"ok": False, "error": "unknown action"}
 
