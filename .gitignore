@@ -1,8 +1,4 @@
 __pycache__/
-.pytest_cache/
 *.pyc
-*.sqlite3*
-.venv/
-data/
-demo_*.py
-AUDIT_*.md
+tests/data/*.log
+tests/data/*.log.*
