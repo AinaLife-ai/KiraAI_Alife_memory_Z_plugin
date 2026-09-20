@@ -48,6 +48,10 @@ const fields = {
   rotate_archive_enabled: "档案槽独立开关（不关事实槽）",
   rotate_archive_chars: "档案槽每批正文字数上限",
   rotate_archive_count: "档案槽每批条数",
+  cold_archive_enabled: "冷归档",
+  cold_archive_days: "冷归档天数",
+  cold_archive_path: "冷归档库文件路径",
+  cold_archive_auto: "冷归档自动执行",
   inject_budget_ms: "每轮注入时间预算（毫秒）",
   permanent_dedupe_cross_threshold: "永久记忆跨会话去重阈值",
   fact_recall_min_score: "事实内容匹配门槛",
@@ -2781,5 +2785,47 @@ document.addEventListener("click", (ev) => {
         loadHealth();
       })
       .catch((e) => toast("删除失败：" + e.message));
+  }
+});
+
+/* ── 冷归档（P7）面板动作 ─────────────────────────────────────────────
+   四个按钮对应 GET /cold?action=stats|preview|spill|restore
+   · preview 只读 ✓ · spill/restore 未启用时后端会直接拒绝 ✓
+   · 所有结果都写在 #coldMsg 里（不弹窗 ✓ 失败也只提示，不影响页面其它部分 ✓）
+*/
+async function coldAction(action) {
+  const msg = $("#coldMsg");
+  if (!msg) return;
+  const mb = (n) => ((Number(n) || 0) / 1048576).toFixed(1);
+  msg.textContent = "处理中…";
+  try {
+    const data = await api("/cold?action=" + action);
+    if (action === "stats") {
+      const s = data.stats || {};
+      msg.textContent = data.enabled
+        ? "冷归档：已启用 · 冷库 " + (s.records || 0) + " 条 / " + mb(s.bytes) + " MB"
+        : "冷归档：未启用 —— 在「偏好设置」里打开「冷归档」即可启用";
+    } else if (action === "preview") {
+      msg.textContent = "可搬 " + (data.would_move || 0) + " 条，预计释放 " + mb(data.would_free_bytes) + " MB";
+    } else if (action === "spill") {
+      msg.textContent = data.ok
+        ? "已搬 " + (data.moved || 0) + " 条，释放约 " + mb(data.bytes) + " MB"
+        : "未执行：" + (data.error || "未知原因");
+      if (data.ok && typeof loadTrash === "function") await loadTrash();
+    } else if (action === "restore") {
+      msg.textContent = data.ok ? "已取回 " + (data.restored || 0) + " 条" : "未执行：" + (data.error || "未知原因");
+      if (data.ok && typeof loadTrash === "function") await loadTrash();
+    }
+  } catch (error) {
+    msg.textContent = "请求失败：" + error.message;
+  }
+}
+
+["coldStats", "coldPreview", "coldSpill", "coldRestore"].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener("click", () =>
+      coldAction(id.replace("cold", "").toLowerCase()),
+    );
   }
 });

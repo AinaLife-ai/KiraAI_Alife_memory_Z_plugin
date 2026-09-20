@@ -522,6 +522,32 @@
         "minimum": 1,
         "maximum": 20
       },
+      "cold_archive_enabled": {
+        "type": "switch",
+        "name": "冷归档",
+        "default": true,
+        "description": "冷归档开关：把已冷归档与回收站的原始正文搬到单独的冷库文件，主库只留行与摘要（召回不受影响）。默认：开。"
+      },
+      "cold_archive_days": {
+        "type": "integer",
+        "name": "冷归档天数",
+        "default": 180,
+        "description": "冷归档多少天后允许外置（1 到 3650 天，只对已冷归档的记录生效）。默认：180。",
+        "minimum": 1,
+        "maximum": 3650
+      },
+      "cold_archive_path": {
+        "type": "string",
+        "name": "冷归档库文件路径",
+        "default": "",
+        "description": "冷库文件路径。留空表示自动放在数据目录的 memory_cold.db。默认：留空。"
+      },
+      "cold_archive_auto": {
+        "type": "switch",
+        "name": "冷归档自动执行",
+        "default": true,
+        "description": "自动执行冷归档：后台定期把到期的正文搬进冷库（不阻塞对话）。关闭后只能手动点面板按钮执行。默认：开。"
+      },
       "inject_budget_ms": {
         "type": "integer",
         "name": "每轮注入时间预算（毫秒）",

@@ -325,6 +325,17 @@
           <div class="notice">
             这里放已经不在上下文里的记忆：被审计撤回或合并掉的事实、被删除的存档，以及冷归档。还原后它们会重新参与检索；冷归档只按 ID 可读。
           </div>
+          <div class="notice">
+            <div class="actions">
+              <button id="coldStats">冷归档状态</button
+              ><button id="coldPreview">预览可搬</button
+              ><button id="coldSpill" class="primary">执行搬迁</button
+              ><button id="coldRestore">整批取回</button>
+            </div>
+            <small class="muted" id="coldMsg"
+              >把「已冷归档」与「回收站」的原文挪到独立冷库，主库只留行与摘要；<b>召回完全不受影响</b>。默认开启；想停就在「偏好设置」里关掉「冷归档」或「冷归档自动执行」。</small
+            >
+          </div>
           <div class="filters">
             <div class="actions">
               <button id="trashFacts" aria-pressed="true">事实</button

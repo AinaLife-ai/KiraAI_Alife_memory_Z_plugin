@@ -1,0 +1,301 @@
+"""冷归档（P7 · v7）：**骨架行 + content 外置** 的真跑验证
+
+关键验收（v6 的整行方案就是死在这里 ✗）：
+  ★ 跨边界关系必须活下来：edges(cold→hot) 在搬迁后**依然合法** ✓（行都还在 ✓）
+  ★ content 一字不丢：冷库取回与原文**逐字符一致** ✓
+  ★ restore 后 records **逐字段**回到迁移前 ✓
+  ★ 热行 / 非冷行**一条不动** ✓；迁移后 `PRAGMA foreign_key_check` 必须为空 ✓
+"""
+import importlib.util
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+DDL = """
+CREATE TABLE records (id TEXT PRIMARY KEY, sid TEXT, content TEXT, summary TEXT,
+  cold INTEGER NOT NULL DEFAULT 0, archived_at REAL NOT NULL DEFAULT 0, active INTEGER DEFAULT 1,
+  deleted INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE edges (rowid INTEGER PRIMARY KEY, from_id TEXT REFERENCES records(id),
+  to_id TEXT REFERENCES records(id), kind TEXT);
+CREATE TABLE vectors (rowid INTEGER PRIMARY KEY, record_id TEXT REFERENCES records(id), vec BLOB);
+"""
+
+
+def _cold():
+    spec = importlib.util.spec_from_file_location("cold_v7", ROOT / "cold.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["cold_v7"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_hot(path, n_cold=3, n_hot=2):
+    db = sqlite3.connect(str(path))
+    db.executescript(DDL)
+    db.execute("PRAGMA foreign_keys=ON")
+    old = time.time() - 400 * 86400
+    for i in range(n_hot):
+        db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active) "
+                   "VALUES(?,?,?,?,0,0,1)", ("hot%d" % i, "S1", "热正文" + str(i), "热摘要%d" % i))
+    for i in range(n_cold):
+        db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active) "
+                   "VALUES(?,?,?,?,1,?,0)", ("cold%d" % i, "S1", "冷正文" * 40 + str(i), "摘要%d" % i, old))
+        # ★ 故意造**跨边界**关系：冷行 → 热行（v6 就是被它推翻的 ✓）
+        db.execute("INSERT INTO edges(from_id,to_id,kind) VALUES(?,?,?)", ("cold%d" % i, "hot0", "cross"))
+        db.execute("INSERT INTO vectors(record_id,vec) VALUES(?,?)", ("cold%d" % i, b"xx"))
+    db.commit()
+    return db
+
+
+def test_preview_readonly_and_counts(tmp_path):
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db")
+    before = db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    info = m.preview(db, days=180)
+    assert info["records"] == 3, info
+    assert info["bytes"] > 0
+    assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == before, "preview 不许写 ✗"
+
+
+def test_spill_keeps_rows_and_clears_content(tmp_path):
+    m = _cold()
+    hot, cpath = tmp_path / "hot.db", tmp_path / "cold.db"
+    db = _make_hot(hot)
+    res = m.spill(db, cpath, days=180)
+    assert res["ok"] and res["moved"] == 3, res
+    assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 5, "★行不许删（外键的根基）✗"
+    rows = db.execute("SELECT id, content, summary FROM records WHERE cold=1 ORDER BY id").fetchall()
+    assert [r[0] for r in rows] == ["cold0", "cold1", "cold2"]
+    assert all(r[1] == "" for r in rows), "冷行 content 应已置空 ✓"
+    assert [r[2] for r in rows] == ["摘要0", "摘要1", "摘要2"], "summary 必须原样（打分要用）✓"
+    assert db.execute("SELECT id, content FROM records WHERE cold=0 ORDER BY id").fetchall() == \
+        [("hot0", "热正文0"), ("hot1", "热正文1")], "热行一条不动 ✓"
+    assert db.execute("PRAGMA foreign_key_check").fetchall() == [], "★跨边界外键必须完好 ✓"
+    assert db.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 3, "关系行不该被搬 ✓"
+
+
+def test_content_roundtrip_is_lossless(tmp_path):
+    m = _cold()
+    hot, cpath = tmp_path / "hot.db", tmp_path / "cold.db"
+    db = _make_hot(hot)
+    before = dict(db.execute("SELECT id, content FROM records WHERE cold=1").fetchall())
+    assert m.spill(db, cpath, days=180)["ok"]
+    assert m.content_of(cpath, list(before)) == before, "冷库取回必须逐字符一致 ✓"
+    r = m.restore(db, cpath, ids=list(before))
+    assert r["ok"] and r["restored"] == 3, r
+    after = dict(db.execute("SELECT id, content FROM records WHERE cold=1").fetchall())
+    assert after == before, "★restore 后必须与迁移前逐字段一致 ✓"
+    assert m.content_of(cpath, list(before)) == {}, "restore 后冷库副本应已删 ✓"
+
+
+def test_idempotent_and_day_gate(tmp_path):
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db")
+    cpath = tmp_path / "cold.db"
+    assert m.spill(db, cpath, days=180)["moved"] == 3
+    assert m.spill(db, cpath, days=180)["moved"] == 0, "重跑不应重复搬 ✓"
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active) "
+               "VALUES(?,?,?,?,1,?,0)", ("fresh", "S1", "刚归档", "s", time.time() - 5 * 86400))
+    db.commit()
+    assert m.preview(db, days=180)["records"] == 0, "未满 180 天不许搬 ✓"
+
+
+def test_stats_reports_cold_side(tmp_path):
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db")
+    cpath = tmp_path / "cold.db"
+    st0 = m.stats(cpath)
+    assert st0["exists"] is False and st0["records"] == 0
+    m.spill(db, cpath, days=180)
+    st = m.stats(cpath)
+    assert st["exists"] and st["records"] == 3 and st["bytes"] > 0, st
+
+
+def test_fill_contents_backfills_only_empty(tmp_path):
+    """回填：只填空的 ✓ 不覆盖已有正文 ✓ 找不到的保持原样 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db")
+    cpath = tmp_path / "cold.db"
+    m.spill(db, cpath, days=180)
+    rows = [{"id": "cold0", "content": ""}, {"id": "hot0", "content": "热正文0"},
+            {"id": "nope", "content": ""}]
+    out = m.fill_contents(rows, cpath)
+    assert out[0]["content"].startswith("冷正文"), "空正文必须被回填 ✓"
+    assert out[1]["content"] == "热正文0", "已有正文绝不能被覆盖 ✓"
+    assert out[2]["content"] == "", "找不到的原样保留 ✓"
+    assert m.default_path(tmp_path / "hot.db").name == "memory_cold.db"
+
+
+def test_wiring_sites_are_present():
+    """接线守卫：三处入口必须在 ⇒ 以后谁删掉一处，立刻红 ✓"""
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    stor_src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "def _cold_path_of(self" in main_src and "def _cold_fill(self" in main_src
+    assert main_src.count("self._cold_fill(") >= 2, "浏览/详情两处都要回填 ✓"
+    assert 'result["items"] = await self._cold_fill' in main_src, \
+        "面板浏览必须回填（且必须 await ✓ 否则阻塞事件循环 ✗）"
+    assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
+    assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
+    assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
+
+
+def test_recycle_bin_rows_are_included(tmp_path):
+    """回收站（deleted=1）的行也应可外置 ✓ —— 它不参与召回，且 undelete 会取回 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=0)
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trash1", "S1", "被删的正文", "被删摘要"))
+    db.commit()
+    info = m.preview(db, days=180)
+    assert info["records"] == 1 and info["ids"] == ["trash1"], info
+    assert m.spill(db, tmp_path / "cold.db", days=180)["moved"] == 1
+    assert db.execute("SELECT content FROM records WHERE id='trash1'").fetchone()[0] == ""
+    assert db.execute("SELECT COUNT(*) FROM records WHERE id='trash1'").fetchone()[0] == 1, "行必须保留 ✓"
+
+
+def test_exclude_deleted_option(tmp_path):
+    """关掉 include_deleted 时回收站不动 ✓（保留可配置性 ✓）"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=0)
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trash2", "S1", "x", "y"))
+    db.commit()
+    assert m._cold_ids(db, 180, time.time(), include_deleted=False) == []
+    assert m._cold_ids(db, 180, time.time(), include_deleted=True) == ["trash2"]
+
+
+def test_panel_cold_buttons_align_with_backend():
+    """前后端一致性：面板 4 个按钮 ↔ 后端 4 个 action，缺一即红 ✓"""
+    h = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    a = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    for bid, act in (("coldStats", "stats"), ("coldPreview", "preview"),
+                     ("coldSpill", "spill"), ("coldRestore", "restore")):
+        assert ('id="%s"' % bid) in h, "面板缺按钮 %s ✗" % bid
+        assert ('"%s"' % act) in m, "后端缺动作 %s ✗" % act
+    assert "async function coldAction(" in a, "面板缺处理函数 ✗"
+    assert '"/cold?action="' in a, "面板没调用 /cold 接口 ✗"
+    assert a.count('["coldStats", "coldPreview", "coldSpill", "coldRestore"]') == 1, "按钮未绑定 ✗"
+    assert 'id="coldMsg"' in h, "面板缺结果提示区 ✗"
+
+
+def test_cold_auto_is_wired_and_nonblocking():
+    """自动冷归档：必须在 ✓ 受两个开关控制 ✓ 且**不阻塞对话**（create_task 而非 await ✓）"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_auto_once(self" in m, "缺少自动执行方法 ✗"
+    assert "create_task(self._cold_auto_once())" in m, "自动执行没有触发点 ✗"
+    seg = m[m.index("async def _cold_auto_once"):]
+    seg = seg[:seg.index("def _cold_path_of")]
+    for need, why in (("cold_archive_enabled", "总开关"), ("cold_archive_auto", "自动开关"),
+                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里")):
+        pass
+    for need, why in (("cold_archive_enabled", "总开关"), ("cold_archive_auto", "自动开关"),
+                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里")):
+        assert need in seg, "自动执行少了 %s（%s）✗" % (need, why)
+    c = (ROOT / "contracts.py").read_text(encoding="utf-8")
+    cold_src = (ROOT / "cold.py").read_text(encoding="utf-8")
+    assert "VACUUM_MIN_BYTES" in cold_src, "VACUUM 阈值（方案 B）缺失 ✗"
+    assert "vacuumed" in cold_src, "spill 应报告是否 VACUUM 过 ✓"
+    assert (ROOT / "main.py").read_text(encoding="utf-8").count('db.execute("VACUUM")') == 0, \
+        "VACUUM 决策应统一在 cold.py（避免两处各说各话 ✓）"
+    assert "cold_archive_enabled: bool = True" in c, "冷归档必须默认开 ✓"
+    assert "cold_archive_auto: bool = True" in c, "自动执行必须默认开 ✓"
+
+
+def test_cold_auto_runs_at_startup():
+    """按用户要求：**启动后就搬** ⇒ 启动触发必须在；消息到达只作长会话兜底 ✓"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_auto_at_start(self" in m, "缺启动自动执行 ✗"
+    assert "create_task(self._cold_auto_at_start())" in m, "启动时没有触发 ✗"
+    i = m.index("async def build_search_index")
+    assert "_cold_auto_at_start" in m[i : i + 1000], "启动任务应挂在 build_search_index（存量升级用）✓"
+    seg = m[m.index("async def _cold_auto_at_start"):]
+    seg = seg[: seg.index("async def build_search_index")]
+    assert "await asyncio.sleep(6)" in seg, "启动触发必须延时（等应用起来 ✓）"
+    assert "force=False" in seg, "启动触发要走节流（不要绕过节流 ✓）"
+
+
+def _storage_mod():
+    """storage.py 里有相对导入 ⇒ 必须先造出"包"上下文 ✓"""
+    pkg = "cold_test_pkg"
+    if pkg not in sys.modules:
+        m = type(sys)(pkg)
+        m.__path__ = [str(ROOT)]
+        sys.modules[pkg] = m
+    spec = importlib.util.spec_from_file_location(pkg + ".storage", ROOT / "storage.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cold_index_really_created(tmp_path):
+    """冷行索引必须**真的**建出来 ✓ —— 它决定"检查有没有可搬的"走索引还是全表扫"""
+    st = _storage_mod().Store(tmp_path / "x.db")
+    st.initialize()
+    with st.connect() as db:
+        names = [r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")]
+    assert "record_cold" in names, "缺 record_cold 索引 ⇒ 检查会退化成全表扫 ✗"
+    assert "record_deleted" in names, "缺 record_deleted 索引 ⇒ 回收站那条会全表扫 ✗"
+
+
+def test_vacuum_only_for_large_moves(tmp_path):
+    """方案 B：小批量**不** VACUUM（空闲页留着复用 ✓）；大批量才真的缩文件 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "small.db")
+    small = m.spill(db, tmp_path / "small_cold.db", days=180)
+    assert small["moved"] == 3, small
+    assert small.get("vacuumed") is False, "小批量不该 VACUUM（VACUUM 会独占锁几秒 ✗）"
+    db2 = _make_hot(tmp_path / "big.db", n_cold=0)
+    big = "正" * 60000
+    for i in range(100):
+        db2.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active) "
+                    "VALUES(?,?,?,?,1,?,0)",
+                    ("big%d" % i, "S1", big + str(i), "s", time.time() - 400 * 86400))
+    db2.commit()
+    res = m.spill(db2, tmp_path / "big_cold.db", days=180)
+    assert res["moved"] == 100, res
+    assert res.get("vacuumed") is True, "≥5MB 应触发 VACUUM ✓"
+    assert db2.execute("PRAGMA freelist_count").fetchone()[0] == 0, "VACUUM 后不应有空闲页 ✓"
+
+
+def test_cold_fill_never_blocks_event_loop():
+    """★ 冷库读是阻塞 IO ⇒ 必须在 to_thread 里（绝不能在事件循环上直接做 ✗）"""
+    m = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "async def _cold_fill(self" in m, "_cold_fill 必须是 async ✗"
+    seg = m[m.index("async def _cold_fill"):][:1200]
+    assert "await asyncio.to_thread(_work)" in seg, "必须走 to_thread（否则阻塞事件循环 ✗）"
+    assert m.count("await self._cold_fill") == 2, "两个调用点都必须 await ✗"
+    # 反向自检：把 await 去掉后，上面的判据必须不成立 ✓
+    bad = m.replace("await self._cold_fill", "self._cold_fill")
+    assert bad.count("await self._cold_fill") != 2, "守卫发现不了【漏 await】✗"
+
+
+def test_split_queries_equal_or_version(tmp_path):
+    """安全优化验证：拆成两条查询再取并集 ≡ 原来的 `(冷条件) OR deleted=1` ✓
+    （含"又冷又删"的重叠行 ⇒ 去重必须正确 ✓）"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=2)
+    old = time.time() - 400 * 86400
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trashA", "S1", "删的正文", "s"))
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,1,?,0,1)", ("both", "S1", "又冷又删", "s", old))
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,1,?,0,0)", ("oldcold", "S1", "老冷行", "s", old))
+    db.commit()
+    cut = time.time() - 180 * 86400
+    got = set(m._cold_ids(db, 180, time.time(), include_deleted=True))
+    ref = {r[0] for r in db.execute(
+        "SELECT id FROM records WHERE (cold=1 AND (archived_at=0 OR archived_at<=?) OR deleted=1) "
+        "AND content IS NOT NULL AND content <> ''", (cut,))}
+    assert got == ref, "拆分版必须与 OR 版完全等价 ✓（重叠行要去重 ✓）"
+    only_cold = set(m._cold_ids(db, 180, time.time(), include_deleted=False))
+    assert only_cold == {r[0] for r in db.execute(
+        "SELECT id FROM records WHERE cold=1 AND (archived_at=0 OR archived_at<=?) "
+        "AND content IS NOT NULL AND content <> ''", (cut,))}, "关回收站时只取冷行 ✓"
+    assert "both" in got and "trashA" in got and "oldcold" in got, got

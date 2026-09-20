@@ -409,6 +409,18 @@ class Store:
                 db.execute(
                     "ALTER TABLE records ADD COLUMN rotate_used INTEGER NOT NULL DEFAULT 0"
                 )
+            # ★ 冷归档（P7）：此索引必须建在 cold / archived_at **确实存在之后** ✓
+            #   （上面 368/372 行已补齐这两列 ✓；try 兜底 ⇒ 万一失败也只是慢一点 ✗ 不影响初始化 ✓）
+            try:
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS record_cold ON records(cold, archived_at)"
+                )
+                # 回收站（deleted=1）单条件也要能走索引 ✓（复合索引里 deleted 在第 3 位 ⇒ 用不上 ✗）
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS record_deleted ON records(deleted) WHERE deleted=1"
+                )
+            except sqlite3.Error:
+                logger.debug("[cold] record_cold / record_deleted 索引创建失败（忽略 ✓ 只是慢一点）")
             # ★ 2026-09-18：**事实侧也要记账** ✓
             #   原来 `mark_rotation` / `rotation_stats` / `rotation_pick` 只认 records ✗
             #   而事实轮换的候选是 facts 的行 ✓ ⇒ 用事实 id 去 UPDATE records
@@ -915,6 +927,27 @@ class Store:
         self._fts_state = "unavailable"
         return self._fts_state
 
+    def _note_fts(self, path, detail):
+        """记录本轮召回的取数路径（**只写日志 + 记一个内部标记，不参与任何逻辑** ✓）
+
+        ★ 2026-09-20：用于"卡回复"排查 —— 让人一眼看出本轮到底走了哪条路、为什么。
+          设计要点：
+            · 同一 (path, reason) **只在变化时记一条 info** ⇒ 不会每轮刷屏 ✓
+            · 每轮都记一条 debug ⇒ 需要细节时把日志级别调到 DEBUG ✓
+            · 绝不影响返回结果（不读也不写业务数据 ✓）
+        """
+        last = getattr(self, "_fts_last_note", None)
+        key = (path, detail if path != "fast" else "")
+        if key != last:
+            self._fts_last_note = key
+            if path == "fast":
+                logger.info("[recall] 索引快路径生效（%s）", detail)
+            else:
+                logger.info(
+                    "[recall] 本轮走全表参照路径（%s）—— 结果与快路径逐条一致，只是速度较慢；"
+                    "索引就绪后会自动回到快路径", detail)
+        logger.debug("[recall] path=%s %s", path, detail)
+
     def _fts_hits(self, tokens, cap=1200):
         """用 FTS 索引取候选 rowid；索引不可用/命中过宽时返回 None（走全表）。
 
@@ -927,12 +960,15 @@ class Store:
         所以这里直接把它们的 rowid 并进候选列表。
         """
         if not tokens or self._fts_state != "ready":
+            self._note_fts("fallback", "fts_state=%s" % self._fts_state)
             return None
         from .retrieval import fts_match_query
 
         match = fts_match_query(tokens)
         if not match:
+            self._note_fts("fallback", "no-match-expr")
             return None
+        t0 = time.perf_counter()
         try:
             with self.connect() as db:
                 rows = db.execute(
@@ -945,9 +981,13 @@ class Store:
                 ).fetchall()
         except sqlite3.Error:
             self._fts_state = "unavailable"
+            self._note_fts("fallback", "sqlite-error -> unavailable")
             return None
         if len(rows) > cap or len(missing) > cap:
+            self._note_fts("fallback", "too-broad rows=%d missing=%d cap=%d" % (len(rows), len(missing), cap))
             return None
+        _n = len(rows) + len(missing)
+        self._note_fts("fast", "hits=%d ms=%.2f" % (_n, (time.perf_counter() - t0) * 1000))
         return [row["rowid"] for row in rows] + [row["rowid"] for row in missing]
 
     def revision(self):
@@ -2976,6 +3016,10 @@ class Store:
             )
             tier_args = [prefer_sid, dump(list(prefer_users))]
         with self.connect() as db:
+            # ★ 2026-09-20 观测：记录本轮**走哪条取数分支**（纯日志 ✓ 不影响逻辑）
+            logger.debug("[recall] 分支=%s lexical=%r vector=%s fts_state=%s",
+                         "lexical" if (lexical and not vector) else ("vector" if vector else "none"),
+                         (lexical or "")[:40], bool(vector), self._fts_state)
             from .retrieval import squeeze
 
             db.create_function("squeeze", 1, squeeze)
@@ -3522,7 +3566,7 @@ class Store:
                 ]
         return {"kind": kind, "items": rows, "total": total}
 
-    def undelete(self, kind, target):
+    def undelete(self, kind, target, cold_path=None):
         """从回收站还原：软删的条目重新可见，动作本身也写一条版本。"""
         table = "facts" if kind == "fact" else "records"
         with self.connect() as db:
@@ -3549,6 +3593,15 @@ class Store:
                 (target,),
             )
             self.bump(db)
+            # ★ 冷归档（P7）：若正文已被外置，还原时**一并取回**（保持还原后内容完整 ✓）
+            if table == "records":
+                try:
+                    from . import cold as _cold
+                    _p = cold_path or _cold.default_path(self.path)
+                    if Path(_p).exists():
+                        _cold.restore(db, _p, ids=[target])
+                except Exception:
+                    logger.debug("[cold] 还原时取回正文失败（不影响还原本身 ✓）", exc_info=True)
         return True
 
     def reactivate(self, record_id):

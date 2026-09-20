@@ -981,9 +981,25 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception as exc:
             logger.warning("[记忆·Z] 存量时间/发言人回填失败（下次启动会重试）：%s", exc)
 
+    async def _cold_auto_at_start(self):
+        """启动后**延时**跑一次自动冷归档（等应用起来再动 ✓ 失败静默 ✓）
+
+        为什么放启动而不是"第一次对话" ✓：
+          · 启动是自然的维护时机 ✓ 用户**对话时无感知** ✓
+          · 安装插件时库是空的 ⇒ 本函数是空操作 ✓（等价于"安装时不搬" ✓）
+          · 重启也无妨：节流在内存里 ⇒ 每次启动跑一次 ✓ 没东西可搬时开销极小 ✓
+        """
+        try:
+            await asyncio.sleep(6)
+            await self._cold_auto_once(force=False)
+        except Exception:
+            logger.debug("[cold] 启动自动冷归档失败（忽略 ✓ 不影响任何功能）", exc_info=True)
+
     async def build_search_index(self):
         """后台把检索索引补齐（存量用户首次升级时用；不阻塞启动）。"""
         await self.scrub_capture_text()
+        # ★ 冷归档（P7）：启动后就搬 ⇒ 不等"第一次对话"（用户无感知 ✓ 不阻塞启动 ✓）
+        asyncio.create_task(self._cold_auto_at_start())
         await self.backfill_time_provenance()
         if self.store.search_index_state() == "unavailable":
             logger.info("[记忆·Z] 本机 SQLite 无 FTS5，检索走全表（功能不受影响）")
@@ -1361,7 +1377,37 @@ class AlifeMemoryPlugin(BasePlugin):
                     kind, state["rounds"],
                 )
 
-    async def prewarm(self, sid, users, scope):
+    def _search_memo_key(self, sid, query, users, cfg, keyword_hit, prefer):
+        """P5-扩展：关键词召回的 memo 键 —— 预热与实时**必须共用本函数** ✓
+
+        任一处参数不同 ⇒ 键不同 ⇒ 不命中 ⇒ 自动回落实时查询（结果不变 ✓）
+        """
+        reach = cfg.top_k * (2 if keyword_hit else 1)
+        return ("search", sid, query, tuple(users or ()), cfg.recall_scope, reach * 2, sid,
+                cfg.search_active_only, cfg.cold_after_days, cfg.recall_skip_media,
+                tuple(sorted(prefer.items())))
+
+    async def _prefetch_search(self, sid, users, scope, query, cfg):
+        """P5-扩展：把「随消息变化」的关键词召回也提前算 —— 它是唯一真正贵的那条。
+
+        安全性：memo 按 store.revision 失效；命中 ⇒ 参数与 revision 都与实时一致
+        ⇒ 结果逐条相同；参数不符 / 期间有写入 ⇒ 自动回落实时查询 ✓
+        """
+        if cfg is None or not query.strip() or scope == "session":
+            return
+        prefer = ({"prefer_sid": sid, "prefer_users": tuple(users or ())}
+                  if cfg.session_affinity else {})
+        hit = any(w in query for w in cfg.recall_keywords)
+        await self.memo(
+            self._search_memo_key(sid, query, users, cfg, hit, prefer),
+            lambda: self.store.call("search", sid, lexical=query, scope=scope, users=users,
+                                    limit=cfg.top_k * (2 if hit else 1) * 2, exclude_sid=sid,
+                                    active=cfg.search_active_only,
+                                    cold_after_days=cfg.cold_after_days,
+                                    skip_media=cfg.recall_skip_media, **prefer),
+        )
+
+    async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
         消息一到就调用（此时用户还在打字、消息还要走网络），
@@ -1375,6 +1421,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     ("spaced_names",), lambda: self.store.call("spaced_names")
                 ),
             )
+            await self._prefetch_search(sid, users, scope, query, cfg)
         except Exception:
             logger.debug("[记忆·Z] 预热失败（不影响正常注入）", exc_info=True)
 
@@ -1795,9 +1842,13 @@ class AlifeMemoryPlugin(BasePlugin):
         if len(self._prewarm_seen) > 256:
             for key in sorted(self._prewarm_seen, key=self._prewarm_seen.get)[:128]:
                 self._prewarm_seen.pop(key, None)
+        _q = " ".join(capture_text(text_of(_m)) for _m in event_messages(event))
         asyncio.create_task(
-            self.prewarm(sid, user_ids(event), cfg.recall_scope)
+            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
         )
+        # ★ 冷归档（P7）：长会话的兜底 —— 启动已跑过一次，这里按 6 小时节流补跑 ✓
+        #   （内部节流 ✓ 真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
+        asyncio.create_task(self._cold_auto_once())
 
     @on.llm_request(priority=Priority.LOW)
     async def on_request(self, event, req: LLMRequest, *_):
@@ -1972,7 +2023,8 @@ class AlifeMemoryPlugin(BasePlugin):
         related, related_rows, related_shorts = [], [], {}
         if cfg.recall_scope != "session" and query.strip() and not over_budget:
             reach = cfg.top_k * (2 if keyword_hit else 1)
-            matches = await self.store.call(
+            _mkey = self._search_memo_key(sid, query, users, cfg, keyword_hit, prefer)
+            matches = await self.memo(_mkey, lambda: self.store.call(
                 "search",
                 sid,
                 lexical=query,
@@ -1985,7 +2037,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 # v2.18.9：表情/图片-only 的原文默认不进召回 ✗（数据在库里 ✓）
                 skip_media=cfg.recall_skip_media,
                 **prefer,
-            )
+            ))
             local_ids = {r["id"] for r in rows}
             fresh = [
                 r for r in matches["items"]
@@ -3561,6 +3613,40 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             return ""
 
+    @register.api(method="GET", path="/cold", auth=True)
+    async def api_cold(self, action: str = "stats"):
+        """冷归档（P7）入口：action=stats | preview | spill | restore
+
+        · preview 只读 ⇒ 干跑看"将搬多少条 / 释放多少字节" ✓
+        · spill/restore 必须**已启用冷归档** ✓（否则直接拒绝 ✓）
+        · 全部走 cold.py 的引擎（事务 + 失败回滚 + 幂等 ✓）
+        """
+        from . import cold as _cold
+        cfg = self.runtime_settings()
+        enabled = bool(getattr(cfg, "cold_archive_enabled", False))
+        p = self._cold_path_of(cfg) or _cold.default_path(self.store.path)
+        days = int(getattr(cfg, "cold_archive_days", 180) or 180)
+        if action == "stats":
+            return {"ok": True, "enabled": enabled, "days": days, "stats": _cold.stats(p)}
+        if action == "preview":
+            with self.store.connect() as db:
+                info = _cold.preview(db, days)
+            return {"ok": True, "enabled": enabled, "days": days,
+                    "would_move": info["records"], "would_free_bytes": info["bytes"]}
+        if action == "spill":
+            if not enabled:
+                return {"ok": False, "error": "冷归档未启用：请先在设置里打开「冷归档（默认关）」"}
+            with self.store.connect() as db:
+                r = _cold.spill(db, p, days)
+            return {"ok": bool(r.get("ok")), "moved": r.get("moved", 0), "bytes": r.get("bytes", 0)}
+        if action == "restore":
+            if not enabled:
+                return {"ok": False, "error": "冷归档未启用"}
+            with self.store.connect() as db:
+                r = _cold.restore(db, p)
+            return {"ok": bool(r.get("ok")), "restored": r.get("restored", 0)}
+        return {"ok": False, "error": "unknown action"}
+
     @register.api(method="GET", path="/status", auth=True)
     async def api_status(self):
         status = await self.store.call("status")
@@ -3676,6 +3762,80 @@ class AlifeMemoryPlugin(BasePlugin):
                     })
         return {"models": result}
 
+    async def _cold_auto_once(self, force=False):
+        """自动冷归档（P7）：后台把到期的正文搬进冷库 —— **不阻塞对话** ✓ 失败静默 ✓
+
+        · 只在 cold_archive_enabled AND cold_archive_auto 时工作 ✓
+        · 节流：默认 6 小时才跑一次（force=True 供启动时用一次 ✓）
+        · 真正干活在线程里（asyncio.to_thread ✓）⇒ 不占事件循环 ✓
+        · 只在**确实搬了东西**时才 VACUUM（否则白等 ✓）
+        """
+        try:
+            cfg = self.runtime_settings()
+            if not getattr(cfg, "cold_archive_enabled", False):
+                return
+            if not getattr(cfg, "cold_archive_auto", False) and not force:
+                return
+            now = time.time()
+            if not force and now - getattr(self, "_cold_last_auto", 0) < 6 * 3600:
+                return
+            self._cold_last_auto = now
+            p = self._cold_path_of(cfg)
+            if not p:
+                return
+            days = int(getattr(cfg, "cold_archive_days", 180) or 180)
+
+            def _run():
+                from . import cold as _cold
+                with self.store.connect() as db:
+                    # 是否 VACUUM 由 cold.spill 内部按 VACUUM_MIN_BYTES 决定 ✓
+                    #（方案 B：小批量不缩文件 ⇒ 空闲页复用 ✓ 不动锁 ✓）
+                    return _cold.spill(db, p, days)
+
+            res = await asyncio.to_thread(_run)
+            if res.get("moved"):
+                logger.info("[cold] 自动冷归档：搬走 %d 条正文（释放约 %.1f MB ✓ 可随时整批取回 ✓）",
+                            res["moved"], res.get("bytes", 0) / 1048576)
+        except Exception:
+            logger.debug("[cold] 自动冷归档失败（忽略 ✓ 不影响任何功能 ✓）", exc_info=True)
+
+    def _cold_path_of(self, cfg=None):
+        """冷库路径：设置优先 ✓ 否则与热库同目录的 memory_cold.db
+
+        未启用冷归档时返回 None ⇒ 调用方**什么都不做** ⇒ 行为与今天完全一致 ✓
+        """
+        cfg = cfg or self.runtime_settings()
+        if not getattr(cfg, "cold_archive_enabled", False):
+            return None
+        p = (getattr(cfg, "cold_archive_path", "") or "").strip()
+        if p:
+            try:
+                return Path(p)
+            except Exception:
+                return None
+        try:
+            return Path(self.store.path).with_name("memory_cold.db")
+        except Exception:
+            return None
+
+    async def _cold_fill(self, items, cfg=None):
+        """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）
+
+        ★ 2026-09-20：改成 async + to_thread —— 读冷库是**阻塞 IO** ✗
+          绝不能直接在事件循环里做（哪怕只有几毫秒 ✓ 也不能开这个头 ✓）
+        """
+        def _work():
+            p = self._cold_path_of(cfg)
+            if not p or not p.exists():
+                return items
+            from . import cold as _cold
+            return _cold.fill_contents(items, p)
+        try:
+            return await asyncio.to_thread(_work)
+        except Exception:
+            logger.debug("[cold] 回填正文失败（忽略 ✓）", exc_info=True)
+            return items
+
     @register.api(method="POST", path="/search", auth=True)
     async def api_search(self, request: Request):
         q = await self.body(request, Search)
@@ -3696,6 +3856,8 @@ class AlifeMemoryPlugin(BasePlugin):
             # （`recall_skip_media` 只管"喂给模型的召回" ✗ 别把浏览也一起挡了 ✓）
             skip_media=False,
         )
+        # ★ 冷归档（P7）：浏览页要看到**完整原文** ⇒ 冷行的正文从冷库回填 ✓
+        result["items"] = await self._cold_fill(result.get("items") or [])
         ids = {u for r in result["items"] for u in r["users"]} | {
             r["sid"] for r in result["items"]
         }
@@ -3706,6 +3868,9 @@ class AlifeMemoryPlugin(BasePlugin):
     @register.api(method="GET", path="/memory/{record_id}", auth=True)
     async def api_memory(self, record_id: str):
         result = await self.store.call("get", record_id, include_deleted=True)
+        # ★ 冷归档（P7）：单条详情同样要看到完整原文 ✓
+        if isinstance(result, dict):
+            result = (await self._cold_fill([result]))[0]
         if result is None:
             raise HTTPException(404, "archive not found")
         return result
