@@ -156,6 +156,24 @@ for key, p in schema["properties"].items():
         field["type"] = "model_select"
         field["model_type"] = "embedding" if key == "embedding_model" else "llm"
     fields[key] = field
+def _strip_bold(node):
+    """★ 2026-09-20：面板按**纯文本**渲染 ⇒ 写盘前把 schema 里字符串的 ** 去掉 ✓
+
+    关键：**只净化这份"要被显示"的拷贝** ✓
+         contracts.py 里的提示词**保持原样** ✓（模型仍看到原来的强调 ✓ 语义零改动 ✓）
+    """
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            if isinstance(v, str) and "**" in v:
+                node[k] = v.replace("**", "")
+            else:
+                _strip_bold(v)
+    elif isinstance(node, list):
+        for v in node:
+            _strip_bold(v)
+
+
+_strip_bold(schema)
 (root / "schema.json").write_text(
     json.dumps(
         {
@@ -177,3 +195,14 @@ if _missing:
     print("⚠️ 以下配置缺中文标签（已用占位符 ✓ 请补进 names 表）：")
     for _k in _missing:
         print("   -", _k)
+
+# ★ 2026-09-20：写盘后再做一次"文本级"净化 ✓
+#   为什么放这里：上面的写盘是**新建的内联字典** ✗ 只净化输入变量没用 ✓
+#   为什么安全：** 只可能出现在 JSON 的字符串**里** ✓ ⇒ 文本替换绝不会破坏 JSON 结构 ✓
+#   为什么要做：面板按**纯文本**渲染 ⇒ 露出星号 ✗；
+#              而 contracts.py 的提示词**保持原样** ✓（模型仍看到原强调 ✓ 语义零改动 ✓）
+_schema_file = root / "schema.json"
+_txt = _schema_file.read_text(encoding="utf-8")
+if "**" in _txt:
+    _schema_file.write_text(_txt.replace("**", ""), encoding="utf-8")
+    print("已净化 schema.json 里的加强标记 ** （提示词原文不动 ✓）")
