@@ -415,8 +415,12 @@ class Store:
                 db.execute(
                     "CREATE INDEX IF NOT EXISTS record_cold ON records(cold, archived_at)"
                 )
+                # 回收站（deleted=1）单条件也要能走索引 ✓（复合索引里 deleted 在第 3 位 ⇒ 用不上 ✗）
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS record_deleted ON records(deleted) WHERE deleted=1"
+                )
             except sqlite3.Error:
-                logger.debug("[cold] record_cold 索引创建失败（忽略 ✓ 只是每次检查慢一点）")
+                logger.debug("[cold] record_cold / record_deleted 索引创建失败（忽略 ✓ 只是慢一点）")
             # ★ 2026-09-18：**事实侧也要记账** ✓
             #   原来 `mark_rotation` / `rotation_stats` / `rotation_pick` 只认 records ✗
             #   而事实轮换的候选是 facts 的行 ✓ ⇒ 用事实 id 去 UPDATE records

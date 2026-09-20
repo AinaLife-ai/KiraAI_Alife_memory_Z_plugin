@@ -240,6 +240,7 @@ def test_cold_index_really_created(tmp_path):
         names = [r[0] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='index'")]
     assert "record_cold" in names, "缺 record_cold 索引 ⇒ 检查会退化成全表扫 ✗"
+    assert "record_deleted" in names, "缺 record_deleted 索引 ⇒ 回收站那条会全表扫 ✗"
 
 
 def test_vacuum_only_for_large_moves(tmp_path):
@@ -272,3 +273,29 @@ def test_cold_fill_never_blocks_event_loop():
     # 反向自检：把 await 去掉后，上面的判据必须不成立 ✓
     bad = m.replace("await self._cold_fill", "self._cold_fill")
     assert bad.count("await self._cold_fill") != 2, "守卫发现不了【漏 await】✗"
+
+
+def test_split_queries_equal_or_version(tmp_path):
+    """安全优化验证：拆成两条查询再取并集 ≡ 原来的 `(冷条件) OR deleted=1` ✓
+    （含"又冷又删"的重叠行 ⇒ 去重必须正确 ✓）"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db", n_cold=2)
+    old = time.time() - 400 * 86400
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,0,0,1,1)", ("trashA", "S1", "删的正文", "s"))
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,1,?,0,1)", ("both", "S1", "又冷又删", "s", old))
+    db.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active,deleted) "
+               "VALUES(?,?,?,?,1,?,0,0)", ("oldcold", "S1", "老冷行", "s", old))
+    db.commit()
+    cut = time.time() - 180 * 86400
+    got = set(m._cold_ids(db, 180, time.time(), include_deleted=True))
+    ref = {r[0] for r in db.execute(
+        "SELECT id FROM records WHERE (cold=1 AND (archived_at=0 OR archived_at<=?) OR deleted=1) "
+        "AND content IS NOT NULL AND content <> ''", (cut,))}
+    assert got == ref, "拆分版必须与 OR 版完全等价 ✓（重叠行要去重 ✓）"
+    only_cold = set(m._cold_ids(db, 180, time.time(), include_deleted=False))
+    assert only_cold == {r[0] for r in db.execute(
+        "SELECT id FROM records WHERE cold=1 AND (archived_at=0 OR archived_at<=?) "
+        "AND content IS NOT NULL AND content <> ''", (cut,))}, "关回收站时只取冷行 ✓"
+    assert "both" in got and "trashA" in got and "oldcold" in got, got

@@ -49,19 +49,31 @@ def _cold_ids(src, days, now, include_deleted=True):
     为什么回收站也能外置 ✓：回收站的行**不参与召回**（search 里 `deleted=0` ✓）
     且 `undelete()` 会在还原时**从冷库取回正文**（已接线 ✓）⇒ 用户无感 ✓
     条件带 `content <> ''` ⇒ 已搬过的自然跳过 ⇒ **天然幂等** ✓
+
+    ★ 2026-09-20 安全优化：两个条件**分开查、再取并集** ✓
+      原来写成 `(A) OR (B)` ⇒ SQLite 对 OR 往往**用不上索引** ✗（要两边都扫）
+      拆开后：A 走 `record_cold(cold, archived_at)` ✓、B 走 `record_deleted` ✓
+      ⇒ 结果**完全等价**（同一个集合 ✓ 只是顺序可能不同 ⇒ 顺序对搬迁无影响 ✓）
     """
-    cond = "cold=1 AND (archived_at=0 OR archived_at<=?)"
-    args = []
+    out = {}
     if days and int(days) > 0:
-        args.append(now - int(days) * 86400)
+        cut = now - int(days) * 86400
+        rows = src.execute(
+            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> '' "
+            "AND (archived_at=0 OR archived_at<=?)", (cut,)).fetchall()
     else:
-        cond = "cold=1"
+        rows = src.execute(
+            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> ''"
+        ).fetchall()
+    for r in rows:
+        out[r[0]] = None
     if include_deleted:
-        cond = "(%s OR deleted=1)" % cond
-    rows = src.execute(
-        "SELECT id FROM records WHERE %s AND content IS NOT NULL AND content <> ''" % cond,
-        args).fetchall()
-    return [r[0] for r in rows]
+        rows2 = src.execute(
+            "SELECT id FROM records WHERE deleted=1 AND content IS NOT NULL AND content <> ''"
+        ).fetchall()
+        for r in rows2:
+            out[r[0]] = None
+    return list(out)
 
 
 def preview(src, days=180, now=None):
