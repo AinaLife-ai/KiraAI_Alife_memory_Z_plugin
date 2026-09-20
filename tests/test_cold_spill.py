@@ -138,6 +138,10 @@ def test_wiring_sites_are_present():
     assert 'result["items"] = await self._cold_fill' in main_src, \
         "面板浏览必须回填（且必须 await ✓ 否则阻塞事件循环 ✗）"
     assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
+    # ★ 回收站/冷归档页签（面板卡片拿它的行数据**预填编辑器** ✗）也必须回填 ✓
+    i = main_src.index('"trash", kind, category, keyword, offset, 50')
+    assert "await self._cold_fill" in main_src[i:i + 420], \
+        "/trash 没回填 ⇒ 面板点「查看与编辑」会看到空内容 ✗"
     assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
     assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
 
@@ -269,7 +273,7 @@ def test_cold_fill_never_blocks_event_loop():
     assert "async def _cold_fill(self" in m, "_cold_fill 必须是 async ✗"
     seg = m[m.index("async def _cold_fill"):][:1200]
     assert "await asyncio.to_thread(_work)" in seg, "必须走 to_thread（否则阻塞事件循环 ✗）"
-    assert m.count("await self._cold_fill") == 2, "两个调用点都必须 await ✗"
+    assert m.count("await self._cold_fill") >= 2, "调用点必须 await ✗"
     # 反向自检：把 await 去掉后，上面的判据必须不成立 ✓
     bad = m.replace("await self._cold_fill", "self._cold_fill")
     assert bad.count("await self._cold_fill") != 2, "守卫发现不了【漏 await】✗"

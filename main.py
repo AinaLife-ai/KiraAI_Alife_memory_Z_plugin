@@ -4002,6 +4002,10 @@ class AlifeMemoryPlugin(BasePlugin):
         result = await self.store.call(
             "trash", kind, category, keyword, offset, 50
         )
+        # ★ 冷归档（P7）：回收站/冷归档页签的卡片会用**行数据**预填编辑器 ✗
+        #   ⇒ 正文必须在这里回填（否则点「查看与编辑」看到空内容 ✗）
+        if kind == "records":
+            result["items"] = await self._cold_fill(result.get("items") or [])
         ids = {
             row.get("sid", "") for row in result["items"]
         } | {
