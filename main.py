@@ -3709,6 +3709,37 @@ class AlifeMemoryPlugin(BasePlugin):
                     })
         return {"models": result}
 
+    def _cold_path_of(self, cfg=None):
+        """冷库路径：设置优先 ✓ 否则与热库同目录的 memory_cold.db
+
+        未启用冷归档时返回 None ⇒ 调用方**什么都不做** ⇒ 行为与今天完全一致 ✓
+        """
+        cfg = cfg or self.runtime_settings()
+        if not getattr(cfg, "cold_archive_enabled", False):
+            return None
+        p = (getattr(cfg, "cold_archive_path", "") or "").strip()
+        if p:
+            try:
+                return Path(p)
+            except Exception:
+                return None
+        try:
+            return Path(self.store.path).with_name("memory_cold.db")
+        except Exception:
+            return None
+
+    def _cold_fill(self, items, cfg=None):
+        """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）"""
+        try:
+            p = self._cold_path_of(cfg)
+            if not p or not p.exists():
+                return items
+            from . import cold as _cold
+            return _cold.fill_contents(items, p)
+        except Exception:
+            logger.debug("[cold] 回填正文失败（忽略 ✓）", exc_info=True)
+            return items
+
     @register.api(method="POST", path="/search", auth=True)
     async def api_search(self, request: Request):
         q = await self.body(request, Search)
@@ -3729,6 +3760,8 @@ class AlifeMemoryPlugin(BasePlugin):
             # （`recall_skip_media` 只管"喂给模型的召回" ✗ 别把浏览也一起挡了 ✓）
             skip_media=False,
         )
+        # ★ 冷归档（P7）：浏览页要看到**完整原文** ⇒ 冷行的正文从冷库回填 ✓
+        result["items"] = self._cold_fill(result.get("items") or [])
         ids = {u for r in result["items"] for u in r["users"]} | {
             r["sid"] for r in result["items"]
         }
@@ -3739,6 +3772,9 @@ class AlifeMemoryPlugin(BasePlugin):
     @register.api(method="GET", path="/memory/{record_id}", auth=True)
     async def api_memory(self, record_id: str):
         result = await self.store.call("get", record_id, include_deleted=True)
+        # ★ 冷归档（P7）：单条详情同样要看到完整原文 ✓
+        if isinstance(result, dict):
+            result = self._cold_fill([result])[0]
         if result is None:
             raise HTTPException(404, "archive not found")
         return result

@@ -349,6 +349,10 @@ class Settings(Strict):
     rotate_archive_enabled: bool = True
     rotate_archive_chars: int = Field(200, ge=0, le=200000)  # 0 = 不限
     rotate_archive_count: int = Field(3, ge=1, le=20)
+    # ── 冷归档（P7 · v7 定案）：默认关 ⇒ 不启用时行为与今天逐字节一致 ──
+    cold_archive_enabled: bool = False
+    cold_archive_days: int = Field(180, ge=1, le=3650)
+    cold_archive_path: str = ""
     inject_budget_ms: int = Field(default=0, ge=0, le=10000)
     permanent_dedupe_cross_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
     permanent_dedupe: bool = True

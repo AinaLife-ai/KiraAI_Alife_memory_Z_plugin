@@ -183,3 +183,36 @@ def restore(src, cold_path, ids=None):
         return {"restored": 0, "ok": False}
     finally:
         cdb.close()
+
+
+def default_path(hot_db_path):
+    """冷库默认位置：与热库同目录的 memory_cold.db ✓"""
+    return Path(hot_db_path).with_name("memory_cold.db")
+
+
+def fill_contents(rows, cold_path, key="id", field="content"):
+    """把冷库里的正文**回填**进一批行（原地 ✓ 只填空的 ✓ 找不到就保持原样 ✓）
+
+    用途：① 面板浏览（include_cold=True ✓）② 单条详情 ③ 从回收站还原
+    ⇒ 让"看见冷行"的入口拿到的仍是**完整原文** ✓（对上层语义零变化 ✓）
+    """
+    if not rows:
+        return rows
+    ids = []
+    for r in rows:
+        if isinstance(r, dict):
+            v = r.get(key)
+            if v and not str(r.get(field) or "").strip():
+                ids.append(v)
+    if not ids:
+        return rows
+    texts = content_of(cold_path, ids)
+    if not texts:
+        return rows
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        v = r.get(key)
+        if v and not str(r.get(field) or "").strip() and v in texts:
+            r[field] = texts[v]
+    return rows

@@ -3554,7 +3554,7 @@ class Store:
                 ]
         return {"kind": kind, "items": rows, "total": total}
 
-    def undelete(self, kind, target):
+    def undelete(self, kind, target, cold_path=None):
         """从回收站还原：软删的条目重新可见，动作本身也写一条版本。"""
         table = "facts" if kind == "fact" else "records"
         with self.connect() as db:
@@ -3581,6 +3581,15 @@ class Store:
                 (target,),
             )
             self.bump(db)
+            # ★ 冷归档（P7）：若正文已被外置，还原时**一并取回**（保持还原后内容完整 ✓）
+            if table == "records":
+                try:
+                    from . import cold as _cold
+                    _p = cold_path or _cold.default_path(self.path)
+                    if Path(_p).exists():
+                        _cold.restore(db, _p, ids=[target])
+                except Exception:
+                    logger.debug("[cold] 还原时取回正文失败（不影响还原本身 ✓）", exc_info=True)
         return True
 
     def reactivate(self, record_id):

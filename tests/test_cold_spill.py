@@ -111,3 +111,30 @@ def test_stats_reports_cold_side(tmp_path):
     m.spill(db, cpath, days=180)
     st = m.stats(cpath)
     assert st["exists"] and st["records"] == 3 and st["bytes"] > 0, st
+
+
+def test_fill_contents_backfills_only_empty(tmp_path):
+    """回填：只填空的 ✓ 不覆盖已有正文 ✓ 找不到的保持原样 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "hot.db")
+    cpath = tmp_path / "cold.db"
+    m.spill(db, cpath, days=180)
+    rows = [{"id": "cold0", "content": ""}, {"id": "hot0", "content": "热正文0"},
+            {"id": "nope", "content": ""}]
+    out = m.fill_contents(rows, cpath)
+    assert out[0]["content"].startswith("冷正文"), "空正文必须被回填 ✓"
+    assert out[1]["content"] == "热正文0", "已有正文绝不能被覆盖 ✓"
+    assert out[2]["content"] == "", "找不到的原样保留 ✓"
+    assert m.default_path(tmp_path / "hot.db").name == "memory_cold.db"
+
+
+def test_wiring_sites_are_present():
+    """接线守卫：三处入口必须在 ⇒ 以后谁删掉一处，立刻红 ✓"""
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    stor_src = (ROOT / "storage.py").read_text(encoding="utf-8")
+    assert "def _cold_path_of(self" in main_src and "def _cold_fill(self" in main_src
+    assert main_src.count("self._cold_fill(") >= 2, "浏览/详情两处都要回填 ✓"
+    assert 'result["items"] = self._cold_fill' in main_src, "面板浏览必须回填 ✓"
+    assert "def undelete(self, kind, target, cold_path=None)" in stor_src, "还原要能取回 ✓"
+    assert "_cold.restore(db, _p" in stor_src, "还原时必须真的取回正文 ✓"
+    assert "cold_archive_enabled" in main_src, "必须受设置开关控制 ✓"
