@@ -1,0 +1,185 @@
+"""冷归档（P7 · v7 定案）：**骨架行 + content 外置**
+
+定案依据：shared/memory_plan/方案_v7_P7定案_骨架行.md
+  · 热库 records 行**全部保留** ⇒ 外键（edges/vectors/migration_items）**永远成立** ✓
+  · 只把唯一的大字段 **content** 搬进冷库（≈5KB/行 ⇒ 你 41.5MB 的绝大部分 ✓）
+  · 冷库表 **不建外键**（纯存档 ✓ 没有约束要满足 ✓）
+  · 召回/打分读 summary（保持原样 ✓）；整理/提取只碰 active=1 AND cold=0 ✓
+  ⇒ 三者对本次迁移**完全无感** ✓
+  · 默认**关闭**（由设置项控制 ✓）⇒ 不启用时行为与今天逐字节一致 ✓
+
+为什么不是"整行搬迁" ✗（真跑测试推翻 ✓）：
+  edges 可以**跨边界**（from=冷行、to=热行）⇒ 整行搬走时这条关系放哪边都违反外键 ✗
+"""
+
+import logging
+import sqlite3
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+TBL = "cold_content"      # 冷库唯一需要的表 ✓ 无外键 ✓
+
+
+def ensure_cold(cold_path):
+    """幂等建冷库与表（无外键 ⇒ 不会与热库约束冲突 ✓）"""
+    p = Path(cold_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(p), timeout=20)
+    try:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS %s ("
+            " record_id TEXT PRIMARY KEY, content TEXT NOT NULL, moved_at REAL NOT NULL)" % TBL)
+        db.commit()
+    finally:
+        db.close()
+    return p
+
+
+def _cold_ids(src, days, now):
+    """要搬的 id：cold=1 且 content 非空 且（archived_at=0 或已满 days 天）—— 只读 ✓
+
+    条件里带 `content <> ''` ⇒ 已搬过的自然跳过 ⇒ **天然幂等** ✓
+    """
+    if days and int(days) > 0:
+        cut = now - int(days) * 86400
+        rows = src.execute(
+            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> '' "
+            "AND (archived_at=0 OR archived_at<=?)", (cut,)).fetchall()
+    else:
+        rows = src.execute(
+            "SELECT id FROM records WHERE cold=1 AND content IS NOT NULL AND content <> ''"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def preview(src, days=180, now=None):
+    """干跑：将搬多少条 / 预计释放多少字节（**只读** ✓ 一个字节都不写 ✓）"""
+    now = now or time.time()
+    ids = _cold_ids(src, days, now)
+    if not ids:
+        return {"records": 0, "bytes": 0, "ids": []}
+    ph = ",".join("?" * len(ids))
+    size = src.execute(
+        "SELECT COALESCE(SUM(LENGTH(content)),0) FROM records WHERE id IN (%s)" % ph,
+        ids).fetchone()[0]
+    return {"records": len(ids), "bytes": int(size or 0), "ids": ids}
+
+
+def spill(src, cold_path, days=180, now=None, dry=False, chunk=500):
+    """把冷行的 content 搬进冷库并在热库置空 —— **同一事务** ✓ 可重跑 ✓ 失败回滚 ✓
+
+    顺序：先写冷库（提交）⇒ 再同事务里把热库置空 ⇒ 提交 ✓
+    ⇒ 任何时刻"冷库有原文"都成立 ⇒ **永不丢内容** ✓（失败可安全重跑 ✓）
+    """
+    now = now or time.time()
+    info = preview(src, days, now)
+    ids = info["ids"]
+    if not ids:
+        return {"moved": 0, "bytes": 0, "ok": True, "reason": "nothing-to-move"}
+    if dry:
+        return {"moved": 0, "bytes": info["bytes"], "ok": True, "dry": True, "would": len(ids)}
+    cold_path = ensure_cold(cold_path)
+    cdb = sqlite3.connect(str(cold_path), timeout=20)
+    moved = 0
+    try:
+        for i in range(0, len(ids), chunk):
+            part = ids[i:i + chunk]
+            ph = ",".join("?" * len(part))
+            rows = src.execute(
+                "SELECT id, content FROM records WHERE id IN (%s)" % ph, part).fetchall()
+            cdb.executemany(
+                "INSERT OR REPLACE INTO %s(record_id, content, moved_at) VALUES(?,?,?)" % TBL,
+                [(r[0], r[1], now) for r in rows])
+            cdb.commit()
+            src.execute("BEGIN IMMEDIATE")
+            src.execute("UPDATE records SET content='' WHERE id IN (%s)" % ph, part)
+            src.commit()
+            moved += len(rows)
+        return {"moved": moved, "bytes": info["bytes"], "ok": True}
+    except Exception:
+        try:
+            src.rollback()
+        except Exception:
+            pass
+        logger.warning("[cold] 搬迁中断：热库已回滚；冷库可能留有副本（重跑安全 ✓）", exc_info=True)
+        return {"moved": moved, "bytes": 0, "ok": False}
+    finally:
+        cdb.close()
+
+
+def content_of(cold_path, ids, chunk=500):
+    """读时回填：从冷库取回正文（只返回**找到的**键 ✓ 找不到的空着 ⇒ 调用方保持原值 ✓）
+
+    用途：那 4 个"能看见冷行"的入口（面板浏览 / 工具 / 回收站 / 取回）✓
+    """
+    out = {}
+    p = Path(cold_path)
+    ids = [i for i in (ids or []) if i]
+    if not p.exists() or not ids:
+        return out
+    cdb = sqlite3.connect(str(p), timeout=20)
+    try:
+        for i in range(0, len(ids), chunk):
+            part = ids[i:i + chunk]
+            ph = ",".join("?" * len(part))
+            for rid, text in cdb.execute(
+                    "SELECT record_id, content FROM %s WHERE record_id IN (%s)" % (TBL, ph), part):
+                out[rid] = text
+    finally:
+        cdb.close()
+    return out
+
+
+def stats(cold_path):
+    """冷库概况（面板/工具展示用 ✓ 只读 ✓）"""
+    p = Path(cold_path)
+    if not p.exists():
+        return {"exists": False, "records": 0, "bytes": 0}
+    cdb = sqlite3.connect(str(p), timeout=20)
+    try:
+        n, b = cdb.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)),0) FROM %s" % TBL).fetchone()
+        return {"exists": True, "records": int(n or 0), "bytes": int(b or 0),
+                "path": str(p), "size": p.stat().st_size}
+    finally:
+        cdb.close()
+
+
+def restore(src, cold_path, ids=None):
+    """把冷库正文写回热库（事务 ✓）并从冷库删除副本 —— 用于"单条取回"或"整批回滚" ✓
+
+    先写热库成功提交 ⇒ 再删冷库副本 ✓ ⇒ 中途失败最坏是"冷库仍有副本"（重跑安全 ✓）
+    """
+    p = Path(cold_path)
+    if not p.exists():
+        return {"restored": 0, "ok": True, "reason": "no-cold-db"}
+    cdb = sqlite3.connect(str(p), timeout=20)
+    try:
+        if ids:
+            ids = list(ids)
+            ph = ",".join("?" * len(ids))
+            rows = cdb.execute(
+                "SELECT record_id, content FROM %s WHERE record_id IN (%s)" % (TBL, ph),
+                ids).fetchall()
+        else:
+            rows = cdb.execute("SELECT record_id, content FROM %s" % TBL).fetchall()
+        if not rows:
+            return {"restored": 0, "ok": True}
+        src.execute("BEGIN IMMEDIATE")
+        src.executemany("UPDATE records SET content=? WHERE id=?", [(c, r) for r, c in rows])
+        src.commit()
+        cdb.executemany("DELETE FROM %s WHERE record_id=?" % TBL, [(r,) for r, _c in rows])
+        cdb.commit()
+        return {"restored": len(rows), "ok": True}
+    except Exception:
+        try:
+            src.rollback()
+        except Exception:
+            pass
+        logger.warning("[cold] 取回失败：热库已回滚（冷库副本未删 ✓）", exc_info=True)
+        return {"restored": 0, "ok": False}
+    finally:
+        cdb.close()
