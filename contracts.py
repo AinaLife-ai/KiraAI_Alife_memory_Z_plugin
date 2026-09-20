@@ -346,6 +346,9 @@ class Settings(Strict):
     rotate_keep_rounds: int = Field(default=3, ge=1, le=20)
     rotate_min_hits: int = Field(default=2, ge=1, le=10)
     rotate_cooldown_rounds: int = Field(default=10, ge=0, le=100)
+    rotate_archive_enabled: bool = True
+    rotate_archive_chars: int = Field(200, ge=0, le=200000)  # 0 = 不限
+    rotate_archive_count: int = Field(3, ge=1, le=20)
     inject_budget_ms: int = Field(default=0, ge=0, le=10000)
     permanent_dedupe_cross_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
     permanent_dedupe: bool = True

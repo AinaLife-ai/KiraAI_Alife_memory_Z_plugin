@@ -337,6 +337,53 @@ def user_ids(event):
     )
 
 
+SLOT_TAIL_HINT = "…（已截断）"
+
+
+def trim_slot_rows(rows, text_of_row, char_budget=0, count=0):
+    """档案槽的**预算式**挑选（2026-09-19 用户定的规矩 ✓）
+
+    ① 条数 ≤ count（0 = 不限）② **正文合计** ≤ char_budget（0 = 不限 ⇒ 与老行为逐字节一致）
+    ③ 按传入顺序（相关度降序）装；单条超剩余 ⇒ 截到剩余 + 出口提示
+    ④ 剩余不足 40 字 ⇒ 这条不装（残句是噪声）
+    ⑤ 只处理正文；时间/角色/发言人等前缀由渲染侧保证不计入也不截断
+    ⑥ 只给档案槽用：事实槽不传 budget ⇒ 一行行为都不变
+    """
+    if not rows:
+        return []
+    cap = int(count or 0)
+    left = int(char_budget or 0)
+    if not left and not cap:
+        return list(rows)
+    kept = []
+    for row in rows:
+        if cap and len(kept) >= cap:
+            break
+        body = str(text_of_row(row) or "")
+        if not left:
+            kept.append(row)
+            continue
+        if len(body) <= left:
+            kept.append(row)
+            left -= len(body)
+            continue
+        # ★ 用户原话：最不相关的最后一条加上前两条会超过 200 ⇒ **只召回前两条** ✓
+        if kept:
+            break
+        # ★ 用户原话：单条就会超过 200 ⇒ 那条**截断**召回 ✓
+        if left < 40:
+            break
+        keep = max(left - len(SLOT_TAIL_HINT), 20)
+        text = body[:keep].rstrip() + SLOT_TAIL_HINT
+        if row.get("summary"):
+            row["summary"] = text
+        else:
+            row["content"] = text
+        kept.append(row)
+        break
+    return kept
+
+
 def _slot_stamp(row):
     """注入行的时间前缀 ✓ —— **只有真能代表"那件事发生时刻"的，才给到分钟** ✓
 
@@ -1163,7 +1210,7 @@ class AlifeMemoryPlugin(BasePlugin):
 
     async def rotation_extras(
         self, sid, cfg, pool, seen_key, text_of, kind="archive", turn=None
-    ):
+    , count: int = 0, char_budget: int = 0):
         """轮换槽位：从「同样过门槛、但没被选中」的候选里补几条。
 
         ``kind`` 区分「档案」与「事实」：**两边的槽位状态必须分开** ✗
@@ -1173,7 +1220,8 @@ class AlifeMemoryPlugin(BasePlugin):
         - 上一批没被用到 → 原样再留几轮（最多 rotate_keep_rounds）
         - 被用到（或留满）→ 换下一批；下场的那批进入冷却
         """
-        if not cfg.rotate_enabled or cfg.rotate_count <= 0:
+        _cap = int(count or cfg.rotate_count or 0)
+        if not cfg.rotate_enabled or _cap <= 0:
             return []
         holder = self.rotation_state(sid)
         state = holder["slots"].setdefault(
@@ -1183,7 +1231,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # 配置变了（例如门槛被调高、槽位条数改了）→ 上批立刻作废、重挑
         signature = (
             bool(cfg.rotate_enabled),
-            int(cfg.rotate_count),
+            int(_cap),
             int(cfg.rotate_min_hits),
             float(cfg.fact_recall_min_score or 0),
         )
@@ -1230,11 +1278,13 @@ class AlifeMemoryPlugin(BasePlugin):
             [row["id"] for row in candidates],
             holder["shown"],
             holder["used"],
-            cfg.rotate_count,
+            _cap,
         )
         chosen = [row for row in candidates if row["id"] in set(ids)]
         if not chosen:
             return []
+        # ★ 2026-09-19（用户要求）：档案槽的**预算式**挑选 ✓（0 = 不限 ⇒ 老行为不变 ✓）
+        chosen = trim_slot_rows(chosen, text_of, char_budget, count)
         state.update(
             {
                 "rows": chosen,
@@ -1952,7 +2002,7 @@ class AlifeMemoryPlugin(BasePlugin):
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
             # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
-            archive_pool = [
+            archive_pool = [] if not cfg.rotate_archive_enabled else [
                 r for r in fresh[reach:]
                 if r.get("id")
                 and not is_tool_result(r.get("summary"))
@@ -1966,6 +2016,8 @@ class AlifeMemoryPlugin(BasePlugin):
                     recall_key,
                     lambda r: str(r.get("summary") or r.get("content") or ""),
                     "archive",
+                    count=cfg.rotate_archive_count,
+                    char_budget=cfg.rotate_archive_chars,
                     turn=turn_key,
                 )
             related_shorts = await self.shortmap(
