@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 TBL = "cold_content"      # 冷库唯一需要的表 ✓ 无外键 ✓
 
+# ★ 方案 B（2026-09-20）：只有**搬走 ≥5 MB** 才 VACUUM
+#   VACUUM 会独占数据库锁几秒 ✗ ⇒ 小批量不值得为它动锁
+#   （小批量留下的空闲页会被 SQLite 复用 ✓ 不浪费空间 ✓）
+VACUUM_MIN_BYTES = 5 * 1024 * 1024
+
 
 def ensure_cold(cold_path):
     """幂等建冷库与表（无外键 ⇒ 不会与热库约束冲突 ✓）"""
@@ -102,7 +107,12 @@ def spill(src, cold_path, days=180, now=None, dry=False, chunk=500):
             src.execute("UPDATE records SET content='' WHERE id IN (%s)" % ph, part)
             src.commit()
             moved += len(rows)
-        return {"moved": moved, "bytes": info["bytes"], "ok": True}
+        # ★ 方案 B：搬得多才缩文件（VACUUM 独占锁几秒 ⇒ 小批量不动锁 ✓ 空闲页会被复用 ✓）
+        vacuumed = False
+        if moved and info["bytes"] >= VACUUM_MIN_BYTES:
+            src.execute("VACUUM")
+            vacuumed = True
+        return {"moved": moved, "bytes": info["bytes"], "ok": True, "vacuumed": vacuumed}
     except Exception:
         try:
             src.rollback()

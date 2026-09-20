@@ -189,10 +189,17 @@ def test_cold_auto_is_wired_and_nonblocking():
     seg = m[m.index("async def _cold_auto_once"):]
     seg = seg[:seg.index("def _cold_path_of")]
     for need, why in (("cold_archive_enabled", "总开关"), ("cold_archive_auto", "自动开关"),
-                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里"),
-                      ("VACUUM", "搬完才释放空间")):
+                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里")):
+        pass
+    for need, why in (("cold_archive_enabled", "总开关"), ("cold_archive_auto", "自动开关"),
+                      ("6 * 3600", "节流（6 小时）"), ("asyncio.to_thread", "干活在线程里")):
         assert need in seg, "自动执行少了 %s（%s）✗" % (need, why)
     c = (ROOT / "contracts.py").read_text(encoding="utf-8")
+    cold_src = (ROOT / "cold.py").read_text(encoding="utf-8")
+    assert "VACUUM_MIN_BYTES" in cold_src, "VACUUM 阈值（方案 B）缺失 ✗"
+    assert "vacuumed" in cold_src, "spill 应报告是否 VACUUM 过 ✓"
+    assert (ROOT / "main.py").read_text(encoding="utf-8").count('db.execute("VACUUM")') == 0, \
+        "VACUUM 决策应统一在 cold.py（避免两处各说各话 ✓）"
     assert "cold_archive_enabled: bool = True" in c, "冷归档必须默认开 ✓"
     assert "cold_archive_auto: bool = True" in c, "自动执行必须默认开 ✓"
 
@@ -232,3 +239,23 @@ def test_cold_index_really_created(tmp_path):
         names = [r[0] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='index'")]
     assert "record_cold" in names, "缺 record_cold 索引 ⇒ 检查会退化成全表扫 ✗"
+
+
+def test_vacuum_only_for_large_moves(tmp_path):
+    """方案 B：小批量**不** VACUUM（空闲页留着复用 ✓）；大批量才真的缩文件 ✓"""
+    m = _cold()
+    db = _make_hot(tmp_path / "small.db")
+    small = m.spill(db, tmp_path / "small_cold.db", days=180)
+    assert small["moved"] == 3, small
+    assert small.get("vacuumed") is False, "小批量不该 VACUUM（VACUUM 会独占锁几秒 ✗）"
+    db2 = _make_hot(tmp_path / "big.db", n_cold=0)
+    big = "正" * 60000
+    for i in range(100):
+        db2.execute("INSERT INTO records(id,sid,content,summary,cold,archived_at,active) "
+                    "VALUES(?,?,?,?,1,?,0)",
+                    ("big%d" % i, "S1", big + str(i), "s", time.time() - 400 * 86400))
+    db2.commit()
+    res = m.spill(db2, tmp_path / "big_cold.db", days=180)
+    assert res["moved"] == 100, res
+    assert res.get("vacuumed") is True, "≥5MB 应触发 VACUUM ✓"
+    assert db2.execute("PRAGMA freelist_count").fetchone()[0] == 0, "VACUUM 后不应有空闲页 ✓"

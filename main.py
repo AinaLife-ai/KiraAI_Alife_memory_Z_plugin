@@ -3788,11 +3788,9 @@ class AlifeMemoryPlugin(BasePlugin):
             def _run():
                 from . import cold as _cold
                 with self.store.connect() as db:
-                    res = _cold.spill(db, p, days)
-                    if res.get("moved"):
-                        db.execute("VACUUM")
-                        db.commit()
-                    return res
+                    # 是否 VACUUM 由 cold.spill 内部按 VACUUM_MIN_BYTES 决定 ✓
+                    #（方案 B：小批量不缩文件 ⇒ 空闲页复用 ✓ 不动锁 ✓）
+                    return _cold.spill(db, p, days)
 
             res = await asyncio.to_thread(_run)
             if res.get("moved"):
