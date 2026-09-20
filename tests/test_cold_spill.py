@@ -319,3 +319,43 @@ def test_cold_panel_api_never_blocks_event_loop():
     ]
     assert not offenders, "api_cold 顶层还有同步读库 ✗：%s" % offenders
     assert "_cold.stats" in seg and "await asyncio.to_thread(_cold.stats" in seg, "stats 也要走线程 ✓"
+
+
+def test_no_blocking_io_directly_in_async_handlers():
+    """★ 通用守卫（同类 bug 的根治）：async 处理器里**直接**做阻塞 IO ⇒ 卡住整个应用 ✗
+
+    只查「直接体」✓ —— 嵌套 def 里的事不算（只要外面用 to_thread 调用它就没问题 ✓）
+    这条覆盖了之前两次真实事故：_cold_fill 与 api_cold ✗
+    """
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    BLOCK = (
+        "self.store.connect(", "sqlite3.connect(", "_cold.spill(", "_cold.restore(",
+        "_cold.preview(", "_cold.stats(", "_cold.content_of(", "_cold.fill_contents(",
+    )
+    bad = []
+
+    def direct_calls(fn):
+        def walk(stmt):
+            for child in ast.iter_child_nodes(stmt):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue          # 嵌套定义先跳过 ✓（它们可能在线程里被调用 ✓）
+                if isinstance(child, ast.Call):
+                    seg = ast.get_source_segment(src, child) or ""
+                    if any(b in seg for b in BLOCK):
+                        bad.append("%s() 行 %d：%s" % (fn.name, child.lineno, seg[:56]))
+                walk(child)
+
+        for stmt in fn.body:
+            # ★ 语句**本身就是**嵌套定义时也要跳过（否则会把 to_thread 里的活儿误判 ✗）
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            walk(stmt)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef):
+            direct_calls(node)
+    assert not bad, "async 里直接做阻塞 IO ⇒ 会卡住整个应用 ✗：%s" % bad[:3]
