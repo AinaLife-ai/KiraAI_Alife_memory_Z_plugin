@@ -300,11 +300,6 @@ class Store:
               target TEXT NOT NULL, action TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
               before TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS job_item_job ON job_items(job_id);
-            -- v2.18.70：回收站每行都要查一次「这条最后什么时候被改/删」
-            -- （SELECT max(created) FROM versions WHERE kind=? AND target=?）
-            -- 而 versions 表**原先没有任何索引** ⇒ 每行一次全表扫描 ⇒ 页签一切换就卡 ✗
-            -- 单表可达数万行（每次编辑/合并/快照都写一条）⇒ 这里补一个覆盖索引 ✓
-            CREATE INDEX IF NOT EXISTS version_target ON versions(kind, target, created);
             CREATE TABLE IF NOT EXISTS vectors (
               id TEXT PRIMARY KEY REFERENCES records(id), model TEXT NOT NULL,
               revision INTEGER NOT NULL, vector TEXT NOT NULL);
@@ -3551,9 +3546,7 @@ class Store:
                 rows = [
                     self.row(r)
                     for r in db.execute(
-                        "SELECT f.id, f.sid, f.category, f.subject, f.content, f.reason,"
-                        " f.importance, f.deleted, f.created,"
-                        " coalesce((SELECT max(v.created) FROM versions v"
+                        "SELECT f.*, coalesce((SELECT max(v.created) FROM versions v"
                         " WHERE v.kind='fact' AND v.target=f.id),0) AS removed_at"
                         " FROM facts f WHERE " + clause + " ORDER BY removed_at DESC, f.id"
                         " LIMIT ? OFFSET ?",
