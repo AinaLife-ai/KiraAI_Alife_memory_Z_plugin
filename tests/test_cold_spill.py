@@ -545,6 +545,15 @@ async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
         assert "ok" in str(out2) and "false" not in str(out2).lower(), "还原失败: %s" % str(out2)[:80]
         assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
 
+        # v2.18.69（用户拍板）：事实没有"离开上下文"的概念 ⇒ **archive 等同于撤回** ✓
+        out3 = await plugin.correct(event, "archive", kind="fact", ids=[fid], reason="归档")
+        assert "ok" in str(out3) and "false" not in str(out3).lower(), "事实归档失败: %s" % str(out3)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 1, (
+            "事实的 archive 必须等同于撤回（deleted=1）✗"
+        )
+        await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
+
         # 记录那条路也要走通（v2.18.68：archive → restore → delete → restore 四步全过 ✓）
         rid = store.memorize(sid, "一条可归档的记录", ["a:u"], 1.0, 2.0)
 

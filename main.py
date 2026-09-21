@@ -3574,11 +3574,17 @@ class AlifeMemoryPlugin(BasePlugin):
                 if kind == "fact":
                     # v2.18.66：事实的可编辑字段里**没有 active** ✗（那是记录独有的）
                     # 以前这里保留 active ⇒ edit 会直接 ValueError("invalid editable fields") ✗
-                    patch = {
-                        key: value
-                        for key, value in patch.items()
-                        if key in ("deleted",)
-                    }
+                    # v2.18.69（用户拍板）：事实没有"离开上下文"这个概念 ⇒ **archive 等同于撤回** ✓
+                    #   ⇒ bot 说"把这条事实归档"也能落到"撤回"上 ✓（不然报错、白费一轮 ✗）
+                    patch = (
+                        {"deleted": True}
+                        if action == "archive"
+                        else {
+                            key: value
+                            for key, value in patch.items()
+                            if key in ("deleted",)
+                        }
+                    )
                 done = []
                 for value in real_ids:
                     # v2.18.66：`get_fact` **根本不存在** ✗（真跑会 AttributeError）
