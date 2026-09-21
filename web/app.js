@@ -747,7 +747,9 @@ async function loadArchives() {
             "<small>" +
             date(r.end) +
             "</small></div><p>" +
-            esc(r.summary) +
+            // v2.18.65：不能只靠 summary ✗（摘要为空的记录卡片会是一片空白 ✓
+            // 实测 /search 同时返回 content ⇒ 回退即可）
+            esc(r.summary || r.content || r.preview || "") +
             '</p><div class="meta">' +
             esc(displayLabel(r.sid)) +
             "<br>" +
@@ -1162,6 +1164,11 @@ function renderRecord() {
     date(r.end);
   $("#editLabel").textContent = "可编辑摘要（原文保留：只剥掉协议外壳与思考块）";
   $("#editText").value = r.summary;
+  // v2.18.65：没有摘要的记录 ⇒ 给一句说明（只改提示 ✓ **不动数据** ✓）
+  // 不拿 content 预填 ✗ —— 那会让"保存"把原文误写成摘要 ✗
+  $("#editText").placeholder = r.summary
+    ? ""
+    : "这条没有摘要（卡片与列表会自动显示原文）…";
   $("#factFields").classList.add("hide");
   $("#sources").classList.remove("hide");
   $("#sourceText").textContent =

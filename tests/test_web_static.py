@@ -287,3 +287,15 @@ def test_trash_note_has_fallback():
     """页签说明取不到值时要有兜底 ⇒ 不能把 "undefined" 显示给用户"""
     js = (WEB / "app.js").read_text(encoding="utf-8")
     assert '}[trashKind] || ""' in js, "说明行必须兜底成空串"
+
+
+def test_archive_browse_card_body_falls_back_to_content():
+    """v2.18.65 审计追加：浏览页（记忆存档）卡片正文同样不能只靠 summary
+
+    实测：/search 同时返回 summary 与 content ⇒ 摘要为空的记录原本卡片一片空白 ✗
+    编辑弹窗**不**用 content 预填（否则保存会把原文误写成摘要 ✗）⇒ 只加 placeholder ✓
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'esc(r.summary || r.content || r.preview || "")' in js, "浏览页卡片正文要回退到 content ✗"
+    assert '$("#editText").placeholder' in js, "没有摘要时编辑框要给提示 ✗"
+    assert '$("#editText").value = r.summary;' in js, "编辑框仍只装 summary ✗（不能拿 content 预填）"
