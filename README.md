@@ -381,20 +381,6 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
 
-### v2.18.70
-- ⚡ **修掉回收站「切页签很卡」的真因：`versions` 表缺索引**（实测 2.3 秒 → 17 毫秒）
-  · 现象：事实 / 存档（已删除）/ 冷归档 三个页签切换要等 **2 秒以上**
-  · 根因：`trash()` 对**每一行**都要查一次「这条最后被改/删的时间」——
-    `SELECT max(created) FROM versions WHERE kind=? AND target=?`
-    而 `versions` 表**原先没有任何索引** ⇒ 每行一次**全表扫描** ✗
-    （该表每次编辑 / 合并 / 快照都会写一条 ⇒ 很容易到几万行）
-  · 修法：新增覆盖索引 `version_target (kind, target, created)`
-    （`CREATE INDEX IF NOT EXISTS` ⇒ 老库在加载时会自动补上 ✓ 无需迁移 ✓）
-  · **实测**（600 条事实 + 4 万条 versions）：**2340.8 ms → 16.8 ms**（约 139 倍）
-    · 查询计划已从 `SCAN versions` 变成 `SEARCH versions USING COVERING INDEX version_target`
-  · 顺带：事实页签的 `SELECT f.*` 收窄成实际需要的列（响应体积更小 ✓）
-  · 新增守卫 `test_versions_index_exists_and_is_used`（索引存在 + 查询计划必须走索引）
-
 ### v2.18.69
 - ✨ **事实的 `archive` 现在等同于「撤回」**（用户拍板 ✓）
   · 背景：事实本来就没有「离开上下文」这个概念（那是记录的 active ✓）
