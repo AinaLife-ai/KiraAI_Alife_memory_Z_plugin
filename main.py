@@ -3445,7 +3445,9 @@ class AlifeMemoryPlugin(BasePlugin):
             owners = set()
             if reset:
                 # 指定了条目：按它们各自的归属会话排队（让这几条立刻可被整理）
-                await self.store.call("touch_tidy_at", reset, 0)
+                # v2.18.66：原来调的是 touch_tidy_at(reset, 0) —— 这个方法不存在（真跑会 AttributeError）
+                # ⇒ touch_tidy 现在支持传时间戳：传 0 = 把限流清零 ⇒ 这几条立刻可被整理 ✓
+                await self.store.call("touch_tidy", reset, 0)
                 for record_id in reset:
                     row = await self.store.call("get", record_id)
                     if row and row["permanent"]:
@@ -3562,7 +3564,13 @@ class AlifeMemoryPlugin(BasePlugin):
                     }
                 done = []
                 for value in real_ids:
-                    row = await self.store.call("get_fact" if kind == "fact" else "get", value)
+                    # v2.18.66：`get_fact` **根本不存在** ✗（真跑会 AttributeError）
+                    # ⇒ 事实走 facts_by_ids（带 include_deleted ⇒ 已撤回的也能编辑/还原 ✓）
+                    if kind == "fact":
+                        facts = await self.store.call("facts_by_ids", [value], True)
+                        row = facts[0] if facts else None
+                    else:
+                        row = await self.store.call("get", value)
                     if not row:
                         continue
                     await self.store.call(

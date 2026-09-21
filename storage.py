@@ -3405,8 +3405,13 @@ class Store:
                 [time.time(), *ids],
             )
 
-    def touch_tidy(self, ids):
-        """记一次「刚整理过」，配合 tidy_days 做幂等限流。"""
+    def touch_tidy(self, ids, at=None):
+        """记一次「刚整理过」，配合 tidy_days 做幂等限流。
+
+        v2.18.66：`at` 可选 —— 传 0 表示**把限流清零**（让这几条立刻可被整理 ✓）
+        「指定条目重新整理」那条路本来调的是 `touch_tidy_at(ids, 0)` ✗ 但这个方法**根本不存在** ✗
+        ⇒ 真跑起来是 AttributeError（好在没人踩到过）⇒ 现在由本方法承担这个语义 ✓
+        """
         ids = [value for value in dict.fromkeys(ids or []) if value]
         if not ids:
             return
@@ -3414,7 +3419,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 f"UPDATE records SET tidy_at=? WHERE id IN ({marks})",
-                [time.time(), *ids],
+                [time.time() if at is None else at, *ids],
             )
 
     def add_facts(self, sid, facts):

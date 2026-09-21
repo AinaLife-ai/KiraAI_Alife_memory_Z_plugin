@@ -451,3 +451,28 @@ async def test_trash_api_returns_preview_and_totals(tmp_path):
         assert any(len(p) == 300 for p in previews), "preview 必须截到 300 字 ✗"
     finally:
         await plugin.terminate()
+
+
+def test_touch_tidy_accepts_timestamp_for_reset(tmp_path):
+    """v2.18.66：touch_tidy(ids, 0) 必须能把限流清零（指定条目立刻可整理）
+
+    原来那条路调的是不存在的 touch_tidy_at(ids, 0) ⇒ 真跑 AttributeError
+    """
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:tidy_at"
+    store.capture(
+        sid,
+        "e1",
+        [dict(role="user", content="随便一条", summary="s", users=["a:u"], time=time.time())],
+    )
+    with store.connect() as db:
+        rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+    store.touch_tidy([rid])          # 默认 = 记 now ✓
+    with store.connect() as db:
+        marked = db.execute("SELECT tidy_at FROM records WHERE id=?", (rid,)).fetchone()[0]
+    assert marked > 0, "默认应记当前时间 ✓"
+    store.touch_tidy([rid], 0)       # 传 0 = 清零 ✓
+    with store.connect() as db:
+        reset = db.execute("SELECT tidy_at FROM records WHERE id=?", (rid,)).fetchone()[0]
+    assert reset == 0, "传 0 必须把限流清零 ✗"
