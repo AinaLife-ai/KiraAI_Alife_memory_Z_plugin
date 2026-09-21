@@ -503,8 +503,8 @@
       "rotate_archive_enabled": {
         "type": "switch",
         "name": "档案槽独立开关（不关事实槽）",
-        "default": true,
-        "description": "档案轮换槽的独立开关。关闭后档案槽完全不参与召回，事实轮换槽照常轮换。默认：开。注意：它只关档案槽，不影响「轮换召回槽位」这个总开关。"
+        "default": false,
+        "description": "档案轮换槽的独立开关。关闭后档案槽完全不参与召回，事实轮换槽照常轮换。默认：关（存量配置首次运行会自动改成关，想用的自己打开）。注意：它只关档案槽，不影响「轮换召回槽位」这个总开关。"
       },
       "rotate_archive_chars": {
         "type": "integer",

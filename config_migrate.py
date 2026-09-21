@@ -7,7 +7,7 @@ defaults (including prompt wording) without overriding personal choices.
 
 from .contracts import FACT_MERGE_PROMPT, RECORD_MERGE_PROMPT
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 # v2.18.9 之前的 fact_merge_prompt 默认文案 ✓
 # 只用来把"从没改过措辞"的存量配置升到新文案 ✓ 用户自己改过的一律不碰 ✓
@@ -36,6 +36,12 @@ MIGRATIONS = {
     5: [
         # v2.18.9：提示词加了"标签跟随内容更新" ✓ 再升一次 ✓
         ("fact_merge_prompt", _V4_FACT_MERGE_PROMPT, FACT_MERGE_PROMPT),
+    ],
+    6: [
+        # v2.18.56：「档案轮换槽」独立开关改为**默认关** ✓
+        # 存量配置里存的都是旧默认 True（框架灌的默认值，或用户自己开的都算），
+        # 一律一次性改成 False ✓ —— 想用的人自己再打开 ✓ 之后迁移不再跑 ✓ 不会被动过 ✓
+        ("rotate_archive_enabled", True, False),
     ],
 }
 

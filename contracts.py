@@ -199,7 +199,10 @@ class AuditAction(Strict):
     action: Literal["keep", "correct", "merge", "retract"]
     target_id: Short
     source_ids: list[Short] = Field(min_length=1, max_length=100)
-    content: Text
+    # v2.18.58：只有 correct / merge 会用到 content（keep 直接跳过 ✓ retract 只软删 ✓）
+    # ⇒ 不设成必填 ✗ —— 提示词没要求每条都给 content ✓ 强制必填只会把
+    #   "keep 没带 content" 这种合乎提示词的输出判失败、白走一次重试 ✗（同 FactMergeGroup 的教训 ✓）
+    content: Text = ""
     reason: Short
     relations: list[Relation] | None = Field(default=None, max_length=20)
     importance: int | None = Field(default=None, ge=1, le=10)
@@ -211,6 +214,13 @@ class AuditAction(Strict):
     # v2.18.9 回声防线：证据只有助手自己（evidence[].bot=1）时填 true ✓
     # 应用侧会**拒绝据此提升 importance** ✗（不许自我强化）
     only_self: bool = False
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        # 只有真的会改写正文的动作才要 content ✓
+        if self.action in ("correct", "merge") and not self.content.strip():
+            raise ValueError("correct/merge requires content")
+        return self
 
 
 class Audit(Strict):
@@ -346,7 +356,9 @@ class Settings(Strict):
     rotate_keep_rounds: int = Field(default=3, ge=1, le=20)
     rotate_min_hits: int = Field(default=2, ge=1, le=10)
     rotate_cooldown_rounds: int = Field(default=10, ge=0, le=100)
-    rotate_archive_enabled: bool = True
+    # v2.18.56：默认改为**关** ✓ —— 档案槽独立开关交给用户按需打开 ✓
+    # 存量配置（存着旧默认 True）由 config_migrate 的 v6 一次性改写 ✓
+    rotate_archive_enabled: bool = False
     rotate_archive_chars: int = Field(200, ge=0, le=200000)  # 0 = 不限
     rotate_archive_count: int = Field(3, ge=1, le=20)
     # ── 冷归档（P7 · v7 定案）：默认关 ⇒ 不启用时行为与今天逐字节一致 ──
