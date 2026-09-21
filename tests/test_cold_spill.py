@@ -359,3 +359,29 @@ def test_no_blocking_io_directly_in_async_handlers():
         if isinstance(node, ast.AsyncFunctionDef):
             direct_calls(node)
     assert not bad, "async 里直接做阻塞 IO ⇒ 会卡住整个应用 ✗：%s" % bad[:3]
+
+
+def test_trash_returns_preview_even_when_summary_is_empty(tmp_path):
+    """v2.18.65：卡片正文不能只靠 summary ✗ 没摘要的记录必须拿得到 preview ✓"""
+    import time as _time
+
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:preview"
+    now = _time.time()
+    store.capture(
+        sid,
+        "e1",
+        [dict(role="user", content="正文内容一段话", summary="", users=["a:u"], time=now)],
+    )
+    with store.connect() as db:
+        rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+        db.execute("UPDATE records SET summary='' WHERE id=?", (rid,))
+        db.execute("UPDATE records SET deleted=1 WHERE id=?", (rid,))
+        db.commit()
+    out = store.trash("records", "", "", 0, 50)
+    row = out["items"][0]
+    assert row.get("preview"), "summary 为空时 preview 必须带正文 ✗"
+    assert "正文内容" in row["preview"], "preview 应该是原文 ✗"
+    stats = store.trash_stats()
+    assert stats["records"] >= 1 and set(stats) == {"facts", "records", "cold"}

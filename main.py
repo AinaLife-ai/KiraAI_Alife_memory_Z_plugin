@@ -4022,10 +4022,17 @@ class AlifeMemoryPlugin(BasePlugin):
         result = await self.store.call(
             "trash", kind, category, keyword, offset, 50
         )
-        # ★ 冷归档（P7）：回收站/冷归档页签的卡片会用**行数据**预填编辑器 ✗
-        #   ⇒ 正文必须在这里回填（否则点「查看与编辑」看到空内容 ✗）
-        if kind == "records":
-            result["items"] = await self._cold_fill(result.get("items") or [])
+        # ★ 冷归档（P7）：回收站/冷归档页签的卡片正文
+        #   v2.18.65：卡片改成读「preview」（摘要优先、没摘要截原文 ✓）
+        #   ⇒ 这里回填 preview 即可（只填空的 ✓ 截到 300 字省流量 ✓）
+        #   ⇒ 正文全文仍由「查看与编辑」用 /memory/{id} 取（那条路照旧回填 content ✓）
+        if kind in ("records", "cold"):
+            items = await self._cold_fill(result.get("items") or [], field="preview")
+            for row in items:
+                if isinstance(row.get("preview"), str) and len(row["preview"]) > 300:
+                    row["preview"] = row["preview"][:300]
+            result["items"] = items
+        totals = await self.store.call("trash_stats")
         ids = {
             row.get("sid", "") for row in result["items"]
         } | {
@@ -4038,7 +4045,7 @@ class AlifeMemoryPlugin(BasePlugin):
             for n in await self.store.call("entities", ids=ids, limit=1000)
             if n["name"]
         }
-        return {**result, "names": names}
+        return {**result, "names": names, "totals": totals}
 
     @register.api(method="POST", path="/trash/restore", auth=True)
     async def api_trash_restore(self, request: Request):

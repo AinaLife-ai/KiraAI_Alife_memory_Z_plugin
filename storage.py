@@ -3552,11 +3552,16 @@ class Store:
                 total = db.execute(
                     "SELECT count(*) FROM records WHERE " + clause, args
                 ).fetchone()[0]
+                # v2.18.65：卡片正文改成「摘要优先，没摘要就截原文」
+                # （以前只带 summary ⇒ summary 为空的记录卡片一片空白 ✗）
                 rows = [
                     self.row(r)
                     for r in db.execute(
                         "SELECT id,sid,level,summary,start,end,users,permanent,cold,"
-                        "archived_at,deleted, coalesce((SELECT max(v.created) FROM"
+                        "archived_at,deleted,"
+                        " coalesce(nullif(summary,''), substr(coalesce(content,''),1,300))"
+                        " AS preview,"
+                        " coalesce((SELECT max(v.created) FROM"
                         " versions v WHERE v.kind='record' AND v.target=records.id),0)"
                         " AS removed_at FROM records WHERE " + clause
                         + " ORDER BY coalesce(nullif(archived_at,0), removed_at) DESC, id"
@@ -3565,6 +3570,18 @@ class Store:
                     )
                 ]
         return {"kind": kind, "items": rows, "total": total}
+
+    def trash_stats(self):
+        """回收站三个页签各有多少条（v2.18.65 一次查完，供面板显示数量）"""
+        with self.connect() as db:
+            facts = db.execute("SELECT count(*) FROM facts WHERE deleted=1").fetchone()[0]
+            records = db.execute(
+                "SELECT count(*) FROM records WHERE deleted=1"
+            ).fetchone()[0]
+            cold = db.execute(
+                "SELECT count(*) FROM records WHERE deleted=0 AND cold=1"
+            ).fetchone()[0]
+        return {"facts": facts, "records": records, "cold": cold}
 
     def undelete(self, kind, target, cold_path=None):
         """从回收站还原：软删的条目重新可见，动作本身也写一条版本。"""

@@ -325,7 +325,7 @@
           <div class="notice">
             这里放已经不在上下文里的记忆：被审计撤回或合并掉的事实、被删除的存档，以及冷归档。还原后它们会重新参与检索；冷归档只按 ID 可读。
           </div>
-          <div class="notice">
+          <div class="notice hide" id="coldTools">
             <div class="actions">
               <button id="coldStats">冷归档状态</button
               ><button id="coldPreview">预览可搬</button
@@ -339,8 +339,8 @@
           <div class="filters">
             <div class="actions">
               <button id="trashFacts" aria-pressed="true">事实</button
-              ><button id="trashRecords" aria-pressed="false">存档</button
-              ><button id="trashCold" aria-pressed="false">冷归档</button>
+              ><button id="trashRecords" aria-pressed="false">存档（已删除）</button
+              ><button id="trashCold" aria-pressed="false">冷归档（仍生效）</button>
             </div>
             <input
               id="trashKeyword"
@@ -348,6 +348,7 @@
               placeholder="按内容搜索…"
             /><button id="trashSearch" class="primary">查找</button>
           </div>
+          <small class="muted" id="trashNote"></small>
           <div id="trashCards" class="cards"></div>
           <div class="pager">
             <button id="trashPrev">上一页</button><span id="trashPage"></span

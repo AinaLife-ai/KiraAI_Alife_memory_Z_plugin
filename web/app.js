@@ -800,6 +800,23 @@ async function loadTrash() {
   });
   const data = await api("/trash?" + q);
   Object.assign(displayNames, data.names || {});
+  // v2.18.65：把"什么时候算冷归档"讲清楚（以前靠猜 ✗）
+  const totals = data.totals || {};
+  $("#trashFacts").textContent = "事实" + (totals.facts ? " " + totals.facts : "");
+  $("#trashRecords").textContent =
+    "存档（已删除）" + (totals.records ? " " + totals.records : "");
+  $("#trashCold").textContent =
+    "冷归档（仍生效）" + (totals.cold ? " " + totals.cold : "");
+  const note = $("#trashNote");
+  if (note)
+    note.textContent = {
+      facts: "被审计撤回或合并掉的事实；「还原」后会重新参与检索。",
+      records: "这些记录已经**删掉**（离开上下文），原文还在库里；点「还原到上下文」就回到检索。",
+      cold: "这些记录**没有**被删，只是正文搬去了独立冷库；「查看与编辑」照常能读全文，召回也不受影响。",
+    }[trashKind];
+  // 冷归档那四个按钮是**全局操作** ⇒ 只在冷归档页签时显示（以前常驻 ⇒ 看着像属于当前列表 ✗）
+  const coldTools = $("#coldTools");
+  if (coldTools) coldTools.classList.toggle("hide", trashKind !== "cold");
   $("#trashCards").innerHTML = data.items.length
     ? data.items
         .map((row, i) => {
@@ -815,13 +832,23 @@ async function loadTrash() {
           const head = facts
             ? esc(displayLabel(row.subject))
             : esc(displayLabel(row.sid));
-          const body = facts ? row.content : row.summary;
+          const body = facts
+            ? row.content
+            : row.content || row.summary || row.preview;
+          // v2.18.65：状态词统一（以前"存档"页签的卡片写着"历史存档"✗ 看不出区别）
+          const status = facts
+            ? null
+            : cold
+              ? "冷归档 · 正文在冷库"
+              : row.deleted
+                ? "已删除 · 可还原"
+                : "历史存档";
           const meta = [
             facts ? "重要度 " + row.importance : null,
             facts ? esc(row.reason ? "依据：" + row.reason : "") : null,
+            status,
             date(row.start || row.created),
             row.removed_at ? "离开上下文 " + date(row.removed_at) : null,
-            cold ? "仅按 ID 可读" : null,
           ]
             .filter(Boolean)
             .join(" · ");
@@ -841,7 +868,7 @@ async function loadTrash() {
                 '">取回上下文</button>'
               : '<button class="primary" data-trashrestore="' +
                 i +
-                '">还原</button>') +
+                '">还原到上下文</button>') +
             '<button data-trashtarget="' +
             i +
             '">查看与编辑</button>' +
@@ -886,7 +913,10 @@ async function loadTrash() {
         guard(async () => {
           const row = data.items[Number(b.dataset.trashpurge)];
           const kind = trashKind === "facts" ? "fact" : "record";
-          const summary = trashKind === "facts" ? row.content : row.summary;
+          const summary =
+            trashKind === "facts"
+              ? row.content
+              : row.content || row.summary || row.preview;
           await askPurge(kind, row.id, summary);
         })),
   );
