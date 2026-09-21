@@ -2815,12 +2815,26 @@ class AlifeMemoryPlugin(BasePlugin):
             ],
         )
 
-    async def accessible(self, event, record_id):
+    async def accessible(self, event, record_id, include_deleted=False):
         if not self.runtime_settings().enabled:
             raise ValueError("memory paused")
-        row = await self.store.call("get", record_id)
+        # v2.18.68：`include_deleted` —— 「删除后再还原」必须能看到**已删除**的那条 ✗
+        #   以前写死 get() ⇒ 已删除的记录查不到 ⇒ 还原报 "archive not found" ✗（真跑实测 ✓）
+        #   ⚠️ 默认仍是 False ⇒ 读取类入口的行为**完全不变** ✓ 只有维护动作显式传 True ✓
+        row = await self.store.call("get", record_id, include_deleted)
         if not row:
-            raise ValueError("archive not found")
+            # v2.18.68：**事实的 id 不在 records 表里** ✗
+            #   以前这里直接 raise "archive not found" ⇒ 「对事实做删除/还原/归档」这条路
+            #   **从来就没走通过** ✗（真跑实测 ✓）
+            #   现在：用事实自己的 sources（它挂靠的记录）**复用同一套可见性判断** ✓
+            #   ⚠️ 不放宽权限：一条 source 都过不了 ⇒ 拒绝 ✓；没有 sources 的事实 ⇒ 也拒绝 ✓
+            facts = await self.store.call("facts_by_ids", [record_id], True)
+            if not facts:
+                raise ValueError("archive not found")
+            for source in facts[0].get("sources") or ():
+                if await self.store.call("get", source):
+                    return await self.accessible(event, source)
+            raise ValueError("archive outside configured scope")
         cfg = self.settings
         if row["visibility"] == "global" or (
             row["visibility"] == "user" and set(row["users"]) & set(user_ids(event))
@@ -3445,7 +3459,9 @@ class AlifeMemoryPlugin(BasePlugin):
             owners = set()
             if reset:
                 # 指定了条目：按它们各自的归属会话排队（让这几条立刻可被整理）
-                await self.store.call("touch_tidy_at", reset, 0)
+                # v2.18.66：原来调的是 touch_tidy_at(reset, 0) —— 这个方法不存在（真跑会 AttributeError）
+                # ⇒ touch_tidy 现在支持传时间戳：传 0 = 把限流清零 ⇒ 这几条立刻可被整理 ✓
+                await self.store.call("touch_tidy", reset, 0)
                 for record_id in reset:
                     row = await self.store.call("get", record_id)
                     if row and row["permanent"]:
@@ -3547,7 +3563,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 if not real_ids:
                     return dump({"ok": False, "error": "ids_required"})
                 for value in real_ids:
-                    await self.accessible(event, value)
+                    # v2.18.68：维护动作要能处理**已删除**的条目（「删除后再还原」✓）
+                    await self.accessible(event, value, True)
                 if action == "delete":
                     patch = {"deleted": True}
                 elif action == "restore":
@@ -3555,14 +3572,29 @@ class AlifeMemoryPlugin(BasePlugin):
                 else:
                     patch = {"active": False}
                 if kind == "fact":
-                    patch = {
-                        key: value
-                        for key, value in patch.items()
-                        if key in ("deleted", "active")
-                    }
+                    # v2.18.66：事实的可编辑字段里**没有 active** ✗（那是记录独有的）
+                    # 以前这里保留 active ⇒ edit 会直接 ValueError("invalid editable fields") ✗
+                    # v2.18.69（用户拍板）：事实没有"离开上下文"这个概念 ⇒ **archive 等同于撤回** ✓
+                    #   ⇒ bot 说"把这条事实归档"也能落到"撤回"上 ✓（不然报错、白费一轮 ✗）
+                    patch = (
+                        {"deleted": True}
+                        if action == "archive"
+                        else {
+                            key: value
+                            for key, value in patch.items()
+                            if key in ("deleted",)
+                        }
+                    )
                 done = []
                 for value in real_ids:
-                    row = await self.store.call("get_fact" if kind == "fact" else "get", value)
+                    # v2.18.66：`get_fact` **根本不存在** ✗（真跑会 AttributeError）
+                    # ⇒ 事实走 facts_by_ids（带 include_deleted ⇒ 已撤回的也能编辑/还原 ✓）
+                    if kind == "fact":
+                        facts = await self.store.call("facts_by_ids", [value], True)
+                        row = facts[0] if facts else None
+                    else:
+                        # v2.18.68：维护动作也可能针对**已删除**的记录（还原 ✓）
+                        row = await self.store.call("get", value, True)
                     if not row:
                         continue
                     await self.store.call(
@@ -3834,7 +3866,7 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             return None
 
-    async def _cold_fill(self, items, cfg=None):
+    async def _cold_fill(self, items, cfg=None, field="content"):
         """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）
 
         ★ 2026-09-20：改成 async + to_thread —— 读冷库是**阻塞 IO** ✗
@@ -3845,7 +3877,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if not p or not p.exists():
                 return items
             from . import cold as _cold
-            return _cold.fill_contents(items, p)
+            return _cold.fill_contents(items, p, field=field)
         try:
             return await asyncio.to_thread(_work)
         except Exception:
@@ -4022,10 +4054,17 @@ class AlifeMemoryPlugin(BasePlugin):
         result = await self.store.call(
             "trash", kind, category, keyword, offset, 50
         )
-        # ★ 冷归档（P7）：回收站/冷归档页签的卡片会用**行数据**预填编辑器 ✗
-        #   ⇒ 正文必须在这里回填（否则点「查看与编辑」看到空内容 ✗）
-        if kind == "records":
-            result["items"] = await self._cold_fill(result.get("items") or [])
+        # ★ 冷归档（P7）：回收站/冷归档页签的卡片正文
+        #   v2.18.65：卡片改成读「preview」（摘要优先、没摘要截原文 ✓）
+        #   ⇒ 这里回填 preview 即可（只填空的 ✓ 截到 300 字省流量 ✓）
+        #   ⇒ 正文全文仍由「查看与编辑」用 /memory/{id} 取（那条路照旧回填 content ✓）
+        if kind in ("records", "cold"):
+            items = await self._cold_fill(result.get("items") or [], field="preview")
+            for row in items:
+                if isinstance(row.get("preview"), str) and len(row["preview"]) > 300:
+                    row["preview"] = row["preview"][:300]
+            result["items"] = items
+        totals = await self.store.call("trash_stats")
         ids = {
             row.get("sid", "") for row in result["items"]
         } | {
@@ -4038,7 +4077,7 @@ class AlifeMemoryPlugin(BasePlugin):
             for n in await self.store.call("entities", ids=ids, limit=1000)
             if n["name"]
         }
-        return {**result, "names": names}
+        return {**result, "names": names, "totals": totals}
 
     @register.api(method="POST", path="/trash/restore", auth=True)
     async def api_trash_restore(self, request: Request):

@@ -442,6 +442,10 @@ main {
   margin-top: auto;
   display: flex;
   justify-content: space-between;
+  /* v2.18.65：以前只有 space-between ⇒ 三个按钮**贴在一起**、窄卡片还会挤 ✗
+     补 gap + 允许换行 ⇒ 间距清楚、窄屏自动折行 ✓ */
+  gap: 10px;
+  flex-wrap: wrap;
   align-items: center;
   border-top: 1px solid var(--line);
   padding-top: 12px;

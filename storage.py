@@ -2669,10 +2669,15 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute(
-                f"SELECT * FROM {table} WHERE id=? AND deleted=0", (target,)
+                f"SELECT * FROM {table} WHERE id=?", (target,)
             ).fetchone()
             if not old or old["revision"] != revision:
                 raise Conflict("record changed; reload before saving")
+            # v2.18.66：撤回后**还原**必须可行 ✗ —— 以前这里写死 `AND deleted=0` ✗
+            # ⇒ 已删除/已撤回的那条永远查不到 ⇒ 走「还原」必然 Conflict ✗（真跑踩到 ✓）
+            # 安全边界保留：patch 里没有明确的 `deleted: False` 时，仍不许改已删除的条目 ✓
+            if old["deleted"] and patch.get("deleted") is not False:
+                raise Conflict("already deleted; restore it first")
             if kind == "record" and "active" in patch and not old["permanent"]:
                 raise ValueError(
                     "only permanent memories can leave/rejoin context manually"
@@ -3405,8 +3410,13 @@ class Store:
                 [time.time(), *ids],
             )
 
-    def touch_tidy(self, ids):
-        """记一次「刚整理过」，配合 tidy_days 做幂等限流。"""
+    def touch_tidy(self, ids, at=None):
+        """记一次「刚整理过」，配合 tidy_days 做幂等限流。
+
+        v2.18.66：`at` 可选 —— 传 0 表示**把限流清零**（让这几条立刻可被整理 ✓）
+        「指定条目重新整理」那条路本来调的是 `touch_tidy_at(ids, 0)` ✗ 但这个方法**根本不存在** ✗
+        ⇒ 真跑起来是 AttributeError（好在没人踩到过）⇒ 现在由本方法承担这个语义 ✓
+        """
         ids = [value for value in dict.fromkeys(ids or []) if value]
         if not ids:
             return
@@ -3414,7 +3424,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 f"UPDATE records SET tidy_at=? WHERE id IN ({marks})",
-                [time.time(), *ids],
+                [time.time() if at is None else at, *ids],
             )
 
     def add_facts(self, sid, facts):
@@ -3552,11 +3562,16 @@ class Store:
                 total = db.execute(
                     "SELECT count(*) FROM records WHERE " + clause, args
                 ).fetchone()[0]
+                # v2.18.65：卡片正文改成「摘要优先，没摘要就截原文」
+                # （以前只带 summary ⇒ summary 为空的记录卡片一片空白 ✗）
                 rows = [
                     self.row(r)
                     for r in db.execute(
                         "SELECT id,sid,level,summary,start,end,users,permanent,cold,"
-                        "archived_at,deleted, coalesce((SELECT max(v.created) FROM"
+                        "archived_at,deleted,"
+                        " coalesce(nullif(summary,''), substr(coalesce(content,''),1,300))"
+                        " AS preview,"
+                        " coalesce((SELECT max(v.created) FROM"
                         " versions v WHERE v.kind='record' AND v.target=records.id),0)"
                         " AS removed_at FROM records WHERE " + clause
                         + " ORDER BY coalesce(nullif(archived_at,0), removed_at) DESC, id"
@@ -3565,6 +3580,18 @@ class Store:
                     )
                 ]
         return {"kind": kind, "items": rows, "total": total}
+
+    def trash_stats(self):
+        """回收站三个页签各有多少条（v2.18.65 一次查完，供面板显示数量）"""
+        with self.connect() as db:
+            facts = db.execute("SELECT count(*) FROM facts WHERE deleted=1").fetchone()[0]
+            records = db.execute(
+                "SELECT count(*) FROM records WHERE deleted=1"
+            ).fetchone()[0]
+            cold = db.execute(
+                "SELECT count(*) FROM records WHERE deleted=0 AND cold=1"
+            ).fetchone()[0]
+        return {"facts": facts, "records": records, "cold": cold}
 
     def undelete(self, kind, target, cold_path=None):
         """从回收站还原：软删的条目重新可见，动作本身也写一条版本。"""

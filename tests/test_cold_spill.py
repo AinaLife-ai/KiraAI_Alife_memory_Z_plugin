@@ -7,6 +7,7 @@
   ★ 热行 / 非冷行**一条不动** ✓；迁移后 `PRAGMA foreign_key_check` 必须为空 ✓
 """
 import importlib.util
+import pytest
 import sqlite3
 import sys
 import time
@@ -359,3 +360,244 @@ def test_no_blocking_io_directly_in_async_handlers():
         if isinstance(node, ast.AsyncFunctionDef):
             direct_calls(node)
     assert not bad, "async 里直接做阻塞 IO ⇒ 会卡住整个应用 ✗：%s" % bad[:3]
+
+
+def test_trash_returns_preview_even_when_summary_is_empty(tmp_path):
+    """v2.18.65：卡片正文不能只靠 summary ✗ 没摘要的记录必须拿得到 preview ✓"""
+    import time as _time
+
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:preview"
+    now = _time.time()
+    store.capture(
+        sid,
+        "e1",
+        [dict(role="user", content="正文内容一段话", summary="", users=["a:u"], time=now)],
+    )
+    with store.connect() as db:
+        rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+        db.execute("UPDATE records SET summary='' WHERE id=?", (rid,))
+        db.execute("UPDATE records SET deleted=1 WHERE id=?", (rid,))
+        db.commit()
+    out = store.trash("records", "", "", 0, 50)
+    row = out["items"][0]
+    assert row.get("preview"), "summary 为空时 preview 必须带正文 ✗"
+    assert "正文内容" in row["preview"], "preview 应该是原文 ✗"
+    stats = store.trash_stats()
+    assert stats["records"] >= 1 and set(stats) == {"facts", "records", "cold"}
+
+
+def test_cold_fill_callers_match_its_signature():
+    """v2.18.65：`_cold_fill` 的**参数**必须和调用方一致（专治"编辑只落一半"）
+
+    实测教训：一次编辑只应用了一半（签名没加 field，调用处却传了 field="preview"）
+    ⇒ 运行时会 TypeError ⇒ 回收站接口直接 500 ✗ ⇒ 这条守卫专门盯这类问题
+    """
+    src = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'async def _cold_fill(self, items, cfg=None, field="content")' in src, (
+        "签名必须带 field（默认 content ⇒ 浏览/详情两条老路语义不变）"
+    )
+    assert "fill_contents(items, p, field=field)" in src, "field 要透传给 cold.fill_contents"
+    assert 'field="preview"' in src, "回收站列表要按 preview 回填（省流量）"
+
+
+@pytest.mark.asyncio
+async def test_trash_api_returns_preview_and_totals(tmp_path):
+    """v2.18.65：真调一次 /trash 处理器 ⇒ preview + totals 都要有
+
+    这条专门防"接口 500"类事故：一次编辑只落了一半（签名没加 field ✗
+    调用处却传了 field="preview" ✗）⇒ 只有**真调处理器**才抓得住 ✗
+    """
+    import os
+
+    import pytest
+
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 的宿主集成用例")
+    from test_helpers_plugin import build_plugin
+
+    plugin, store = await build_plugin(tmp_path)
+    try:
+        sid = "a:dm:api"
+        now = time.time()
+        store.capture(
+            sid,
+            "e1",
+            [dict(role="user", content="接口正文一段话", summary="", users=["a:u"], time=now)],
+        )
+        with store.connect() as db:
+            rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+            db.execute("UPDATE records SET summary='' WHERE id=?", (rid,))
+            db.execute("UPDATE records SET deleted=1 WHERE id=?", (rid,))
+            db.commit()
+        out = await plugin.api_trash(kind="records")
+        row = out["items"][0]
+        assert row.get("preview"), "接口必须带上 preview ✗"
+        assert "接口正文" in row["preview"]
+        assert set(out.get("totals") or {}) == {"facts", "records", "cold"}, "totals 字段要齐 ✗"
+        # 冷归档页签走**同一条**回填路径（kind="cold"）⇒ 也要能正常返回 ✓
+        cold_out = await plugin.api_trash(kind="cold")
+        assert set(cold_out.get("totals") or {}) == {"facts", "records", "cold"}
+        # 截断：preview 不超过 300 字（省流量 ✓）
+        long_text = "长" * 900
+        store.capture(sid, "e2", [dict(role="user", content=long_text, summary="", users=["a:u"], time=now + 5)])
+        with store.connect() as db:
+            rid2 = db.execute("SELECT id FROM records WHERE sid=? ORDER BY start DESC LIMIT 1", (sid,)).fetchone()[0]
+            db.execute("UPDATE records SET summary='', deleted=1 WHERE id=?", (rid2,))
+            db.commit()
+        out2 = await plugin.api_trash(kind="records")
+        previews = [r.get("preview") or "" for r in out2["items"]]
+        assert any(len(p) == 300 for p in previews), "preview 必须截到 300 字 ✗"
+    finally:
+        await plugin.terminate()
+
+
+def test_touch_tidy_accepts_timestamp_for_reset(tmp_path):
+    """v2.18.66：touch_tidy(ids, 0) 必须能把限流清零（指定条目立刻可整理）
+
+    原来那条路调的是不存在的 touch_tidy_at(ids, 0) ⇒ 真跑 AttributeError
+    """
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:tidy_at"
+    store.capture(
+        sid,
+        "e1",
+        [dict(role="user", content="随便一条", summary="s", users=["a:u"], time=time.time())],
+    )
+    with store.connect() as db:
+        rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+    store.touch_tidy([rid])          # 默认 = 记 now ✓
+    with store.connect() as db:
+        marked = db.execute("SELECT tidy_at FROM records WHERE id=?", (rid,)).fetchone()[0]
+    assert marked > 0, "默认应记当前时间 ✓"
+    store.touch_tidy([rid], 0)       # 传 0 = 清零 ✓
+    with store.connect() as db:
+        reset = db.execute("SELECT tidy_at FROM records WHERE id=?", (rid,)).fetchone()[0]
+    assert reset == 0, "传 0 必须把限流清零 ✗"
+
+
+def test_restore_after_retract_is_possible_with_safety(tmp_path):
+    """v2.18.66：撤回后必须能**还原** + 不许偷偷改已删除的条目
+
+    以前 `edit` 的查找写死了 `AND deleted=0` ✗ ⇒ 已撤回的那条永远查不到
+    ⇒ 走「还原」必然 Conflict ✗（记忆与事实都一样 ✗）
+    """
+    import pytest as _pytest
+
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:restore"
+    fid = store.add_facts(
+        sid,
+        [dict(category="fact", subject="a:u", content="要被撤回的事实", reason="r",
+              scenario="", tags=[], relations=[], source_ids=[], importance=5)],
+    )[0]
+    rev = store.facts_by_ids([fid])[0]["revision"]
+    store.edit("fact", fid, rev, {"deleted": True}, "retract")
+    assert store.facts_by_ids([fid], True)[0]["deleted"] == 1
+    # 还原：以前必然 Conflict ✗
+    rev2 = store.facts_by_ids([fid], True)[0]["revision"]
+    store.edit("fact", fid, rev2, {"deleted": False}, "restore")
+    assert store.facts_by_ids([fid], True)[0]["deleted"] == 0, "还原必须成功 ✗"
+    # 安全边界：没有显式 deleted=False 时，不许改已删除的条目 ✓
+    rev3 = store.facts_by_ids([fid])[0]["revision"]
+    store.edit("fact", fid, rev3, {"deleted": True}, "retract again")
+    rev4 = store.facts_by_ids([fid], True)[0]["revision"]
+    with _pytest.raises(Exception) as info:
+        store.edit("fact", fid, rev4, {"content": "偷偷改"}, "sneaky")
+    assert "already deleted" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
+    """v2.18.66-68：真调 correct()（记忆维护统一入口）⇒ 事实的撤回/还原必须走通
+
+    这条路上原来有**三道坎**（真跑实测）：
+      ① get_fact 不存在 ⇒ AttributeError
+      ② 事实 patch 带记录独有的 active ⇒ ValueError
+      ③ accessible() 只在 records 表里找 id ⇒ 传事实 id 必然 "archive not found"
+    ⇒ 所以「对事实做删除/还原/归档」以前**从来就没走通过** ✗
+    """
+    import os
+
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 的宿主集成用例")
+    from test_helpers_plugin import build_plugin
+    from types import SimpleNamespace
+
+    plugin, store = await build_plugin(tmp_path)
+    try:
+        sid = "a:dm:correct"
+        rec = store.memorize(sid, "一条记忆", ["a:u"], 1.0, 2.0)
+        fid = store.add_facts(
+            sid,
+            [dict(category="fact", subject="a:u", content="带来源的事实", reason="r",
+                  scenario="", tags=[], relations=[], source_ids=[rec], importance=5)],
+        )[0]
+        event = SimpleNamespace(sid=sid, event_id="e1")
+        # 返回形态随宿主而异（dict / 字符串）⇒ 断言**状态**才是关键 ✓
+        out = await plugin.correct(event, "delete", kind="fact", ids=[fid], reason="撤回")
+        assert "ok" in str(out) and "false" not in str(out).lower(), "撤回失败: %s" % str(out)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 1
+        out2 = await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
+        assert "ok" in str(out2) and "false" not in str(out2).lower(), "还原失败: %s" % str(out2)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
+
+        # v2.18.69（用户拍板）：事实没有"离开上下文"的概念 ⇒ **archive 等同于撤回** ✓
+        out3 = await plugin.correct(event, "archive", kind="fact", ids=[fid], reason="归档")
+        assert "ok" in str(out3) and "false" not in str(out3).lower(), "事实归档失败: %s" % str(out3)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 1, (
+            "事实的 archive 必须等同于撤回（deleted=1）✗"
+        )
+        await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
+
+        # update：改事实的正文（走 accessible + Edit 契约）
+        rev = (await store.call("facts_by_ids", [fid], True))[0]["revision"]
+        out4 = await plugin.correct(
+            event, "update", kind="fact", ids=[fid], revision=rev,
+            patch={"content": "改过的正文"}, reason="改内容",
+        )
+        assert "ok" in str(out4) and "false" not in str(out4).lower(), "update 失败: %s" % str(out4)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["content"] == "改过的正文"
+
+        # merge：两条事实合并成一条
+        other = store.add_facts(
+            sid,
+            [dict(category="fact", subject="a:u", content="另一条事实", reason="r",
+                  scenario="", tags=[], relations=[], source_ids=[rec], importance=5)],
+        )[0]
+        out5 = await plugin.correct(
+            event, "merge", kind="fact", ids=[fid, other], content="合并后的一条", reason="合并"
+        )
+        assert "ok" in str(out5) and "false" not in str(out5).lower(), "merge 失败: %s" % str(out5)[:80]
+        alive = [
+            f["content"]
+            for f in store.facts_by_ids([fid, other], True)
+            if f["deleted"] == 0
+        ]
+        assert alive == ["合并后的一条"], "合并后应只剩一条 ✗ 实际: %s" % alive
+
+        # 记录那条路也要走通（v2.18.68：archive → restore → delete → restore 四步全过 ✓）
+        rid = store.memorize(sid, "一条可归档的记录", ["a:u"], 1.0, 2.0)
+
+        def record_state():
+            with store.connect() as db:
+                row = db.execute(
+                    "SELECT active, deleted FROM records WHERE id=?", (rid,)
+                ).fetchone()
+            return dict(row)
+
+        await plugin.correct(event, "archive", kind="record", ids=[rid], reason="归档")
+        assert record_state() == {"active": 0, "deleted": 0}
+        await plugin.correct(event, "restore", kind="record", ids=[rid], reason="还原")
+        assert record_state() == {"active": 1, "deleted": 0}
+        await plugin.correct(event, "delete", kind="record", ids=[rid], reason="删除")
+        assert record_state() == {"active": 1, "deleted": 1}
+        # ★ 已删除的记录必须还能还原（以前 accessible/get 都看不到它 ⇒ 必然失败 ✗）
+        await plugin.correct(event, "restore", kind="record", ids=[rid], reason="再还原")
+        assert record_state() == {"active": 1, "deleted": 0}, "已删除的记录必须能还原 ✗"
+    finally:
+        await plugin.terminate()

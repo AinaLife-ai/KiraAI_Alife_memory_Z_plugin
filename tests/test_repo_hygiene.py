@@ -55,3 +55,30 @@ def test_guard_selfcheck_positive_and_negative():
     assert _hit("main/__pycache__/x.pyc"), "守卫抓不到 pyc ✗"
     assert not _hit("main.py") and not _hit("tools/generate_schema.py"), "守卫误伤正常文件 ✗"
     assert not _hit("README.md") and not _hit("tests/test_rotate_budget.py"), "守卫误伤正常文件 ✗"
+
+
+def test_store_call_names_all_exist():
+    """v2.18.66：`store.call("X")` 里的 X 必须在 Store 上真实存在（专治"幽灵调用"）
+
+    实测教训：`get_fact` 与 `touch_tidy_at` 两个名字**根本不存在** ⇒ 真跑就是 AttributeError
+    （分别藏在「编辑事实」和「指定条目重新整理」两条路上，平时没人踩到）
+    """
+    import ast
+    import pathlib as _p
+    import re
+
+    root = _p.Path(__file__).resolve().parents[1]
+    src = "\n".join(
+        (root / name).read_text(encoding="utf-8") for name in ("main.py", "engine.py")
+    )
+    # 去掉注释行，避免把注释里提到的名字当成调用
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    called = set(re.findall(r'store\.call\(\s*"([a-z_]+)"', code))
+    called |= set(re.findall(r'store\.call\(\s*\n\s*"([a-z_]+)"', code))
+    tree = ast.parse((root / "storage.py").read_text(encoding="utf-8"))
+    cls = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Store"][0]
+    methods = {
+        m.name for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    ghost = sorted(called - methods)
+    assert not ghost, "这些 store.call 的名字在 Store 上不存在（真跑会 AttributeError）: %s" % ghost

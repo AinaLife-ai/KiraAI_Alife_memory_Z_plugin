@@ -264,3 +264,53 @@ def test_history_toggle_defaults_to_checked_and_hides_history_cards():
     assert "ensureHistoryToggle();" in js.split("async function loadArchives()")[1][:220], (
         "loadArchives 里要调用 ensureHistoryToggle ✓"
     )
+
+
+def test_trash_page_shows_preview_and_explains_tabs():
+    """v2.18.65 回收站：卡片正文能显示 + 页签判据写清 + 冷归档控件只在冷归档页签"""
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    assert "row.content || row.summary || row.preview" in js, "卡片正文要三级回退 ✗"
+    assert js.count("row.content || row.summary || row.preview") >= 2, (
+        "「彻底删除」确认框也要回退 ✗ 否则弹窗正文是空的"
+    )
+    assert "存档（已删除）" in html and "冷归档（仍生效）" in html, "页签要写清各自判据 ✗"
+    assert 'id="coldTools"' in html, "冷归档四个按钮要独立容器 ✗"
+    assert 'coldTools.classList.toggle("hide"' in js, "冷归档按钮只在冷归档页签显示 ✗"
+    assert "冷归档 · 正文在冷库" in js and "已删除 · 可还原" in js, "状态词要统一一套 ✗"
+    assert 'id="trashNote"' in html and "trashNote" in js, "每个页签要有判据说明行 ✗"
+    assert "gap: 10px" in css and "flex-wrap: wrap" in css, "footer 按钮要有间距并允许换行 ✗"
+
+
+def test_trash_note_has_fallback():
+    """页签说明取不到值时要有兜底 ⇒ 不能把 "undefined" 显示给用户"""
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert '}[trashKind] || ""' in js, "说明行必须兜底成空串"
+
+
+def test_archive_browse_card_body_falls_back_to_content():
+    """v2.18.65 审计追加：浏览页（记忆存档）卡片正文同样不能只靠 summary
+
+    实测：/search 同时返回 summary 与 content ⇒ 摘要为空的记录原本卡片一片空白 ✗
+    编辑弹窗**不**用 content 预填（否则保存会把原文误写成摘要 ✗）⇒ 只加 placeholder ✓
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'esc(r.summary || r.content || r.preview || "")' in js, "浏览页卡片正文要回退到 content ✗"
+    assert '$("#editText").placeholder' in js, "没有摘要时编辑框要给提示 ✗"
+    assert '$("#editText").value = r.summary;' in js, "编辑框仍只装 summary ✗（不能拿 content 预填）"
+
+
+def test_panel_copy_has_no_markdown_emphasis():
+    """面向用户的文案不许出现 `**`（面板按**纯文本**渲染 ⇒ 会原样显示星号 ✗）
+
+    v2.18.67 自审发现的疏漏：我写的页签说明里带了 `**` ⇒ 用户会看到星号 ✗
+    （仓库里其它 `**` 都在注释里 ✓ 不进界面 ✓）
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    start = js.index('const note = $("#trashNote")')
+    for line in js[start:start + 700].splitlines():
+        text = line.strip()
+        if not text or text.startswith("//"):
+            continue
+        assert "**" not in text, "面向用户的文案里不能有 **（会原样显示）: %s" % text[:60]
