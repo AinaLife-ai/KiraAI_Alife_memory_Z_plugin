@@ -276,7 +276,16 @@ class MediaScopeCase(unittest.TestCase):
             "skip_media=False" in block,
             "网页端搜索必须显式 skip_media=False ✗ 否则表情/图片记录在界面上消失 ✓",
         )
-        self.assertTrue("include_cold=True" in block)
+        # v2.18.64：冷归档从"永远 include_cold=True"改成**跟着面板开关** ✓
+        # ⇒ 这里要证明的是**默认仍然全部显示**（开关默认勾选 ⇒ q.include_history 默认 True ✓）
+        self.assertTrue(
+            "include_cold=q.include_history" in block,
+            "网页端搜索的 include_cold 应由面板「显示历史存档」开关决定 ✓",
+        )
+        self.assertTrue(
+            "include_history: bool = True" in (ROOT / "contracts.py").read_text(encoding="utf-8"),
+            "开关默认必须是**显示** ✗ 否则网页端默认就看不到冷归档了 ✓",
+        )
 
     def test_recall_paths_use_the_switch(self):
         src = (ROOT / "main.py").read_text(encoding="utf-8")

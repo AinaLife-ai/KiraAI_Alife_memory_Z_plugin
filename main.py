@@ -1430,7 +1430,8 @@ class AlifeMemoryPlugin(BasePlugin):
 
         判定零成本（bigram 比较），阈值与范围都与写入侧完全一致
         （同主体 + 同类别；跨主体/跨类别的合并本来就会被拒绝）。
-        返回「本轮应从注入列表里去掉」的 id 集合——被合并方当轮即省一遍 token。
+        按设计**当轮不隐藏**（返回空集）：本轮模型照常看到完整信息，
+        从下一轮起 merge_pending 生效，重复的那条不再注入。
         """
         cfg = self.runtime_settings()
         if not cfg.fact_merge_enabled or len(facts) < 2:
@@ -3091,7 +3092,9 @@ class AlifeMemoryPlugin(BasePlugin):
             )
             result = await self.store.call(
                 "search",
-                **q.model_dump(exclude={"prompt", "include_global"}),
+                # v2.18.64：`include_history` 只给**网页端**用（面板开关）✓
+                # 模型侧的档案检索照旧（历史存档能被搜到 ✓ 冷归档由 include_cold 默认值决定 ✓）
+                **q.model_dump(exclude={"prompt", "include_global", "include_history"}),
                 scope=self.settings.recall_scope,
                 users=user_ids(event),
                 vector=vector,
@@ -3857,14 +3860,18 @@ class AlifeMemoryPlugin(BasePlugin):
         )
         result = await self.store.call(
             "search",
-            **q.model_dump(exclude={"prompt", "include_global"}),
+            **q.model_dump(
+                exclude={"prompt", "include_global", "include_history"}
+            ),
             scope="session" if q.sid else "global",
             strict_session=bool(q.sid) and not q.include_global,
             vector=vector,
             model=model,
             lexical=q.prompt if not vector else "",
-            # The admin UI browses everything, including cold archives.
-            include_cold=True,
+            # v2.18.64：勾上「显示历史存档」⇒ 照旧浏览全部（含冷归档 ✓）
+            # 取消勾选 ⇒ 只看活跃记录（历史存档 + 冷归档一起挡掉 ✓ 分页计数也跟着准 ✓）
+            include_cold=q.include_history,
+            active=not q.include_history,
             # v2.18.9：网页端是**人在看** ✓ 表情/图片记录照常显示 ✓
             # （`recall_skip_media` 只管"喂给模型的召回" ✗ 别把浏览也一起挡了 ✓）
             skip_media=False,

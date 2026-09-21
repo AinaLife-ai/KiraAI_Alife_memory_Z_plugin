@@ -248,3 +248,19 @@ def test_the_guard_can_actually_fail():
     assert _undefined_called_functions(bad) == ["loadHealth"]
     good = "async function loadFacts() {} async function loadHealth() {} loadHealth();"
     assert _undefined_called_functions(good) == []
+
+
+def test_history_toggle_defaults_to_checked_and_hides_history_cards():
+    """v2.18.64：「显示历史存档」开关（默认勾选，负责隐藏历史存档 / 冷归档卡片）"""
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'id="includeHistory" checked' in js, "开关必须默认勾选 ✓"
+    assert "显示历史存档" in js, "标签文案应为「显示历史存档」✓"
+    assert 'document.querySelector("#includeHistory")' in js, "要读这个开关的状态 ✓"
+    assert "include_history:" in js, "状态要传给后端（后端按它过滤，分页计数才准）✓"
+    tail = js.split("function ensureHistoryToggle")[1][:420]
+    assert 'document.querySelector("#includeTools")' in tail, (
+        "新开关要插在「显示工具步」之后（用户看到的顺序：工具步在左、历史存档在右）✓"
+    )
+    assert "ensureHistoryToggle();" in js.split("async function loadArchives()")[1][:220], (
+        "loadArchives 里要调用 ensureHistoryToggle ✓"
+    )

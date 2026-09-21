@@ -107,3 +107,10 @@ class BackfillCase(unittest.TestCase):
         self.assertNotIn("我看看", str(after), "回填后 bot 仍看到工具步 ✗")
         self.assertIn("我看看", str(ui), "前端开关应仍能看到 ✓")
         self.assertEqual(again, 0, "回填不幂等 ✗（第二次不该再改）")
+
+
+def test_search_contract_defaults_to_showing_history():
+    """v2.18.64：面板查询契约里 include_history 默认**显示**历史存档 ✓（与开关默认勾选一致）"""
+    contracts = importlib.import_module("alife_toolcase.contracts")
+    assert contracts.Search().include_history is True, "默认必须显示历史存档 ✓"
+    assert contracts.Search(include_history=False).include_history is False

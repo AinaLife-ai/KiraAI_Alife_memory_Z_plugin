@@ -473,6 +473,9 @@ class Search(Strict):
     # v2.18.19：浏览档案时是否显示**工具步** ✗（默认不显示 ✓）
     # bot 主被动召回**永远**看不到工具步 ✓（那边是硬过滤 ✓ 与这个开关无关 ✓）
     include_tools: bool = False
+    # v2.18.64：浏览档案时是否显示**历史存档 / 冷归档**的卡片 ✓（默认**显示** ✓）
+    # 关掉 ⇒ 只看「活跃记忆」（`active=1` 且未冷归档 ✓）
+    include_history: bool = True
 
     keyword: str = Field(default="", max_length=500)
     prompt: str = Field(default="", max_length=2000)
