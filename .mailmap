@@ -1,0 +1,12 @@
+# .mailmap —— 把历史上用错邮箱提交的署名归并到正确账号
+#
+# 背景：v2.18.70 之前本仓库有一批提交用了 ainalife@users.noreply.github.com
+# 这个邮箱在 GitHub 上属于**另一个账号 Ainalife**（不是 AinaLife-ai）⇒ 污染了贡献者列表。
+# 正确格式必须是 <用户ID>+<用户名>@users.noreply.github.com
+#
+# GitHub 会读取本文件，据此把下列提交的**作者显示**归并到 AinaLife-ai。
+# （不改写任何历史提交；若需要提交元数据本身也正确，只能重写历史，见 README 说明。）
+AinaLife-ai <293270655+AinaLife-ai@users.noreply.github.com> <ainalife@users.noreply.github.com>
+AinaLife-ai <293270655+AinaLife-ai@users.noreply.github.com> Ainalife <ainalife@users.noreply.github.com>
+AinaLife-ai <293270655+AinaLife-ai@users.noreply.github.com> <ainalife@example.com>
+AinaLife-ai <293270655+AinaLife-ai@users.noreply.github.com> AinaLife-ai <ainalife@example.com>

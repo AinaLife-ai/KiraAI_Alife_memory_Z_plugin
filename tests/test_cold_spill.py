@@ -601,3 +601,22 @@ async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
         assert record_state() == {"active": 1, "deleted": 0}, "已删除的记录必须能还原 ✗"
     finally:
         await plugin.terminate()
+
+
+def test_versions_index_exists_and_is_used(tmp_path):
+    """v2.18.70：回收站每行都查一次「这条最后被改/删的时间」⇒ versions 必须有索引
+
+    实测：600 条事实 + 4 万条 versions 时
+      有索引 → 16.8 ms ✓ ；无索引 → 2340.8 ms ✗（切页签要卡 2 秒+）
+    """
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    with store.connect() as db:
+        names = [r[1] for r in db.execute("PRAGMA index_list(versions)")]
+        assert "version_target" in names, "versions 必须有 version_target 索引 ✗"
+        plan = [row[-1] for row in db.execute(
+            "EXPLAIN QUERY PLAN SELECT max(created) FROM versions "
+            "WHERE kind='fact' AND target='x'"
+        )]
+    text = " ".join(plan)
+    assert "version_target" in text, "这个查询必须走索引（否则每行一次全表扫描 ⇒ 卡）✗ 计划: %s" % text
