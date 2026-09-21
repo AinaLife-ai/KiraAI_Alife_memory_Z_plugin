@@ -809,11 +809,13 @@ async function loadTrash() {
     "冷归档（仍生效）" + (totals.cold ? " " + totals.cold : "");
   const note = $("#trashNote");
   if (note)
-    note.textContent = {
-      facts: "被审计撤回或合并掉的事实；「还原」后会重新参与检索。",
-      records: "这些记录已经**删掉**（离开上下文），原文还在库里；点「还原到上下文」就回到检索。",
-      cold: "这些记录**没有**被删，只是正文搬去了独立冷库；「查看与编辑」照常能读全文，召回也不受影响。",
-    }[trashKind];
+    note.textContent =
+      {
+        facts: "被审计撤回或合并掉的事实；「还原」后会重新参与检索。",
+        records:
+          "这些记录已经**删掉**（离开上下文），原文还在库里；点「还原到上下文」就回到检索。",
+        cold: "这些记录**没有**被删，只是正文搬去了独立冷库；「查看与编辑」照常能读全文，召回也不受影响。",
+      }[trashKind] || "";
   // 冷归档那四个按钮是**全局操作** ⇒ 只在冷归档页签时显示（以前常驻 ⇒ 看着像属于当前列表 ✗）
   const coldTools = $("#coldTools");
   if (coldTools) coldTools.classList.toggle("hide", trashKind !== "cold");

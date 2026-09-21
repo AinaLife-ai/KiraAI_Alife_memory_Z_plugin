@@ -281,3 +281,9 @@ def test_trash_page_shows_preview_and_explains_tabs():
     assert "冷归档 · 正文在冷库" in js and "已删除 · 可还原" in js, "状态词要统一一套 ✗"
     assert 'id="trashNote"' in html and "trashNote" in js, "每个页签要有判据说明行 ✗"
     assert "gap: 10px" in css and "flex-wrap: wrap" in css, "footer 按钮要有间距并允许换行 ✗"
+
+
+def test_trash_note_has_fallback():
+    """页签说明取不到值时要有兜底 ⇒ 不能把 "undefined" 显示给用户"""
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert '}[trashKind] || ""' in js, "说明行必须兜底成空串"

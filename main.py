@@ -3834,7 +3834,7 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             return None
 
-    async def _cold_fill(self, items, cfg=None):
+    async def _cold_fill(self, items, cfg=None, field="content"):
         """给"能看见冷行"的入口回填正文（失败静默 ⇒ 顶多显示空正文 ✓ 绝不影响其它 ✓）
 
         ★ 2026-09-20：改成 async + to_thread —— 读冷库是**阻塞 IO** ✗
@@ -3845,7 +3845,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if not p or not p.exists():
                 return items
             from . import cold as _cold
-            return _cold.fill_contents(items, p)
+            return _cold.fill_contents(items, p, field=field)
         try:
             return await asyncio.to_thread(_work)
         except Exception:

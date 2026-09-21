@@ -7,6 +7,7 @@
   ★ 热行 / 非冷行**一条不动** ✓；迁移后 `PRAGMA foreign_key_check` 必须为空 ✓
 """
 import importlib.util
+import pytest
 import sqlite3
 import sys
 import time
@@ -385,3 +386,68 @@ def test_trash_returns_preview_even_when_summary_is_empty(tmp_path):
     assert "正文内容" in row["preview"], "preview 应该是原文 ✗"
     stats = store.trash_stats()
     assert stats["records"] >= 1 and set(stats) == {"facts", "records", "cold"}
+
+
+def test_cold_fill_callers_match_its_signature():
+    """v2.18.65：`_cold_fill` 的**参数**必须和调用方一致（专治"编辑只落一半"）
+
+    实测教训：一次编辑只应用了一半（签名没加 field，调用处却传了 field="preview"）
+    ⇒ 运行时会 TypeError ⇒ 回收站接口直接 500 ✗ ⇒ 这条守卫专门盯这类问题
+    """
+    src = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'async def _cold_fill(self, items, cfg=None, field="content")' in src, (
+        "签名必须带 field（默认 content ⇒ 浏览/详情两条老路语义不变）"
+    )
+    assert "fill_contents(items, p, field=field)" in src, "field 要透传给 cold.fill_contents"
+    assert 'field="preview"' in src, "回收站列表要按 preview 回填（省流量）"
+
+
+@pytest.mark.asyncio
+async def test_trash_api_returns_preview_and_totals(tmp_path):
+    """v2.18.65：真调一次 /trash 处理器 ⇒ preview + totals 都要有
+
+    这条专门防"接口 500"类事故：一次编辑只落了一半（签名没加 field ✗
+    调用处却传了 field="preview" ✗）⇒ 只有**真调处理器**才抓得住 ✗
+    """
+    import os
+
+    import pytest
+
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 的宿主集成用例")
+    from test_helpers_plugin import build_plugin
+
+    plugin, store = await build_plugin(tmp_path)
+    try:
+        sid = "a:dm:api"
+        now = time.time()
+        store.capture(
+            sid,
+            "e1",
+            [dict(role="user", content="接口正文一段话", summary="", users=["a:u"], time=now)],
+        )
+        with store.connect() as db:
+            rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()[0]
+            db.execute("UPDATE records SET summary='' WHERE id=?", (rid,))
+            db.execute("UPDATE records SET deleted=1 WHERE id=?", (rid,))
+            db.commit()
+        out = await plugin.api_trash(kind="records")
+        row = out["items"][0]
+        assert row.get("preview"), "接口必须带上 preview ✗"
+        assert "接口正文" in row["preview"]
+        assert set(out.get("totals") or {}) == {"facts", "records", "cold"}, "totals 字段要齐 ✗"
+        # 冷归档页签走**同一条**回填路径（kind="cold"）⇒ 也要能正常返回 ✓
+        cold_out = await plugin.api_trash(kind="cold")
+        assert set(cold_out.get("totals") or {}) == {"facts", "records", "cold"}
+        # 截断：preview 不超过 300 字（省流量 ✓）
+        long_text = "长" * 900
+        store.capture(sid, "e2", [dict(role="user", content=long_text, summary="", users=["a:u"], time=now + 5)])
+        with store.connect() as db:
+            rid2 = db.execute("SELECT id FROM records WHERE sid=? ORDER BY start DESC LIMIT 1", (sid,)).fetchone()[0]
+            db.execute("UPDATE records SET summary='', deleted=1 WHERE id=?", (rid2,))
+            db.commit()
+        out2 = await plugin.api_trash(kind="records")
+        previews = [r.get("preview") or "" for r in out2["items"]]
+        assert any(len(p) == 300 for p in previews), "preview 必须截到 300 字 ✗"
+    finally:
+        await plugin.terminate()
