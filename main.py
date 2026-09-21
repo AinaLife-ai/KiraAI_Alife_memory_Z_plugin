@@ -2820,7 +2820,18 @@ class AlifeMemoryPlugin(BasePlugin):
             raise ValueError("memory paused")
         row = await self.store.call("get", record_id)
         if not row:
-            raise ValueError("archive not found")
+            # v2.18.68：**事实的 id 不在 records 表里** ✗
+            #   以前这里直接 raise "archive not found" ⇒ 「对事实做删除/还原/归档」这条路
+            #   **从来就没走通过** ✗（真跑实测 ✓）
+            #   现在：用事实自己的 sources（它挂靠的记录）**复用同一套可见性判断** ✓
+            #   ⚠️ 不放宽权限：一条 source 都过不了 ⇒ 拒绝 ✓；没有 sources 的事实 ⇒ 也拒绝 ✓
+            facts = await self.store.call("facts_by_ids", [record_id], True)
+            if not facts:
+                raise ValueError("archive not found")
+            for source in facts[0].get("sources") or ():
+                if await self.store.call("get", source):
+                    return await self.accessible(event, source)
+            raise ValueError("archive outside configured scope")
         cfg = self.settings
         if row["visibility"] == "global" or (
             row["visibility"] == "user" and set(row["users"]) & set(user_ids(event))

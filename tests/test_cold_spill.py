@@ -508,3 +508,41 @@ def test_restore_after_retract_is_possible_with_safety(tmp_path):
     with _pytest.raises(Exception) as info:
         store.edit("fact", fid, rev4, {"content": "偷偷改"}, "sneaky")
     assert "already deleted" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
+    """v2.18.66-68：真调 correct()（记忆维护统一入口）⇒ 事实的撤回/还原必须走通
+
+    这条路上原来有**三道坎**（真跑实测）：
+      ① get_fact 不存在 ⇒ AttributeError
+      ② 事实 patch 带记录独有的 active ⇒ ValueError
+      ③ accessible() 只在 records 表里找 id ⇒ 传事实 id 必然 "archive not found"
+    ⇒ 所以「对事实做删除/还原/归档」以前**从来就没走通过** ✗
+    """
+    import os
+
+    if not os.environ.get("KIRA_CORE"):
+        pytest.skip("需要 KIRA_CORE 的宿主集成用例")
+    from test_helpers_plugin import build_plugin
+    from types import SimpleNamespace
+
+    plugin, store = await build_plugin(tmp_path)
+    try:
+        sid = "a:dm:correct"
+        rec = store.memorize(sid, "一条记忆", ["a:u"], 1.0, 2.0)
+        fid = store.add_facts(
+            sid,
+            [dict(category="fact", subject="a:u", content="带来源的事实", reason="r",
+                  scenario="", tags=[], relations=[], source_ids=[rec], importance=5)],
+        )[0]
+        event = SimpleNamespace(sid=sid, event_id="e1")
+        # 返回形态随宿主而异（dict / 字符串）⇒ 断言**状态**才是关键 ✓
+        out = await plugin.correct(event, "delete", kind="fact", ids=[fid], reason="撤回")
+        assert "ok" in str(out) and "false" not in str(out).lower(), "撤回失败: %s" % str(out)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 1
+        out2 = await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
+        assert "ok" in str(out2) and "false" not in str(out2).lower(), "还原失败: %s" % str(out2)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
+    finally:
+        await plugin.terminate()
