@@ -1430,7 +1430,8 @@ class AlifeMemoryPlugin(BasePlugin):
 
         判定零成本（bigram 比较），阈值与范围都与写入侧完全一致
         （同主体 + 同类别；跨主体/跨类别的合并本来就会被拒绝）。
-        返回「本轮应从注入列表里去掉」的 id 集合——被合并方当轮即省一遍 token。
+        按设计**当轮不隐藏**（返回空集）：本轮模型照常看到完整信息，
+        从下一轮起 merge_pending 生效，重复的那条不再注入。
         """
         cfg = self.runtime_settings()
         if not cfg.fact_merge_enabled or len(facts) < 2:
