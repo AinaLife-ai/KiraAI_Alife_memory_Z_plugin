@@ -381,6 +381,82 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
 
+### v2.18.62
+- 🔍 **终检（全量再扫一遍）又逮到两处「指令 ↔ 声明」数字/形状打架**
+  · **dedupe**：指令写「reason ≤ 15 字；超出即判定失败」，声明却写「reason ≤60 字」
+    ⇒ 模型可能按 60 写、再被 15 判失败 ⇒ 白走重试 ⇒ 声明改成 ≤15 字（与指令一致）
+  · **fact_merge**：模板里 `"content": str`（= 必填）与它自己那行「action=merge 时 content 不能为空」打架
+    ⇒ 改成 `"content": str?`（条件必填，与契约 required=False 一致）
+  · 守卫扩充：dedupe 的 reason 上限必须 ≤15 ✓ fact_merge 的 content 必须标条件必填 ✓
+  · **确认为「本来就对」**：audit 的 `importance` 在契约里就是可选（`int | None`）⇒ 声明写「可选」是对的 ✓
+
+### v2.18.61
+- 🔧 **audit 声明：去掉「可省」台阶 + content 标成条件必填**（用户提醒：写"可省"等于教模型偷懒）
+  · 原句「（content 仅 correct/merge 必填，keep/retract 可省）」
+  · 改为只说**要求侧**：「必填：actions；每项 action/target_id/source_ids/reason；correct/merge 必填 content。」
+    （不提"谁能省" ⇒ 不会引导模型优先选 keep/retract 偷懒；省 token 的效果仍然保留）
+  · 同时把模板里的 `"content": str` 改成 `"content": str?` —— 否则模板说"必填"、下一句说"条件必填"，两句自相矛盾
+  · 守卫同步：断言「声明里不许出现『可省』」+「correct/merge 必填 content」（反向验证：回退后报红）
+
+### v2.18.60
+- 🔍 **提示词全量扫查：找出三处「两份发给模型的文字互相打架」**（指令 vs 紧凑声明，两份都会发出去）
+  · **audit**：声明写「每项 content 必填」✗ —— 但 content 已改成按需（只有 correct/merge 会改写正文）
+    ⇒ 模型会给每条 action 都填 content（一次 50 条 = 白烧 token）⇒ 改成「content 仅 correct/merge 必填，keep/retract 可省」
+  · **dedupe**：声明劝「宁可 keep」✗ —— 而默认指令明确写着「只输出一个 action：merge（不允许 keep）」
+    ⇒ 两句互相拆台 ⇒ 声明改成中性（该不该 keep 由指令说：保守模式自己在指令里写了「任意一条不满足就 keep」）
+  · **compress**：声明的必填清单漏了 `importance` ✗（指令写着「九个键都要有」、契约也必填）
+    ⇒ 漏了会让模型少给该键 → 整包被拒 → 白走一次重试 ✗ ⇒ 补上
+  · 其余结论：**fact_merge / tidy 的指令与声明一致** ✓
+  · 已删除：v2.18.59 给 tidy 尾巴加的那句「照抄输入里的 id」✗
+    —— 声明里本来就写清了「每条 id（逐字复制输入里的 p1/p2…）」+「facts[].subject 用 who 表里的稳定实体 ID」
+    ⇒ 我那句是**重复 + 制造两个 "id" 并列的歧义** ✗ ⇒ 删掉（守卫与逐字锁同步还原 ✓）
+  · 新增守卫 `test_compact_schemas_do_not_contradict_the_instruction`（反向验证：回退后报红 ✓）
+
+### v2.18.59
+- ✍️ **提示词融合式重写**（不再"另加一句"，全部并进正文；字数**比 v2.18.58 更短**，语义一条不少）
+  · **compress**（压缩与归类共用）：
+    「source_ids 至少一条 + 单记录规则」用冒号承接写进同一句
+    「tags/relations 空数组」并进**字段清单那一句**的尾部（「…importance，九个键都要有；tags 与 relations 没有内容就给空数组 []」）
+  · **tidy**：尾巴融合「每条照抄输入里的 id，并写 reason」（TidyItem.id 必填，漏了整条被拒）
+    ⚠️ 该句被 `test_rebuild_force.py` 的「常规 tidy 提示词逐字不变」守卫锁着 ⇒ **同步更新了期望串**
+  · 未改（用户逐条确认）：tidy 的否定句**保留**；fact_merge 默认提示词里的 `**` **不碰**
+  · 4 条守卫 `tests/test_prompt_contract.py`（含 tidy 那条；反向验证：回退源码后 5 条全红）
+
+### v2.18.58
+- 🔧 **提示词 ↔ 契约 全量对账**（compress / tidy / fact_merge / dedupe / audit 五个用途逐字段比对）
+  · **压缩·归类共用的提示词**：归类每次都只有一条记录，而原提示词只讲多记录场景 ⇒ 补两句（共 30 余字）
+    「source_ids 必须逐字复制 records[].id；records 只有一条记录时，每条事实的
+      source_ids 就填那一条记录的 id，至少一条。」
+    「tags/relations 没有内容时给空数组 []，两个键照常保留。」
+  · **tidy**：对账发现 `TidyItem.id` 是必填、而提示词没写「照抄输入的 id」——
+    但 `test_rebuild_force.py` 明确锁着「常规 tidy 提示词**逐字不变**」⇒ **不动**（要补由作者定）
+  · **audit 契约**：content 由「必填」改成「按需」—— 只有 correct/merge 会改写正文，只有它们要 content
+    （同 FactMergeGroup 的老教训：契约比提示词严 ⇒ 把合乎提示词的输出判失败、白走一次重试）
+  · 其余对账结果：dedupe（提示词「至少两条」↔ 契约 min=2）、fact_merge（「至少一条」↔ min=1）均一致
+  · 新增 3 条守卫 `tests/test_prompt_contract.py`（反向验证：回退源码后全红）
+
+### v2.18.57
+- 🔧 **「记忆归类」不再吞真因 ✓ 且归类失败会重试** ✓（用户实测：报错只剩一句"输出不是契约要求的JSON对象或类型"✗）
+  · **诊断不再吞因**：`OutputRejected` 直接透传真诊断 ✓；我们自己抛的静态 ValueError 也照实回显 ✓
+    ⇒ 例如 `unknown classification source`（模型给的 facts.source_ids 不符 ✓）现在一眼可见 ✓
+    ⇒ 顺带修好了**重试提示**：以前喂给模型的是一句空话 ⇒ 重试基本白试 ✗
+  · **归类整链重试** ✓：以前 `structured()` 只重试"模型输出被拒" ✗，而归属校验在它之后
+    ⇒ 一次不符就判死、**一次都不重试** ✗ ⇒ 现在照 audit 那套现成模式把归属校验纳入重试 ✓
+    并把可执行提示喂回模型（source_ids 必须恰好是 ['r1'] ✓）
+  · 新增 3 条回归：诊断透传/回显 ✓ 归类带反馈重试（真跑 worker ✓）✓ 用尽后报真因 ✓
+  · ⚠️ **未做**（待定）：解析层容错（剥代码围栏 / 单元素数组 / 双重编码 / 前后散文）
+    —— 会被既有的 `test_drift_rejected` 判红 ✗ ⇒ 那是仓库**有意写死的严格契约** ✓ 不擅自放宽 ✗
+
+### v2.18.56
+- 🔧 **「档案轮换槽」改为默认关** ✓（`rotate_archive_enabled`）
+  · 新装用户：默认关 ⇒ 档案槽完全不参与召回 ✓ 事实轮换槽照常轮换 ✓
+  · 存量用户：**首次运行自动迁移一次** ✓（`config_migrate` v6）
+    —— 只改写「仍等于旧默认 True」的那个键 ✓ 迁移只跑一次 ✓
+    迁移后自己再打开**不会再被动** ✓
+  · 三处同步：`contracts.py` 默认值 / `schema.json` 默认与描述 / `setting_help.py` 文案 ✓
+  · 新增 2 条回归：迁移六分支（默认=关 / 旧默认→关 / 已关不动 / 无键不写 /
+    幂等 / 用户开回来不被再关）+ 面·帮助·代码三处一致 ✓
+
 ### v2.18.55
 - 🧊 **冷归档落地 —— 「L0 容量与分库」长线目标达成 ✓**
   · 定案 = **骨架行 + content 外置**：热库 `records` 行**全留**（外键永远成立 ✓）

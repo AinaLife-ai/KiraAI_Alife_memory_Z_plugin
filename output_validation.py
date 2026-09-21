@@ -43,6 +43,11 @@ def _hint(error):
 
 
 def diagnostic(exc):
+    if isinstance(exc, OutputRejected):
+        # v2.18.57：已是"最终被拒"形态 ⇒ 直接透传真诊断 ✓
+        # 否则 str(OutputRejected)=="structured_output_rejected" 不在 known 里 ✗
+        # ⇒ 掉进兜底句 ⇒ 真因被吞 ✗ 重试提示也跟着变成空话 ✗✗
+        return exc.diagnostic
     if isinstance(exc, ValidationError):
         # Never echo invalid values or model-generated extra keys.
         fields = {
@@ -90,7 +95,15 @@ def diagnostic(exc):
         "source changed during compression",
         "unknown source id",
     }
-    return str(exc) if str(exc) in known else "输出不是契约要求的JSON对象或类型"
+    if str(exc) in known:
+        return str(exc)
+    # v2.18.57：我们自己抛的 ValueError 全是**静态文本**（逐处核对过 ✓ 不含模型内容 ✓）
+    # ⇒ 直接回显真因 ✓（例："unknown classification source" 不再被兜底句盖掉 ✗✗）
+    # 兜底句仅留作最后手段：不是 ValueError、含换行、或过长 ✓
+    message = str(exc).strip()
+    if isinstance(exc, ValueError) and message and "\n" not in message and len(message) <= 200:
+        return message
+    return "输出不是契约要求的JSON对象或类型"
 
 def validate_audit(candidates, output):
     by_id = {r["id"]: r for r in candidates}

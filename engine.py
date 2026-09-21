@@ -133,7 +133,7 @@ COMPACT_SCHEMAS = {
         '            "relations": [{"subject","predicate","object"}],\n'
         '            "source_ids": [str], "importance": 1-10}]}\n'
         '**只有这两个顶层键**（summary、facts）—— 不要回写输入里的 range/records/names 等字段 ✗\n'
-        '必填：summary；facts 里 category/subject/content/reason/scenario/tags/relations/source_ids。\n'
+        '必填：summary；facts 里 category/subject/content/reason/scenario/tags/relations/source_ids/importance。\n'
         '上限：facts ≤12、content ≤60 字、reason ≤40 字、scenario ≤20 字、summary ≤300 字。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
         '常见错误（会被拒）：把 predicate/object 平铺进事实（必须放 relations）；\n'
@@ -160,7 +160,7 @@ COMPACT_SCHEMAS = {
     ),
     "fact_merge": (
         '返回 JSON（无 markdown、无额外字段）：\n'
-        '{"groups": [{"target_id": str, "source_ids": [str], "content": str,\n'
+        '{"groups": [{"target_id": str, "source_ids": [str], "content": str?,\n'
         '             "reason": str, "action": "merge|relabel|drop", "tags": [str]?}]}\n'
         '必填：groups；每组 target_id/source_ids/reason（action=merge 时 content 不能为空）。\n'
         '上限：content 目标 ≤80 字（硬上限 150）、reason ≤15 字（硬上限 40）。\n'
@@ -174,17 +174,18 @@ COMPACT_SCHEMAS = {
         '**只有这四个键** —— 不要回写输入里的 latest/records/names 等字段 ✗\n'
         '必填：action、reason、source_ids（逐字复制输入 records[].id 的 d1/d2… 别名 ✓ 不要编 ✗）。\n'
         'merge 时 content 必填（合并后那一条的正文，≤16000 字，简洁完整）；keep 时**不要**给 content。\n'
-        '上限：reason ≤60 字。字段白名单：只允许上面这些键，多任何一个都会被拒。\n'
+        '上限：reason ≤15 字。字段白名单：只允许上面这些键，多任何一个都会被拒。\n'
         '常见错误（会被拒）：编造不存在的 id（source_ids 必须在输入里出现过 ✓）；\n'
-        'action=merge 却不给 content；把**不该合并**的两条硬并（宁可 keep ✓ 合并不可逆 ✓）。'
+        'action=merge 却不给 content（合并不可逆 ✓ 拿不准就按指令给的动作）。'
     ),
     "audit": (
         '返回 JSON（无 markdown、无额外字段）：\n'
         '{"actions": [{"action": "keep|correct|merge|retract", "target_id": str,\n'
-        '              "source_ids": [str], "content": str, "reason": str, "importance": 1-10,\n'
+        '              "source_ids": [str], "content": str?, "reason": str, "importance": 1-10,\n'
         '              "relations": [{"subject","predicate","object"}],\n'
         '              "subject": str?, "tags": [str]?, "only_self": bool?}]}\n'
-        '必填：actions；每项 action/target_id/source_ids/content/reason。\n'
+        '必填：actions；每项 action/target_id/source_ids/reason；'
+        'correct/merge 必填 content。\n'
         '可选：importance / relations / subject（改主体）/ tags（内容变了才给）/ only_self。\n'
         '上限：reason ≤40 字。字段白名单：只允许上面这些键（含可选），别的键会被拒。\n'
         '常见错误（会被拒）：目标 id 不在输入里；keep/correct/retract 却给了别的 id；\n'
@@ -225,14 +226,16 @@ def build_instruction(purpose, cfg, forced=False):
     if purpose == "compress":
         return (
             "压缩输出只含summary和facts；至多12条事实。"
-            "source_ids必须逐字复制records[].id。"
+            "source_ids 逐字复制 records[].id，至少一条：records 只有一条记录时，"
+            "每条事实的 source_ids 就是那一条记录的 id。"
             "importance 用 1-10 表示这条事实的长期价值。"
             "reason 不超过 40 字，写清依据来源（用户原话/上下文推断）。"
             "summary 不超过 300 字。scenario 不超过 20 字（写清场景即可，不要展开）。"
             "每条事实的 content 不超过 60 字，把话说完、别写段落。"
             "facts[] 每条字段：category（只能是 "
             "event/fact/preference/commitment/relationship/profile/resource/self）"
-            "、subject、content、reason、scenario、tags、relations、source_ids、importance。"
+            "、subject、content、reason、scenario、tags、relations、source_ids、importance，"
+            "九个键都要有；tags 与 relations 没有内容就给空数组 []。"
             "relations 必须是数组，每项 {subject,predicate,object}；"
             "不要把 predicate/object 平铺在事实里；谓词要表达具体关系"
             "（如 朋友/姐姐/喜欢），不要用 认为/觉得/说。"
@@ -2209,16 +2212,56 @@ class Engine:
                         names = await self.name_map(row["users"])
                         keep = await self.store.call("spaced_names")
                         aliases = {"r1": row["id"]}
-                        output = await self.structured(
-                            Compression,
-                            "compress",
-                            {
-                                "records": compress_records([row], aliases, names, keep),
-                                "context": [],
-                            },
-                            cfg,
-                        )
-                        output = restore_compress_ids(output, aliases)
+                        payload = {
+                            "records": compress_records([row], aliases, names, keep),
+                            "context": [],
+                        }
+                        # ★ v2.18.57：归类的重试要覆盖**整条链** ✓
+                        # 以前 structured() 只重试"模型输出被拒" ✗，而归属校验在它之后
+                        # ⇒ 一次不符就判死 ✗ 一次都不重试 ✗（用户实测："好像没触发"）
+                        # 现在：照 audit 那套现成模式 ✓ 把归属校验也纳入重试 ✓
+                        for attempt in range(cfg.model_retries + 1):
+                            try:
+                                output = await self.structured(
+                                    Compression,
+                                    "compress",
+                                    payload,
+                                    cfg,
+                                    retry_timeout=False,
+                                )
+                                output = restore_compress_ids(output, aliases)
+                                wrong = [
+                                    fact
+                                    for fact in output.get("facts", [])
+                                    if set(fact.get("source_ids") or ())
+                                    != {row["id"]}
+                                ]
+                                if not wrong:
+                                    break
+                                raise OutputRejected(
+                                    'facts 的 source_ids 必须恰好是 ["r1"]'
+                                    "（这条记录自己的短别名）；这次有 %d 条不符"
+                                    % len(wrong)
+                                )
+                            except (
+                                TimeoutError,
+                                ConnectionError,
+                                ValueError,
+                            ) as exc:
+                                if (
+                                    isinstance(exc, ValueError)
+                                    and str(exc) != "structured_output_rejected"
+                                ):
+                                    raise
+                                if attempt == cfg.model_retries:
+                                    raise
+                                payload["output_feedback"] = (
+                                    "上次输出被拒绝："
+                                    + getattr(exc, "diagnostic", "契约校验失败")
+                                    + "。facts 的 source_ids 必须恰好是"
+                                    " ['r1']（这条记录自己的短别名），"
+                                    "不要留空、不要编造新 id、不要多加。"
+                                )
                         for fact in output.get("facts", []):
                             fact["subject"] = await self.id_for_subject(
                                 fact.get("subject", ""), names
