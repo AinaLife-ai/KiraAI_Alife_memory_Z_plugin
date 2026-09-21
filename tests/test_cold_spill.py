@@ -554,6 +554,32 @@ async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
         await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
         assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
 
+        # update：改事实的正文（走 accessible + Edit 契约）
+        rev = (await store.call("facts_by_ids", [fid], True))[0]["revision"]
+        out4 = await plugin.correct(
+            event, "update", kind="fact", ids=[fid], revision=rev,
+            patch={"content": "改过的正文"}, reason="改内容",
+        )
+        assert "ok" in str(out4) and "false" not in str(out4).lower(), "update 失败: %s" % str(out4)[:80]
+        assert (await store.call("facts_by_ids", [fid], True))[0]["content"] == "改过的正文"
+
+        # merge：两条事实合并成一条
+        other = store.add_facts(
+            sid,
+            [dict(category="fact", subject="a:u", content="另一条事实", reason="r",
+                  scenario="", tags=[], relations=[], source_ids=[rec], importance=5)],
+        )[0]
+        out5 = await plugin.correct(
+            event, "merge", kind="fact", ids=[fid, other], content="合并后的一条", reason="合并"
+        )
+        assert "ok" in str(out5) and "false" not in str(out5).lower(), "merge 失败: %s" % str(out5)[:80]
+        alive = [
+            f["content"]
+            for f in store.facts_by_ids([fid, other], True)
+            if f["deleted"] == 0
+        ]
+        assert alive == ["合并后的一条"], "合并后应只剩一条 ✗ 实际: %s" % alive
+
         # 记录那条路也要走通（v2.18.68：archive → restore → delete → restore 四步全过 ✓）
         rid = store.memorize(sid, "一条可归档的记录", ["a:u"], 1.0, 2.0)
 
