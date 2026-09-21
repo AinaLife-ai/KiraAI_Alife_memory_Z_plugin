@@ -476,3 +476,35 @@ def test_touch_tidy_accepts_timestamp_for_reset(tmp_path):
     with store.connect() as db:
         reset = db.execute("SELECT tidy_at FROM records WHERE id=?", (rid,)).fetchone()[0]
     assert reset == 0, "传 0 必须把限流清零 ✗"
+
+
+def test_restore_after_retract_is_possible_with_safety(tmp_path):
+    """v2.18.66：撤回后必须能**还原** + 不许偷偷改已删除的条目
+
+    以前 `edit` 的查找写死了 `AND deleted=0` ✗ ⇒ 已撤回的那条永远查不到
+    ⇒ 走「还原」必然 Conflict ✗（记忆与事实都一样 ✗）
+    """
+    import pytest as _pytest
+
+    store = _storage_mod().Store(tmp_path / "db")
+    store.initialize()
+    sid = "a:dm:restore"
+    fid = store.add_facts(
+        sid,
+        [dict(category="fact", subject="a:u", content="要被撤回的事实", reason="r",
+              scenario="", tags=[], relations=[], source_ids=[], importance=5)],
+    )[0]
+    rev = store.facts_by_ids([fid])[0]["revision"]
+    store.edit("fact", fid, rev, {"deleted": True}, "retract")
+    assert store.facts_by_ids([fid], True)[0]["deleted"] == 1
+    # 还原：以前必然 Conflict ✗
+    rev2 = store.facts_by_ids([fid], True)[0]["revision"]
+    store.edit("fact", fid, rev2, {"deleted": False}, "restore")
+    assert store.facts_by_ids([fid], True)[0]["deleted"] == 0, "还原必须成功 ✗"
+    # 安全边界：没有显式 deleted=False 时，不许改已删除的条目 ✓
+    rev3 = store.facts_by_ids([fid])[0]["revision"]
+    store.edit("fact", fid, rev3, {"deleted": True}, "retract again")
+    rev4 = store.facts_by_ids([fid], True)[0]["revision"]
+    with _pytest.raises(Exception) as info:
+        store.edit("fact", fid, rev4, {"content": "偷偷改"}, "sneaky")
+    assert "already deleted" in str(info.value)

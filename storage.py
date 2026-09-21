@@ -2669,10 +2669,15 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute(
-                f"SELECT * FROM {table} WHERE id=? AND deleted=0", (target,)
+                f"SELECT * FROM {table} WHERE id=?", (target,)
             ).fetchone()
             if not old or old["revision"] != revision:
                 raise Conflict("record changed; reload before saving")
+            # v2.18.66：撤回后**还原**必须可行 ✗ —— 以前这里写死 `AND deleted=0` ✗
+            # ⇒ 已删除/已撤回的那条永远查不到 ⇒ 走「还原」必然 Conflict ✗（真跑踩到 ✓）
+            # 安全边界保留：patch 里没有明确的 `deleted: False` 时，仍不许改已删除的条目 ✓
+            if old["deleted"] and patch.get("deleted") is not False:
+                raise Conflict("already deleted; restore it first")
             if kind == "record" and "active" in patch and not old["permanent"]:
                 raise ValueError(
                     "only permanent memories can leave/rejoin context manually"

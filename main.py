@@ -3557,10 +3557,12 @@ class AlifeMemoryPlugin(BasePlugin):
                 else:
                     patch = {"active": False}
                 if kind == "fact":
+                    # v2.18.66：事实的可编辑字段里**没有 active** ✗（那是记录独有的）
+                    # 以前这里保留 active ⇒ edit 会直接 ValueError("invalid editable fields") ✗
                     patch = {
                         key: value
                         for key, value in patch.items()
-                        if key in ("deleted", "active")
+                        if key in ("deleted",)
                     }
                 done = []
                 for value in real_ids:

@@ -381,6 +381,20 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 成本杠杆 ✓：`compress_model`（可指便宜模型）+ 限流 + 幂等键（轮末记录 id ✓）
 - **明确不做** ✗：命中就调模型 ✗；让启发式**直接写永久记忆** ✗（会绕过审计/合并/去重 ✓）
 
+### v2.18.67
+- 🔍 **第四轮审计：专门审"我上一轮的修复"** ⇒ 发现修得**不彻底**，已补齐
+  · 「编辑事实」那条路其实有**三道坎**（AttributeError 只是第一道）
+    1. ✅ 上一轮已修：`get_fact` 不存在 ⇒ 改用 `facts_by_ids([id], True)`
+    2. ✗ 新查出：事实 patch 里带了**记录独有的 `active`** ⇒ `edit` 直接
+       `ValueError("invalid editable fields")` ⇒ 事实的 patch 只保留 `deleted`
+    3. ✗ 新查出：`edit` 的查找写死 `AND deleted=0` ⇒ **已撤回/已删除的条目永远查不到**
+       ⇒ 走「还原」必然 `Conflict`（记忆与事实都一样 —— 既有 bug）
+       ⇒ 改成不带 deleted 过滤 + **安全边界**：patch 里没有显式 `deleted: False` 时，
+         仍不许改已删除的条目 ✓
+  · 实测：撤回 ⇒ **还原可用** ✓；偷偷改已删除的 ⇒ 仍被 `Conflict` 拦住 ✓
+  · 新增守卫 `test_restore_after_retract_is_possible_with_safety`（反向验证：回退 ⇒ 红）
+  · 顺带确认 `touch_tidy(ids, 0)` 语义正确 ✓（资格判定是 `tidy_at=0 OR tidy_at<?` ⇒ 0 = 立刻可整理 ✓）
+
 ### v2.18.66
 - 🐛 **扩大审计范围，扫出两个"幽灵调用"（既有 bug，真跑必崩）**
   · 手法：机械核对 —— 把 main.py/engine.py 里所有 `store.call("X")` 的 X 与 `Store` 的真实方法集做差集
