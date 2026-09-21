@@ -2815,10 +2815,13 @@ class AlifeMemoryPlugin(BasePlugin):
             ],
         )
 
-    async def accessible(self, event, record_id):
+    async def accessible(self, event, record_id, include_deleted=False):
         if not self.runtime_settings().enabled:
             raise ValueError("memory paused")
-        row = await self.store.call("get", record_id)
+        # v2.18.68：`include_deleted` —— 「删除后再还原」必须能看到**已删除**的那条 ✗
+        #   以前写死 get() ⇒ 已删除的记录查不到 ⇒ 还原报 "archive not found" ✗（真跑实测 ✓）
+        #   ⚠️ 默认仍是 False ⇒ 读取类入口的行为**完全不变** ✓ 只有维护动作显式传 True ✓
+        row = await self.store.call("get", record_id, include_deleted)
         if not row:
             # v2.18.68：**事实的 id 不在 records 表里** ✗
             #   以前这里直接 raise "archive not found" ⇒ 「对事实做删除/还原/归档」这条路
@@ -3560,7 +3563,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 if not real_ids:
                     return dump({"ok": False, "error": "ids_required"})
                 for value in real_ids:
-                    await self.accessible(event, value)
+                    # v2.18.68：维护动作要能处理**已删除**的条目（「删除后再还原」✓）
+                    await self.accessible(event, value, True)
                 if action == "delete":
                     patch = {"deleted": True}
                 elif action == "restore":
@@ -3583,7 +3587,8 @@ class AlifeMemoryPlugin(BasePlugin):
                         facts = await self.store.call("facts_by_ids", [value], True)
                         row = facts[0] if facts else None
                     else:
-                        row = await self.store.call("get", value)
+                        # v2.18.68：维护动作也可能针对**已删除**的记录（还原 ✓）
+                        row = await self.store.call("get", value, True)
                     if not row:
                         continue
                     await self.store.call(

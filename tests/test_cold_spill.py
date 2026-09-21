@@ -544,5 +544,25 @@ async def test_correct_tool_maintains_facts_end_to_end(tmp_path):
         out2 = await plugin.correct(event, "restore", kind="fact", ids=[fid], reason="还原")
         assert "ok" in str(out2) and "false" not in str(out2).lower(), "还原失败: %s" % str(out2)[:80]
         assert (await store.call("facts_by_ids", [fid], True))[0]["deleted"] == 0
+
+        # 记录那条路也要走通（v2.18.68：archive → restore → delete → restore 四步全过 ✓）
+        rid = store.memorize(sid, "一条可归档的记录", ["a:u"], 1.0, 2.0)
+
+        def record_state():
+            with store.connect() as db:
+                row = db.execute(
+                    "SELECT active, deleted FROM records WHERE id=?", (rid,)
+                ).fetchone()
+            return dict(row)
+
+        await plugin.correct(event, "archive", kind="record", ids=[rid], reason="归档")
+        assert record_state() == {"active": 0, "deleted": 0}
+        await plugin.correct(event, "restore", kind="record", ids=[rid], reason="还原")
+        assert record_state() == {"active": 1, "deleted": 0}
+        await plugin.correct(event, "delete", kind="record", ids=[rid], reason="删除")
+        assert record_state() == {"active": 1, "deleted": 1}
+        # ★ 已删除的记录必须还能还原（以前 accessible/get 都看不到它 ⇒ 必然失败 ✗）
+        await plugin.correct(event, "restore", kind="record", ids=[rid], reason="再还原")
+        assert record_state() == {"active": 1, "deleted": 0}, "已删除的记录必须能还原 ✗"
     finally:
         await plugin.terminate()
