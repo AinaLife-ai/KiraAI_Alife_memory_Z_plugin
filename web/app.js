@@ -692,13 +692,35 @@ function ensureToolToggle() {
   box.insertAdjacentElement("afterend", wrap);
   wrap.querySelector("input").addEventListener("change", () => loadArchives());
 }
+// v2.18.64：再给档案浏览加一个"显示历史存档"开关 ✓（**默认开** ✓）
+// 它负责显示/隐藏「历史存档」与「冷归档 · 仅按ID可读」这两类卡片 ✓
+function ensureHistoryToggle() {
+  if (document.querySelector("#includeHistory")) return;
+  const anchor = document.querySelector("#includeTools");
+  const box = anchor && anchor.closest("label");
+  if (!box) return;
+  const wrap = document.createElement("label");
+  wrap.className = box.className;
+  wrap.innerHTML =
+    '<input type="checkbox" id="includeHistory" checked> <span>显示历史存档</span>';
+  box.insertAdjacentElement("afterend", wrap);
+  wrap.querySelector("input").addEventListener("change", () => {
+    offset = 0;
+    loadArchives();
+  });
+}
 async function loadArchives() {
   ensureToolToggle();
+  ensureHistoryToggle();
   const selectedSid = $("#session").value;
   const q = {
     sid: selectedSid,
     include_global: $("#includeGlobal").checked,
     include_tools: !!(document.querySelector("#includeTools") || {}).checked,
+    // v2.18.64：默认**显示**历史存档 ✓（元素尚未创建时也按 true 走 ✓）
+    include_history: (
+      document.querySelector("#includeHistory") || { checked: true }
+    ).checked,
     keyword: $("#keyword").value,
     prompt: $("#semantic").value,
     offset,
