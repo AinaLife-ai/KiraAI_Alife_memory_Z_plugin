@@ -299,3 +299,18 @@ def test_archive_browse_card_body_falls_back_to_content():
     assert 'esc(r.summary || r.content || r.preview || "")' in js, "浏览页卡片正文要回退到 content ✗"
     assert '$("#editText").placeholder' in js, "没有摘要时编辑框要给提示 ✗"
     assert '$("#editText").value = r.summary;' in js, "编辑框仍只装 summary ✗（不能拿 content 预填）"
+
+
+def test_panel_copy_has_no_markdown_emphasis():
+    """面向用户的文案不许出现 `**`（面板按**纯文本**渲染 ⇒ 会原样显示星号 ✗）
+
+    v2.18.67 自审发现的疏漏：我写的页签说明里带了 `**` ⇒ 用户会看到星号 ✗
+    （仓库里其它 `**` 都在注释里 ✓ 不进界面 ✓）
+    """
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    start = js.index('const note = $("#trashNote")')
+    for line in js[start:start + 700].splitlines():
+        text = line.strip()
+        if not text or text.startswith("//"):
+            continue
+        assert "**" not in text, "面向用户的文案里不能有 **（会原样显示）: %s" % text[:60]
