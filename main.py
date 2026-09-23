@@ -933,8 +933,15 @@ class AlifeMemoryPlugin(BasePlugin):
             else cfg.audit_persona
         )
         if wants_persona:
-            persona = await self.ctx.persona_mgr.get_persona()
-            payload = {**payload, "persona": persona.content}
+            # ★ 2026-09-23：人设读取失败不该拖垮整个压缩/审计（它只是锦上添花 ✓）
+            #   原来直接 await ⇒ 一次 persona_mgr 故障 = 这一批全废 ✗
+            try:
+                persona = await self.ctx.persona_mgr.get_persona()
+                content = getattr(persona, "content", "") or ""
+                if content:
+                    payload = {**payload, "persona": content}
+            except Exception:
+                logger.warning("[记忆·Z] 人设读取失败，本次不带人设继续（不影响压缩本身 ✓）")
         req = LLMRequest(
             messages=[
                 OpenAIMessage(
@@ -3857,7 +3864,11 @@ class AlifeMemoryPlugin(BasePlugin):
     @register.api(method="GET", path="/models", auth=True)
     async def api_models(self):
         result = []
-        providers = self.ctx.provider_mgr.kira_config.get("providers", {})
+        # ★ 2026-09-23：`provider_mgr` / `kira_config` 不是 PluginContext 的固定契约
+        #   （框架版本演进过）⇒ 用 getattr 链兜底 ✗ 否则前端"模型下拉"直接 500 ✗
+        provider_mgr = getattr(self.ctx, "provider_mgr", None)
+        kira_config = getattr(provider_mgr, "kira_config", None) or {}
+        providers = (kira_config.get("providers") or {}) if isinstance(kira_config, dict) else {}
         for pid, provider in providers.items():
             for kind in ("llm", "embedding"):
                 for mid in provider.get("model_config", {}).get(kind, {}):
