@@ -61,7 +61,7 @@ AUDIT_INSTRUCTION = (
     "merge 至少两条同会话同主体同分类事实，每条只参与一次操作。"
     "证据里**没提到** != 事实错误 ✗：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删别改。"
     "无操作时 actions=[]；保留否定/时间/不确定；不同事件不因相似合并。"
-    "correct 给 relations（无=[]，不改=null）；importance 1-10 按证据给，分档同压缩指令（1-2 当时 / 9-10 不应遗忘）。"
+    "correct 给 relations（无=[]，不改=null）；importance 1-10 按证据给：1-2 仅当时有效，9-10 不应遗忘。"
     "subject 记错（A 的话记到 B 名下）用 correct：evidence[].sp 是原文**说话人显示名**，不符就把 subject 填成正确的**实体 id**（照 facts[].subject）；没有 sp 或看不出是谁说的就别改主体。"
     "retract 清理被推翻或冗余的事实：软删后可恢复；reason 写清原因。"
     # v2.18.9 回声防线：**以用户为准** ✓
@@ -240,7 +240,7 @@ def build_instruction(purpose, cfg, forced=False, facts_cap=None):
             #   原设计里 facts 也承担"不丢线索"⇒ 寒暄与一次性情绪全变成事实 ✗
             #   ⇒ 线索归 summary（那本来就是它的职责）✓ facts 只收长期结论 ✓
             #   成对写出（要写什么 + 什么留在 summary）⇒ 不诱导过度过滤 ✓
-            "summary 用完整叙述保留线索（含时间、否定、条件与不确定）；"
+            "summary 用完整叙述保留来龙去脉；"
             "facts 只写脱离这段对话仍然成立、之后还会用到的结论。"
             "对话中提到的人物、约定、偏好、时间与否定，凡属长期可用的都要写成事实；"
             "只对当时情境有效的情绪与寒暄留在 summary 里，不单独成条。"

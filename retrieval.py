@@ -1107,7 +1107,10 @@ def _effective_used(fact, now):
     used = min(int(fact.get("rotate_used") or 0), USED_CAP)
     if used <= 0:
         return 0.0
-    last = float(fact.get("rotate_used_at") or 0)
+    try:
+        last = float(fact.get("rotate_used_at") or 0)
+    except (TypeError, ValueError):
+        last = 0.0                      # 脏值 ⇒ 当作"没有时间戳"（不衰减 ✓ 绝不炸注入）
     if last <= 0:
         return float(used)
     days = max(0.0, (now - last) / 86400.0)
