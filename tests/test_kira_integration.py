@@ -736,6 +736,86 @@ async def test_failed_final_snapshot_restores_disabled_plugins(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_partial_read_errors_skip_and_migration_completes(tmp_path):
+    """线上事故回归（2026-09-23）：**一个坏文件不该让整个迁移失败**。
+
+    KiraOS 老数据里 `entities/group_548464960/profile.json` 的 entity_id 是新
+    格式（`qq:548464960`），而目录名是旧格式（纯数字）——旧实现把它当致命错误
+    ⇒ 迁移失败 ⇒ 记忆永久 memory_paused（用户截图正是这个文件）。
+
+    新行为：目录名与副本不一致按目录名继续读；真读不了的文件跳过并登记报告；
+    只要该源**还有内容接上**，迁移就完成（旧插件停用、记忆可用）。
+    """
+    root = tmp_path / "host-data/memory"
+    legacy_group = {
+        "entity_id": "qq:548464960",
+        "entity_type": "group",
+        "name": "个人资料群 我们仨",
+        "nickname": "",
+        "description": "三人群聊建立: 群号548464960",
+        "platform": "QQ",
+        "traits": [],
+        "preferences": {},
+        "relationships": {},
+        "facts": [],
+        "aliases": [],
+        "interaction_count": 0,
+        "last_interaction": 1778898770.3317044,
+        "metadata": {},
+    }
+    folder = root / "entities/group_548464960"
+    folder.mkdir(parents=True)
+    (folder / "profile.json").write_text(
+        json.dumps(legacy_group, ensure_ascii=False), encoding="utf-8"
+    )
+    (folder / "facts").mkdir()
+    (folder / "facts/topic.toml").write_text(
+        'type = "fact"\ntext = "这个群常聊个人资料整理"\n', encoding="utf-8"
+    )
+    user = root / "entities/user_test%3Au/facts"
+    user.mkdir(parents=True)
+    (user / "good.toml").write_text(
+        'type = "fact"\ntext = "好文件必须照常接上"\n', encoding="utf-8"
+    )
+    (user / "broken.toml").write_text('text = "unclosed', encoding="utf-8")
+
+    manager = LegacyManager()
+    plugin = module.AlifeMemoryPlugin(
+        types.SimpleNamespace(
+            get_plugin_data_dir=lambda: tmp_path / "plugin", plugin_mgr=manager
+        ),
+        {"alife": {"probability": 0.0, "audit_enabled": False}},
+    )
+    await plugin.initialize()
+    await plugin.wait_migration()
+    try:
+        # 迁移完成、不再暂停、旧插件确实让位
+        assert not plugin.migration_blocked
+        assert plugin.runtime_settings().enabled
+        assert not any(manager.states.values())
+        event = make_event()
+        raw = await plugin.search_archive(event, keyword="个人资料群")
+        assert "memory_paused" not in str(raw)          # 工具不再被暂停
+        assert "个人资料群" in str(raw)                  # 那份画像照常接上
+        assert "好文件必须照常接上" in str(
+            await plugin.search_archive(event, keyword="好文件")
+        )
+        # 坏文件仍要看得见（用户可自行修复；修好会被补扫）
+        status = await plugin.api_status()
+        errs = [
+            e
+            for rep in status["migration"]["reports"]
+            for e in rep.get("errors", [])
+        ]
+        assert [e for e in errs if "broken.toml" in e["file"]]
+        assert any(e.get("detail") for e in errs), "错误要带具体原因"
+        assert plugin.migration_note.startswith("迁移完成")
+        assert "1 个文件无法读取" in plugin.migration_note
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
 async def test_dynamic_memory_keeps_system_and_history_stable(tmp_path):
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
