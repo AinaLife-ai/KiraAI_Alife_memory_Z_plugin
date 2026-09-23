@@ -439,6 +439,13 @@ class Store:
                 db.execute(
                     "ALTER TABLE facts ADD COLUMN rotate_used INTEGER NOT NULL DEFAULT 0"
                 )
+            # ★ 2026-09-23：**被用次数的时间戳** ✓
+            #   没有它 ⇒ `rotate_used` 只增不减 ⇒ "用够几次"变成永久免沉（没有出口）✗
+            #   旧库补 0 ⇒ 计分侧按"不衰减"处理 ⇒ 存量数据的命运一点不变 ✓
+            if "rotate_used_at" not in fact_columns:
+                db.execute(
+                    "ALTER TABLE facts ADD COLUMN rotate_used_at REAL NOT NULL DEFAULT 0"
+                )
             if "search_body" not in columns:
                 db.execute(
                     "ALTER TABLE records ADD COLUMN search_body TEXT NOT NULL DEFAULT ''"
@@ -1305,13 +1312,13 @@ class Store:
         return ids[:20]
 
     # ── 身份绑定（2026-09-18 批次 3）────────────────────────────────
-    def fact_health(self, threshold=12, now=None, limit=50, offset=0):
+    def fact_health(self, threshold=15, now=None, limit=50, offset=0):
         from . import retrieval
 
         now = float(now or time.time())
         base_cols = [
             "id", "sid", "subject", "content", "category", "importance",
-            "rotate_shown", "rotate_used", "created", "event_at",
+            "rotate_shown", "rotate_used", "rotate_used_at", "created", "event_at",
         ]
         with self.connect() as db:
             cols = {r[1] for r in db.execute("PRAGMA table_info(facts)").fetchall()}
@@ -3826,10 +3833,20 @@ class Store:
                     [(i,) for i in shown],
                 )
             if used:
-                db.executemany(
-                    "UPDATE " + table + " SET rotate_used=rotate_used+1 WHERE id=?",
-                    [(i,) for i in used],
-                )
+                if table == "facts":
+                    # ★ 2026-09-23：事实侧同时记**最后一次被用上**的时间 ✓
+                    #   计分时据此做 60 天半衰期（见 retrieval._effective_used）✓
+                    stamp = time.time()
+                    db.executemany(
+                        "UPDATE facts SET rotate_used=rotate_used+1, rotate_used_at=?"
+                        " WHERE id=?",
+                        [(stamp, i) for i in used],
+                    )
+                else:
+                    db.executemany(
+                        "UPDATE records SET rotate_used=rotate_used+1 WHERE id=?",
+                        [(i,) for i in used],
+                    )
         return len(shown) + len(used)
 
     def rotation_stats(self, kind="record"):

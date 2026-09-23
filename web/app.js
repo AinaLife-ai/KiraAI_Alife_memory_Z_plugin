@@ -1062,6 +1062,10 @@ function healthCard(f, idx) {
   // ★ 与「事实卡片」显示**完全一样的东西** ✓ 只多出本页特有的：
   //   分数 / 被用次数 / 年龄 / 本轮下沉·永不沉 标签 / 重要度 ±1 快捷上浮 ✓
   const imp = f.importance != null ? f.importance : 5;
+  // ★ 2026-09-23：被用次数按 60 天半衰期衰减 ⇒ 顺带把"最近被用"标出来 ✓
+  const usedAgo = f.rotate_used_at
+    ? "（最近 " + Math.max(0, Math.round((Date.now() / 1000 - f.rotate_used_at) / 86400)) + " 天前）"
+    : "";
   // ★ 2026-09-19（用户）：拿不到时间就**什么都不显示** ✓
   //   不要写"时间未知"这种占位 ✓（占地方又没信息）
   const age = f.age_days != null ? f.age_days + " 天前" : "";
@@ -1097,7 +1101,7 @@ function healthCard(f, idx) {
     (reason ? '<p class="muted">' + esc(reason) + "</p>" : "") +
     hist +
     "<small>重要度 " + imp + " · 分数 " + f.score + " · 被用 " + (f.rotate_used || 0) +
-    " 次" + (age ? " · " + age : "") + " " + sinkTags + "</small>" +
+    " 次" + usedAgo + (age ? " · " + age : "") + " " + sinkTags + "</small>" +
     "<footer><small>" + ((f.sources || []).length) + " 个来源</small>" +
     '<button data-imp="' + f.id + '" data-delta="-1">－</button>' +
     '<button data-imp="' + f.id + '" data-delta="1">＋</button>' +

@@ -246,15 +246,30 @@ def test_audit_evidence_carries_speaker():
 
 
 def _prompt_texts():
+    """源码里所有 ≥150 字的提示词常量（**含变量拼接**）。
+
+    ★ 2026-09-23 修：原来只抓单层字面量 ⇒ `MEMORY_RULES = ("…" + _GROUPED_FACT_DOC + "…")`
+    里的拼接部分**根本没被算进去**（实测真实 767 字，守卫只看到 491 字）
+    ⇒ 560 的预算守卫实际没生效 ✗ 现在先把 `+ NAME` / 独占一行的引用展开，再抓字面量 ✓
+    """
     import re
     src = ROOT
-    out = {}
+    raw = {}
     for name in ("engine.py", "main.py"):
         text = (src / name).read_text(encoding="utf-8")
         for m in re.finditer(r'([A-Z_]{4,})\s*=\s*\((.*?)\n\)', text, re.S):
-            body = "".join(re.findall(r'"([^"]*)"', m.group(2)))
-            if len(body) >= 150:
-                out[m.group(1)] = body
+            raw[m.group(1)] = m.group(2)
+    out = {}
+    for name, body in raw.items():
+        expanded = body
+        for _ in range(3):                       # 迭代展开（支持嵌套引用 ✓）
+            for ref, ref_body in raw.items():
+                expanded = re.sub(
+                    r'(?m)^\s*\+?\s*' + ref + r'\s*$', ref_body, expanded
+                )
+        text_val = "".join(re.findall(r'"([^"]*)"', expanded))
+        if len(text_val) >= 150:
+            out[name] = text_val
     return out
 
 
@@ -275,7 +290,10 @@ def test_prompt_budget_is_enforced():
     # ——这是有意识的安全规则增加 ✗ 不是无意的膨胀 ✓ 且已先挤掉原有冗余写法
     assert len(texts["COMMON_INSTRUCTION"]) <= 620, "COMMON 超预算 %d" % len(texts["COMMON_INSTRUCTION"])
     assert len(texts["AUDIT_INSTRUCTION"]) <= 620, "AUDIT 超预算 %d" % len(texts["AUDIT_INSTRUCTION"])
-    assert len(texts["MEMORY_RULES"]) <= 560, "MEMORY_RULES 超预算 %d" % len(texts["MEMORY_RULES"])
+    # 2026-09-23：口径修正后 MEMORY_RULES 的真实长度（含 _GROUPED_FACT_DOC 拼接 ✓）
+    # 同日精简去重（next_batch 原说 3 遍、expand 说明 2 遍、简报格式三句并一句）⇒ 767 → 680
+    # 预算随之定为 690（留 10 字余量 ✓ 且此后**真实长度**才受守卫约束 ✓）
+    assert len(texts["MEMORY_RULES"]) <= 690, "MEMORY_RULES 超预算 %d" % len(texts["MEMORY_RULES"])
 
 
 def test_audit_judges_on_the_same_text_as_compression():
