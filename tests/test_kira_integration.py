@@ -1356,7 +1356,10 @@ async def test_injection_hides_pending_and_prefers_important_subjects(tmp_path):
         plugin.store.observe_name("test:firefly", "萤火", source="admin")
         high = add("test:firefly", "萤火对花生过敏", 9)
         mid = add("test:firefly", "萤火喜欢甜口蛋糕", 4)
-        low = add("test:other", "另一个人喜欢甜食", 2)
+        # ★ 2026-09-23（用户拍板"≤5 都更容易让位"）：低重要度的**无关**事实不再进常驻 ✗
+        #   ⇒ 排序对照改用默认档 5（新鲜 + 默认分 = 20 ≥ 阈值 15 ✓）
+        low = add("test:other", "另一个人喜欢甜食", 5)
+        faded = add("test:other", "另一个人的陈年琐事", 2)
         pending = add("test:firefly", "萤火对坚果也过敏", 8)
         plugin.store.mark_merge_pending([pending])
 
@@ -1371,6 +1374,9 @@ async def test_injection_hides_pending_and_prefers_important_subjects(tmp_path):
 
         assert "萤火对花生过敏" in block
         assert "另一个人喜欢甜食" in block
+        assert "另一个人的陈年琐事" not in block, (
+            "低重要度（2）且无关的事实应当让位给轮换槽位（2026-09-23 用户拍板 ✓）"
+        )
         assert "萤火对坚果也过敏" not in block, "待合并的事实不能出现在注入块里"
         assert block.index("萤火对花生过敏") < block.index("另一个人喜欢甜食"), (
             "消息里提到的人（萤火）应排在前面"
@@ -2077,6 +2083,53 @@ async def test_global_bucket_sessions_also_get_swept_and_yield_facts(tmp_path, m
         assert any("拿铁" in f.get("content", "") for f in facts), "事实内容不对 ✗"
     finally:
         await plugin.terminate()
+
+@pytest.mark.asyncio
+async def test_sink_decoupled_from_rotation_and_bonus_for_hits(tmp_path):
+    """★ 2026-09-23：下沉**与轮换开关解耦**（阈值 0 才是唯一的关闭开关）✓
+
+    之前把下沉绑在 `rotate_enabled` 上 ⇒ 关掉轮换就完全不下沉 ✗
+    而下沉的本意是"把常驻预算让给更重要的事实"，与轮换无关 ✓
+    （沉下的仍可被相关性召回 ⇒ 不会消失 ✓）
+    顺带钉住：本轮**命中**的事实按 +4 分算 ✓（相关优先，但不是豁免 ✓）
+    """
+    import json as _json
+    import time as _time
+
+    plugin = await _diet_plugin(tmp_path, rotate_enabled=False, top_k=30)
+    try:
+        now = _time.time()
+        event = make_text_event("萤火最近怎么样")
+        plugin.store.capture(event.sid, "t", [
+            {"role": "user", "content": "来源", "users": ["test:firefly"], "time": now},
+        ])
+        record = plugin.store.active(event.sid)[0]
+        plugin.store.observe_name("test:firefly", "萤火", source="admin")
+
+        def add(subject, content, importance, age_days=0):
+            fid = _add_fact(plugin, event.sid, subject, "preference", content,
+                            importance, record["id"])
+            if age_days:
+                with plugin.store.connect() as db:
+                    db.execute("UPDATE facts SET created=? WHERE id=?",
+                               (now - age_days * 86400, fid))
+            return fid
+
+        add("test:other", "陈年琐事一条", 2)                  # 低重要度 + 全新 ⇒ 让位
+        add("test:other", "很久前的旧偏好", 2, 50)            # 低重要度 + 老 ⇒ 让位
+        add("test:other", "默认档的新偏好", 5)                # 默认档 + 新 ⇒ 留住
+        add("test:firefly", "萤火立下的重要约定", 8, 300)      # ≥8 + 很老 ⇒ 永不沉
+        add("test:firefly", "萤火刚说的小偏好", 2)            # 低 + 命中 ⇒ 靠 +4 留住
+
+        block = _json.dumps(await _injected_block(plugin, event), ensure_ascii=False)
+        assert "默认档的新偏好" in block
+        assert "萤火立下的重要约定" in block, "重要度 ≥8 永不沉 ✓"
+        assert "萤火刚说的小偏好" in block, "命中的低重要度事实靠 +4 分留住 ✓"
+        assert "陈年琐事一条" not in block, "轮换关着也照样下沉（解耦 ✓）"
+        assert "很久前的旧偏好" not in block
+    finally:
+        await plugin.terminate()
+
 
 def recall_view(raw):
     """召回返回现在可能是**紧凑文本**（2026-09-18 用户要求 ✓ 与被动侧同形态 ✓）

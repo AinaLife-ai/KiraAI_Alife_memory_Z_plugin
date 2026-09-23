@@ -1086,52 +1086,80 @@ def bot_facts_grouped(facts, current_sid="", codes=None, self_id="", links=None)
 #  · 「上浮」= 在轮换里被**「用上」**（`rotate_used` ↑）⇒ 分数回升 ⇒ 回常驻 ✓
 #  分数只用于**排序 / 过滤**，**不落库** ⇒ 随时可逆、可调 ✓
 NEVER_SINK_IMPORTANCE = 8          # 硬规则：重要度 ≥ 8 **永不沉** ✓（用户拍板 ✓）
+# ★ 2026-09-23（用户拍板重新标定）：
+#   · 新鲜度改为**按天线性归零** ✗ 原 30/90 档位会让整批事实卡在同一分数、
+#     到期又**成批**沉下去（线上实测：迁移批次全卡在 12 分 ⇒ 体检页"0 条会下沉"）
+#   · 被用次数加**时效半衰期** ✗ 原实现只增不减 ⇒ "用够几次"变成**永久免沉**（没有出口）
+#   · 本轮被命中（实体/关键词/内容匹配）的事实给固定加分 —— 相关性优先 ✓
+#     但**命中不等于豁免** ✗：仍需过"重要度 + 时效"这一关 ✓
+FRESH_FADE_DAYS = 60               # 新鲜度 10 分 → 0 分所需天数（线性）
+RELEVANCE_BONUS = 4                # 本轮被命中：+4 分（≈ 24 天新鲜度的等价量）
+USED_HALF_LIFE_DAYS = 60           # 被用次数的时效半衰期（天）
+USED_CAP = 5                       # 单条事实被用次数参与计分的上限（防"刷分"）
 
 
-def fact_sink_score(fact, now=None):
-    """常驻分数 ✓ = 重要度×2 + min(用上次数,5)×3 + 新鲜度加分
+def _effective_used(fact, now):
+    """「被用上」的有效次数 ✓ 带时效半衰期
+
+    · 没有 `rotate_used_at`（存量数据 / 手工造的行）⇒ **不衰减** ✓
+      —— 不改变历史数据的命运 ✓（升级不惊扰存量 ✓）
+    """
+    used = min(int(fact.get("rotate_used") or 0), USED_CAP)
+    if used <= 0:
+        return 0.0
+    last = float(fact.get("rotate_used_at") or 0)
+    if last <= 0:
+        return float(used)
+    days = max(0.0, (now - last) / 86400.0)
+    return used * (0.5 ** (days / USED_HALF_LIFE_DAYS))
+
+
+def fact_sink_score(fact, now=None, bonus=0):
+    """常驻分数 ✓ = 重要度×2 + 有效被用次数×3 + 新鲜度（+ bonus）
 
     与既有机制对齐 ✓：`rotate_used` 就是轮换槽记的"被用过"次数 ✓
     （`mark_rotation(kind="fact")` 已在批次 1 修好 ✓ 所以这个数是真实的 ✓）
-    新鲜度按事实的 `created` 算 ✓：30 天内 +5 / 90 天内 +2 / 更早 0 ✓
+    新鲜度按事实的 `created` 算 ✓：10 分线性衰减，`FRESH_FADE_DAYS` 天后归零 ✓
+    `bonus` 给"本轮被命中"的那批 ✓（相关性优先 ✓ 低重要度仍会随时间让位 ✓）
     """
     now = now or time.time()
     importance = int(fact.get("importance") or 5)
-    used = min(int(fact.get("rotate_used") or 0), 5)
+    used = _effective_used(fact, now)
     created = float(fact.get("created") or 0)
     age_days = max(0.0, (now - created) / 86400.0) if created else 9999.0
-    # ⚠️ 标定（2026-09-18 第二次修正 ✗）：一开始 +5/+2 会让**新鲜的低重要度**事实
-    #   立刻被沉掉 ⇒ 与既有行为冲突（"低重要度也照常注入、只是排后面" ✓
-    #   集成测试 `test_injection_hides_pending_and_prefers_important_subjects` 当场抓到 ✓）
-    #   ⇒ 新鲜就该留住 ✓ 下沉只针对"**又旧又没被用过**"的 ✓ 这也才叫"慢慢沉" ✓
-    fresh = 10 if age_days <= 30 else (4 if age_days <= 90 else 0)
-    return importance * 2 + used * 3 + fresh
+    fresh = max(0.0, 10.0 * (1.0 - age_days / FRESH_FADE_DAYS))
+    return int(round(importance * 2 + used * 3 + fresh + bonus))
 
 
-def should_sink(fact, threshold, now=None):
+def should_sink(fact, threshold, now=None, bonus=0):
     """这条事实这次要不要**让位** ✓（移出常驻 ✓ 不是删除 ✓）
 
-    ⚠️ 两条保守规则（2026-09-18 实测教训 ✗：默认阈值一开始给 20，
-    把"重要度 5（默认分）+ 新鲜"的事实也沉了 ⇒ 注入里少了事实 ✓ 集成测试抓到 ✓）：
+    ⚠️ 两条保守规则：
+    · 重要度 ≥ `NEVER_SINK_IMPORTANCE` ⇒ **永不沉** ✓
     · 判不出年龄（没有 `created`）⇒ **不沉** ✓（不知道就别动 ✓）
     """
     if int(fact.get("importance") or 5) >= NEVER_SINK_IMPORTANCE:
         return False                      # ★ 硬规则：≥8 永不沉 ✓
     if not fact.get("created"):
         return False                      # ★ 没有时间戳 ⇒ 保守不沉 ✓
-    return fact_sink_score(fact, now=now) < int(threshold)
+    return fact_sink_score(fact, now=now, bonus=bonus) < int(threshold)
 
 
-def sink_filter(facts, threshold, now=None):
+def sink_filter(facts, threshold, now=None, bonus=0):
     """把该下沉的从**常驻**列表里摘掉 ✓ 其余保持原顺序 ✓
 
     · `threshold <= 0` ⇒ **关闭下沉** ✓（原样返回 ✓ 便于随时回退 ✓）
+    · `bonus`：本轮被命中的那批传 `RELEVANCE_BONUS` ✓（相对更不容易被沉 ✓）
     · **不删数据** ✓ 被摘掉的仍在轮换候选池里（调用方保证 ✓）⇒ 被「用上」就能浮回来 ✓
     """
     if not threshold or int(threshold) <= 0:
         return list(facts or [])
     now = now or time.time()
-    return [f for f in (facts or []) if not should_sink(f, threshold, now=now)]
+    return [
+        f
+        for f in (facts or [])
+        if not should_sink(f, threshold, now=now, bonus=bonus)
+    ]
 
 
 def self_only_last(facts, self_id=""):

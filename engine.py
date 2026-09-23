@@ -57,11 +57,11 @@ COMMON_INSTRUCTION = (
 
 AUDIT_INSTRUCTION = (
     "审计输出只含actions，禁 summary/facts；target_id/source_ids 取自 facts[].id，"
-    "不是evidence[].id。keep/correct/retract的source_ids只能是[target_id]；"
-    "merge至少两个同会话、同主体、同分类事实ID，每条事实只参与一次操作。"
+    "不是evidence[].id。这三者的 source_ids 只能是[target_id]；"
+    "merge 至少两条同会话同主体同分类事实，每条只参与一次操作。"
     "证据里**没提到** != 事实错误 ✗：只有证据与事实**矛盾**才 correct；看不到就当 keep，别删别改。"
-    "无操作时 actions=[]；保留否定/时间/不确定性；不同事件不因相似而合并。"
-    "correct 给 relations（无=[]，不改=null）；importance 1-10 按证据给。"
+    "无操作时 actions=[]；保留否定/时间/不确定；不同事件不因相似合并。"
+    "correct 给 relations（无=[]，不改=null）；importance 1-10 按证据给，分档同压缩指令（1-2 当时 / 9-10 不应遗忘）。"
     "subject 记错（A 的话记到 B 名下）用 correct：evidence[].sp 是原文**说话人显示名**，不符就把 subject 填成正确的**实体 id**（照 facts[].subject）；没有 sp 或看不出是谁说的就别改主体。"
     "retract 清理被推翻或冗余的事实：软删后可恢复；reason 写清原因。"
     # v2.18.9 回声防线：**以用户为准** ✓
@@ -134,7 +134,7 @@ COMPACT_SCHEMAS = {
         '            "source_ids": [str], "importance": 1-10}]}\n'
         '**只有这两个顶层键**（summary、facts）—— 不要回写输入里的 range/records/names 等字段 ✗\n'
         '必填：summary；facts 里 category/subject/content/reason/scenario/tags/relations/source_ids/importance。\n'
-        '上限：facts ≤12、content ≤60 字、reason ≤40 字、scenario ≤20 字、summary ≤300 字。\n'
+        '上限：facts ≤{facts_cap}、content ≤60 字、reason ≤40 字、scenario ≤20 字、summary ≤300 字。\n'
         '字段白名单：只允许上面出现过的键，多任何一个都会被拒。\n'
         '常见错误（会被拒）：把 predicate/object 平铺进事实（必须放 relations）；\n'
         'source_ids 编造或漏抄；content 为空；多写 range/records 等输入字段。'
@@ -222,13 +222,28 @@ _TIDY_ACTIONS_FORCED = (
 )
 
 
-def build_instruction(purpose, cfg, forced=False):
+def build_instruction(purpose, cfg, forced=False, facts_cap=None):
     if purpose == "compress":
+        # ★ 2026-09-23（用户拍板）：条数上限**按本批规模动态** ✓
+        #   没有上下文时（单测 / 单条归类批）退回上限 12 ✓ 与旧口径一致 ✓
+        _cap = int(facts_cap or FACTS_CAP_MAX)
         return (
-            "压缩输出只含summary和facts；至多12条事实。"
-            "source_ids 逐字复制 records[].id，至少一条：records 只有一条记录时，"
+            "压缩输出只含summary和facts；至多{}条事实。".format(_cap)
+            + "source_ids 逐字复制 records[].id，至少一条：records 只有一条记录时，"
             "每条事实的 source_ids 就是那一条记录的 id。"
-            "importance 用 1-10 表示这条事实的长期价值。"
+            # ★ 2026-09-23（用户拍板）：importance 给**标尺**而非倾向 ✓
+            #   原来只有一句"表示长期价值" ⇒ 模型一律给 5-7 ⇒ 排序与下沉双双失真 ✗
+            "importance 用 1-10 表示这条事实的长期价值："
+            "1-2=只对当时情境有效；3-4=短期内可能还用得上；5-6=一段时间内仍有参考价值；"
+            "7-8=与身份、关系、约定或长期偏好有关；9-10=不应遗忘。按事实本身判断。"
+            # ★ 2026-09-23（用户拍板）：summary 与 facts 的**分工** ✓
+            #   原设计里 facts 也承担"不丢线索"⇒ 寒暄与一次性情绪全变成事实 ✗
+            #   ⇒ 线索归 summary（那本来就是它的职责）✓ facts 只收长期结论 ✓
+            #   成对写出（要写什么 + 什么留在 summary）⇒ 不诱导过度过滤 ✓
+            "summary 用完整叙述保留线索（含时间、否定、条件与不确定）；"
+            "facts 只写脱离这段对话仍然成立、之后还会用到的结论。"
+            "对话中提到的人物、约定、偏好、时间与否定，凡属长期可用的都要写成事实；"
+            "只对当时情境有效的情绪与寒暄留在 summary 里，不单独成条。"
             "reason 不超过 40 字，写清依据来源（用户原话/上下文推断）。"
             "summary 不超过 300 字。scenario 不超过 20 字（写清场景即可，不要展开）。"
             "每条事实的 content 不超过 60 字，把话说完、别写段落。"
@@ -748,6 +763,47 @@ def compression_plan(rows, cfg, now=None, boost_allowed=False):
     return None
 
 
+# ★ 2026-09-23（用户拍板）：一次压缩**能提炼几条事实**，按本批的消息密度推 ✗
+#   原来写死"至多 12 条" ⇒ 默认的 12 轮批次**恒等于 12** ⇒ 等于没有约束 ✗
+#   现在：min(完整轮数, ceil(消息数 / FACTS_PER_MESSAGES))，夹在 [1, 12] ✓
+#   依据：一次值得沉淀的信息交换约 3 个来回（6 条消息）⇒ 产出 1 条长期结论 ✓
+#   · 摘要层（level > 0）没有"轮"的概念 ⇒ 按本批条数（3 条摘要 ⇒ 至多 3 条事实）✓
+#   · 默认配置（12 轮一批、每轮 3 条上下 ≈ 36 条）⇒ 约 6 条 ✓ 不再硬凑到 12 ✓
+FACTS_PER_MESSAGES = 6
+FACTS_CAP_MAX = 12
+
+
+def count_rounds(rows):
+    """数**完整轮**的个数 ✓（与 compression_plan 同一口径：用户发言 → 助手回复）"""
+    rows = list(rows or [])
+    if not rows or not any(r.get("role") == "assistant" for r in rows):
+        return 0
+    rounds, pos = 0, 0
+    cap = len(rows) + 1
+    while pos < len(rows):
+        end, closed = _round_end(rows, pos, cap)
+        if end <= pos:
+            break
+        if closed:
+            rounds += 1
+        pos = end
+    return rounds
+
+
+def facts_cap_for(candidates, level=0):
+    """本批允许提炼的事实条数上限 ✓（口径见上方注释）"""
+    n = len(candidates or ())
+    if n <= 0:
+        return 1
+    if level > 0:
+        cap = n                                    # 摘要层：按条数
+    else:
+        turns = count_rounds(candidates)
+        by_messages = -(-n // FACTS_PER_MESSAGES)   # ceil 除法（不引 math）
+        cap = min(turns, by_messages) if turns else by_messages
+    return max(1, min(FACTS_CAP_MAX, cap))
+
+
 def failure_detail(exc):
     """Readable, content-free job failure reason for the task list."""
     if isinstance(exc, TimeoutError):
@@ -910,17 +966,26 @@ class Engine:
                 return entity_id
         return value
 
-    async def structured(self, contract, purpose, payload, cfg, retry_timeout=True, forced=False):
+    async def structured(
+        self, contract, purpose, payload, cfg, retry_timeout=True, forced=False,
+        facts_cap=None,
+    ):
         model = (
             cfg.compress_model
             if purpose in ("compress", "fact_merge")
             else cfg.audit_model
         )
-        instruction = COMMON_INSTRUCTION + build_instruction(purpose, cfg, forced=forced)
+        instruction = COMMON_INSTRUCTION + build_instruction(
+            purpose, cfg, forced=forced, facts_cap=facts_cap
+        )
         # 先用手写紧凑声明（省 1000+ 字）；没有对应条目才退回自动 schema
         schema = COMPACT_SCHEMAS.get(purpose) or strip_schema_titles(
             contract.model_json_schema()
         )
+        if isinstance(schema, str) and "{facts_cap}" in schema:
+            # ★ 2026-09-23：条数上限是**动态**的 ⇒ 模板留占位符，这里渲染 ✓
+            #   （没有 cap 的调用方退回上限 12 ✓ 与旧口径一致 ✓）
+            schema = schema.replace("{facts_cap}", str(int(facts_cap or FACTS_CAP_MAX)))
         retries = cfg.model_retries if retry_timeout else 0
         for attempt in range(retries + 1):
             if attempt >= 2 and isinstance(schema, str):
@@ -1095,9 +1160,13 @@ class Engine:
                     "start": full_time(min(r["start"] for r in candidates)),
                     "end": full_time(max(r["end"] for r in candidates)),
                 }
+                # ★ 2026-09-23：条数上限跟着**这一批**走 ✓
+                #   （重试会收缩批次 ⇒ 每轮重算，上限随批变小 ✓）
+                _facts_cap = facts_cap_for(candidates, level)
                 try:
                     output = await self.structured(
-                        Compression, "compress", payload, cfg, retry_timeout=False
+                        Compression, "compress", payload, cfg,
+                        retry_timeout=False, facts_cap=_facts_cap,
                     )
                     output = restore_compress_ids(output, aliases)
                     for fact in output.get("facts", []):
