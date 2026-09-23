@@ -293,6 +293,7 @@ function renderMigration(m) {
                 esc(e.file) +
                 " · " +
                 esc(e.reason) +
+                (e.detail ? " · " + esc(e.detail) : "") +
                 "</p>",
             )
             .join(""),

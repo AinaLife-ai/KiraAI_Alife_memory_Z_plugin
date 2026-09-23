@@ -520,6 +520,8 @@ class AlifeMemoryPlugin(BasePlugin):
             self.migration_note = "正在安全迁移；原文件只读保留。"
             started_at = time.time()
             disabled = []
+            # 首扫里出现的读取错误（(来源, 文件, 原因)）——见下方"退出窗口"判据。
+            seen_errors = set()
             try:
                 adapters = self.adapter_names()
                 # Import and verify first. Stop legacy writers only after a committed copy.
@@ -532,8 +534,20 @@ class AlifeMemoryPlugin(BasePlugin):
                         adapters,
                         self.settings.migration_decay_half_life_days,
                     )
-                    await self.store.call("import_legacy", snap)
-                    if snap["errors"]:
+                    report = await self.store.call("import_legacy", snap)
+                    seen_errors.update(
+                        (pid, item.get("file"), item.get("reason"))
+                        for item in snap["errors"]
+                    )
+                    # ★ 2026-09-23：**个别**文件读不了 ⇒ 跳过它继续迁移。
+                    #   旧插件（KiraOS）自己对坏文件就是跳过不阻塞的，我们不该
+                    #   比它更脆弱；源文件只读保留 + 导入幂等 ⇒ 以后修好仍会被
+                    #   补扫回来。整源一条都没接上却又有读取错误，才说明结构
+                    #   对不上（不是个别坏文件）⇒ 仍按失败处理，暂停等待排查。
+                    got = int(report.get("imported") or 0) + int(
+                        report.get("duplicate") or 0
+                    )
+                    if snap["errors"] and got <= 0:
                         raise ValueError("source_read_failed")
                 await self.store.call("canonicalize_identity", adapters)
                 if self.settings.mutual_exclusion:
@@ -544,6 +558,9 @@ class AlifeMemoryPlugin(BasePlugin):
                         if pm.is_plugin_enabled(pid):
                             raise ValueError("disable_failed")
                     # Catch writes made between the first snapshot and writer shutdown.
+                    # ★ 2026-09-23：只对**新增**的读取错误回滚 —— 首扫就存在的
+                    #   老伤痕不该在退出窗口再判一次死刑（否则个别坏文件永远
+                    #   无法完成迁移）；这里真正要防的是"停写那一刻又写坏的"。
                     for pid in SOURCES:
                         snap = await self.store.call(
                             "scan_legacy",
@@ -554,11 +571,22 @@ class AlifeMemoryPlugin(BasePlugin):
                             self.settings.migration_decay_half_life_days,
                         )
                         await self.store.call("import_legacy", snap)
-                        if snap["errors"]:
+                        fresh = [
+                            item
+                            for item in snap["errors"]
+                            if (pid, item.get("file"), item.get("reason"))
+                            not in seen_errors
+                        ]
+                        if fresh:
                             raise ValueError("final_source_read_failed")
+                        seen_errors.update(
+                            (pid, item.get("file"), item.get("reason"))
+                            for item in snap["errors"]
+                        )
                     await self.store.call("canonicalize_identity", adapters)
                 await self.store.call("set_legacy_migrated_at", time.time())
                 self.migration_blocked = False
+                skipped = len(seen_errors)
                 if self.engine:
                     # Imported facts never pass through compression, so scan them
                     # once for duplicates now.
@@ -568,9 +596,18 @@ class AlifeMemoryPlugin(BasePlugin):
                     # ⇒ 自动压缩（只在对话轮里触发 ✓）永远轮不到它们 ✓
                     # ⇒ 迁移一完成就补扫一遍 ✓（2026-09-17 用户实测 ✓）
                     await self.queue_compress_all()
-                self.migration_note = (
-                    "迁移完成，原文件完整保留。切换回旧插件前请先停用长期记忆·Z。"
-                )
+                if skipped:
+                    # ★ 2026-09-23：跳过坏文件也要让用户知道（否则他会以为
+                    #   那些记忆"没接上"是自己的错觉）。仍以"迁移完成"开头
+                    #   （测试与前端都按这个前缀判断成功）。
+                    self.migration_note = (
+                        f"迁移完成（{skipped} 个文件无法读取，已跳过并保留原文件；"
+                        "详见下表）。切换回旧插件前请先停用长期记忆·Z。"
+                    )
+                else:
+                    self.migration_note = (
+                        "迁移完成，原文件完整保留。切换回旧插件前请先停用长期记忆·Z。"
+                    )
             except Exception:
                 for pid in disabled:
                     try:

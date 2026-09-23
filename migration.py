@@ -7,6 +7,7 @@ calls, source rewrites, inferred compression depth, or invented entity IDs.
 from __future__ import annotations
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -22,6 +23,8 @@ except ImportError:
 from .contracts import Fact, dump
 from . import identity
 from .storage import search_body_of
+
+logger = logging.getLogger(__name__)
 
 SIMPLE = "kira_plugin_simple_memory"
 KIRAOS = "kira_plugin_kiraos"
@@ -195,7 +198,11 @@ def profile_entries(data):
     ):
         values = data.get(key, [])
         if not isinstance(values, list):
-            raise Rejected("invalid_profile")
+            # ★ 2026-09-23：字段类型不符时**跳过这个字段**即可，不该判死整份
+            #   画像（KiraOS 的 from_dict 连类型都不校验）。宁可少一条，
+            #   也别把用户的名字/描述/其余事实一起丢掉。
+            logger.warning("[记忆·Z] 画像字段 %s 类型不符，已跳过该字段", key)
+            continue
         for index, value in enumerate(values):
             yield f"{key}/{index}", value, category, []
     for key, category in (
@@ -204,7 +211,8 @@ def profile_entries(data):
     ):
         values = data.get(key, {})
         if not isinstance(values, dict):
-            raise Rejected("invalid_profile")
+            logger.warning("[记忆·Z] 画像字段 %s 类型不符，已跳过该字段", key)
+            continue
         for name, value in values.items():
             if not isinstance(value, str):
                 yield f"{key}/{name}", value, category, []
@@ -306,30 +314,47 @@ def snapshot(root: Path, plugin_id: str, limit: int, resolver=None, *, decay_day
                     raise ValueError("invalid_source_document")
                 source = data.get("source", {})
                 if not isinstance(source, dict):
-                    raise ValueError("invalid_source_metadata")
+                    # ★ 2026-09-23：与 KiraOS 自己的读取回退保持一致（它也是
+                    #   非 dict ⇒ {}），不必因此判死整个文件。
+                    source = {}
                 raw_sid, raw_visibility, raw_subject, raw_users = raw_location(
                     relative, source
                 )
                 ts, time_basis = timestamp(
                     source.get("time", data.get("last_interaction")), mtime
                 )
-                tags = data.get("tags", [])
-                if not isinstance(tags, list) or any(
-                    not isinstance(t, str) for t in tags
-                ):
-                    raise ValueError("invalid_tags")
-                tags = list(dict.fromkeys(t.strip() for t in tags if t.strip()))[:11]
+                # ★ 2026-09-23：对齐 KiraOS 的 normalize_tags —— 非 list ⇒ 空；
+                #   混进 null/数字/空白 ⇒ 就地过滤，而不是判死整个文件。
+                raw_tags = data.get("tags", [])
+                if not isinstance(raw_tags, list):
+                    raw_tags = []
+                tags = list(
+                    dict.fromkeys(
+                        t.strip()
+                        for t in raw_tags
+                        if isinstance(t, str) and t.strip()
+                    )
+                )[:11]
                 metadata = {
                     "session": source.get("session", ""),
                     "importance": data.get("importance"),
                     "type": data.get("type"),
                 }
                 if path.name == "profile.json":
+                    # ★ 2026-09-23：目录名才是定位基准（raw_location 也按它推导），
+                    #   profile.json 里的 entity_id 只是随文件走的副本。旧版 KiraOS
+                    #   用纯数字 ID（目录如 `group_548464960`），新版带适配器前缀
+                    #   （`group_qq%3A548464960`）——升级后同一条数据的目录名与副本
+                    #   不一致是**历史常态**，不该因此丢掉整份画像 ⇒ 忽略副本，只留痕。
                     _, _, folder_id = relative.parts[1].partition("_")
-                    if data.get("entity_id") and data["entity_id"] != unquote(
-                        folder_id
-                    ):
-                        raise ValueError("profile_entity_mismatch")
+                    stated = data.get("entity_id")
+                    if stated and stated != unquote(folder_id):
+                        logger.warning(
+                            "[记忆·Z] 画像目录名与 entity_id 不一致，按目录名继续：%s（%r ≠ %r）",
+                            relative.as_posix(),
+                            stated,
+                            unquote(folder_id),
+                        )
                     entries = list(profile_entries(data))
                 else:
                     category = {
@@ -423,7 +448,15 @@ def snapshot(root: Path, plugin_id: str, limit: int, resolver=None, *, decay_day
                     )
                 items.append(item)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:
-            errors.append({"file": key, "reason": type(exc).__name__})
+            # ★ 2026-09-23：带上具体原因（原来只有异常类名，用户拿着
+            #   "ValueError" 无从下手）；detail 只截前 200 字，够定位即可。
+            errors.append(
+                {
+                    "file": key,
+                    "reason": type(exc).__name__,
+                    "detail": str(exc)[:200],
+                }
+            )
     return {"source": plugin_id, "items": items, "files": files, "errors": errors}
 
 
