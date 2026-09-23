@@ -56,6 +56,31 @@ def test_merge_prompt_upgrades_from_previous_default_only():
     assert out2["alife"]["fact_merge_prompt"] == mine
 
 
+def test_record_merge_prompt_upgrades_too():
+    """★ 记录合并也加密度句（与事实合并对齐）：上一版默认 ⇒ 升到新文案 ✓ 自定义不动 ✓"""
+    changed, out = mod.migrate(
+        {
+            "alife": {"record_merge_prompt": mod._V6_RECORD_MERGE_PROMPT},
+            "alife_meta": {"config_version": 6},
+        }
+    )
+    assert "record_merge_prompt" in changed
+    assert out["alife"]["record_merge_prompt"] == contracts.RECORD_MERGE_PROMPT
+    assert "合并结果不能比最长的一条明显更长，删掉重复表述。" in out["alife"]["record_merge_prompt"]
+
+    mine = "我自己的记录合并措辞"
+    changed2, out2 = mod.migrate(
+        {"alife": {"record_merge_prompt": mine}, "alife_meta": {"config_version": 6}}
+    )
+    assert changed2 == [] and out2["alife"]["record_merge_prompt"] == mine
+
+    import json
+    field = json.loads((ROOT / "schema.json").read_text("utf-8"))["alife"]["fields"][
+        "record_merge_prompt"
+    ]
+    assert field["default"] == contracts.RECORD_MERGE_PROMPT, "schema 默认值没同步 ✗"
+
+
 def test_v5_target_is_frozen_in_config_migrate():
     """★ 回归：v5 的目标值必须**固化成字面量** ✗
     否则以后改 contracts.FACT_MERGE_PROMPT 时，v5 会跟着一起变 ⇒
