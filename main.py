@@ -1585,6 +1585,65 @@ class AlifeMemoryPlugin(BasePlugin):
                     "，超时" if timed_out else "")
         return out
 
+    async def _profile_refine(self, event, profiles, cfg):
+        """GetProfile 的事实按**当前对话**排序（一次调用覆盖全部画像；只排不删）。
+
+        为什么值：`limit=20` 会截断 ⇒ 同一实体的几十条事实里，
+        **顺序决定哪 20 条被模型看到** ✓；而 subject 不能当排序信号（都是这个人的）✗
+        安全：提取不到文本 / 候选<4 / 未启用 / 超时失败 ⇒ 原样返回 ✓
+        """
+        if not profiles or cfg is None:
+            return profiles
+        if not bool(getattr(cfg, "jev_enabled", False)
+                    and getattr(cfg, "jev_recall", False)):
+            return profiles
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not decisions.ready:
+            return profiles
+        try:
+            query = " ".join(capture_text(text_of(m)) for m in event_messages(event)).strip()
+        except Exception:
+            query = ""
+        if not query:
+            return profiles
+        slots = []          # (画像序号, 类别, 事实序号, 文本)
+        for pi, prof in enumerate(profiles):
+            for cat, facts in (prof.get("categories") or {}).items():
+                for fi, fact in enumerate(facts or []):
+                    if not isinstance(fact, dict):
+                        continue
+                    txt = ""
+                    for key in ("content", "text", "c", "summary", "v"):
+                        v = fact.get(key)
+                        if isinstance(v, str) and v.strip():
+                            txt = v.strip()
+                            break
+                    if txt:
+                        slots.append((pi, cat, fi, txt[:300]))
+        if len(slots) < JEV_RECALL_MIN_CANDIDATES:
+            return profiles
+        items = [("s%d" % i, s[3]) for i, s in enumerate(slots)]
+        budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        try:
+            scored = await asyncio.wait_for(
+                decisions.recall_filter(query, items, timeout=budget), timeout=budget)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 画像排序失败（保持原顺序）", exc_info=True)
+            return profiles
+        if not scored:
+            return profiles
+        rank = {k: i for i, (k, _s) in enumerate(
+            sorted(scored, key=lambda kv: -(kv[1] or 0)))}
+        grouped: dict = {}
+        for i, s in enumerate(slots):
+            grouped.setdefault((s[0], s[1]), []).append((rank.get("s%d" % i, 10 ** 6), s[2]))
+        for prof_i, cat in grouped:
+            order = [fi for _r, fi in sorted(grouped[(prof_i, cat)])]
+            facts = profiles[prof_i]["categories"][cat]
+            profiles[prof_i]["categories"][cat] = [facts[i] for i in order if i < len(facts)]
+        logger.info("[记忆·Z] JEV·画像 %d 条事实 → 已按当前对话重排", len(slots))
+        return profiles
+
     async def _tool_refine(self, query, rows, cfg):
         """主动召回（查档案/看画像）的候选排序：**只排序、不删**。
 
@@ -1948,6 +2007,8 @@ class AlifeMemoryPlugin(BasePlugin):
                         for category, facts in profile.get("categories", {}).items()
                     }
                 profiles.append(profile)
+        # v2.18.74：主动召回（GetProfile）也吃 JEV —— 按当前对话重排事实（limit 会截断 ⇒ 顺序关键）
+        profiles = await self._profile_refine(event, profiles, self.settings)
         return self.recall_result(event, {"ok": True, "profiles": profiles})
 
     async def correct_name(self, event, entity_id, name, revision, reason):
