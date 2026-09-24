@@ -124,7 +124,8 @@
         "name": "可选向量模型（启用后可能计费）",
         "default": "",
         "description": "仅在向量检索开启时使用。保持关闭就没有额外向量调用。",
-        "model_type": "embedding"
+        "model_type": "embedding",
+        "hint": "留空 = 不启用向量检索。请选择在提供商里注册好的向量模型。"
       },
       "semantic_enabled": {
         "type": "switch",
@@ -274,7 +275,8 @@
         "name": "JEV 决策模型（在提供商里注册好的）",
         "default": "",
         "description": "【重要】请正确选择类 JEV 决策模型，误选其他将无法正常使用。留空则 JEV 不生效，其它功能照常。",
-        "model_type": "llm"
+        "model_type": "llm",
+        "hint": "留空 = 不启用 JEV（其它功能照常）。请选择在「设置 → 提供商」注册好的类 JEV 决策模型。"
       },
       "jev_base_url": {
         "type": "string",
@@ -339,7 +341,8 @@
         "name": "启用模型重排（可选，默认关闭）",
         "default": "",
         "description": "选择 reranker（如硅基流动 / 阿里百炼的 rerank 模型，或你自行部署的）。留空则不重排；超时或报错一律保持原顺序。",
-        "model_type": "rerank"
+        "model_type": "rerank",
+        "hint": "留空 = 不重排（使用内置排序）。请选择在提供商里注册好的 Rerank 模型。"
       },
       "rerank_enabled": {
         "type": "switch",

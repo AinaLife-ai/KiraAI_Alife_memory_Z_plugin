@@ -1023,7 +1023,12 @@ class Engine:
             if keep_ids:
                 logger.info("[记忆·Z] JEV 摘出 %d 条不具备合并必要的事实（保持原样）", len(keep_ids))
         if len(out) != len(verdicts):
-            logger.info("[记忆·Z] JEV 合并路由：%d 组 → %d 个动作", len(verdicts), len(out))
+            _merged = sum(len(v.get("source_ids") or []) - 1 for _g, v in out
+                          if v.get("action") != "drop")
+            _dropped = sum(len(v.get("source_ids") or []) for _g, v in out
+                           if v.get("action") == "drop")
+            logger.info("[记忆·Z] JEV·合并 %d 组 → 并入 %d 条、回收站 %d 条（%d tok）",
+                        len(verdicts), max(_merged, 0), _dropped, decisions.tokens)
         return out
 
     async def jev_apply_importance(self, facts, cfg):
@@ -1062,7 +1067,16 @@ class Engine:
             if mapped < current:        # ★ 只压不抬（绝不自增强）
                 item["importance"] = mapped
             out.append(item)
-        logger.info("[记忆·Z] JEV 定级：%d 条事实重要度已由决策模型设定", len(out))
+        _down = []
+        for _i in range(len(facts)):
+            _lv = levels.get(str(_i))
+            _mv = importance_of(_lv) if _lv else None
+            if _mv is not None:              # 核心/重要/一般 ⇒ None（不写回，不进日志）
+                _down.append((_lv, _mv))
+        logger.info("[记忆·Z] JEV·定级 下调 %d/%d 条（%s）（%d tok）",
+                    len(_down), len(facts),
+                    "、".join("%s→%d" % (_lv, _mv) for _lv, _mv in _down[:4]) or "无",
+                    decisions.tokens)
         return out
 
     async def jev_audit_prescreen(self, candidates, cfg):
@@ -1496,8 +1510,8 @@ class Engine:
             hot = set(suspicious)
             narrowed = [f for f in candidates if f.get("id") in hot]
             if narrowed and len(narrowed) < len(candidates):
-                logger.info("[记忆·Z] JEV 预筛：%d 条 → 只送 %d 条可疑事实给审计模型",
-                            len(candidates), len(narrowed))
+                logger.info("[记忆·Z] JEV·预筛 %d 条 → 只送 %d 条可疑事实给审计模型（%d tok）",
+                            len(candidates), len(narrowed), decisions.tokens)
                 candidates = narrowed
                 fact_aliases = {"f%d" % (i + 1): fact["id"]
                                 for i, fact in enumerate(candidates)}
