@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -261,6 +262,14 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
             base = base or _pick(cfg, _BASE_KEYS)
             key = key or _env(_pick(cfg, _KEY_KEYS))
             model = model or mid
+            # 与"加速器类插件"共存的保险：若端点被改写成本地代理/加速地址，
+            # 提示用户改用显式「JEV 接口地址」直填原始地址（显式值优先级最高 ✓）
+            if base and re.search(r"(127\.0\.0\.1|localhost|:\d{2,5}/|/accel|/proxy)", base, re.I):
+                logger.warning(
+                    "[记忆·Z] JEV 端点看起来是本地加速/代理地址（%s）——"
+                    "若连接失败，请在插件设置里用「JEV 接口地址」直接填 JEV 原始地址",
+                    base,
+                )
             if not base or not key:
                 # 诊断一行：让用户知道“选了模型但连不上”缺的是哪一样 ✓
                 logger.warning(
