@@ -514,7 +514,7 @@ class Decisions:
         # ★ 顺序调用（不并发）：实测并发请求会互相干扰/被上游限流，
         #   同一候选单独问 3 次结果稳定（.88/.98/.58），并发时会被判成 drop ✗
         out = {}
-        for k, s in cands[:8]:
+        for k, s in cands[:5]:    # 顺序调用：上限 5 条 ⇒ 最坏 ~15 秒（后台任务，用户无感知）
             key, route = await one(k, s)
             if route:
                 out[key] = route
