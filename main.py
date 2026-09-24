@@ -81,7 +81,8 @@ from .rerankx import Reranker
 # JEV 判定「这是回忆请求」的概率阈值（实测：回忆请求 0.89~0.94 / 非请求 0.02~0.03）
 RECALL_TRIGGER_MIN = 0.5
 # JEV 召回筛选：只保留分数达标的候选（实测 相关 0.72~0.81 / 无关 0.02~0.06 ⇒ 0.35 分得很开）
-RECALL_KEEP_MIN = 0.15            # 实测：无关簇 0.03~0.07 / 相关簇 0.29~0.95 ⇒ 0.15 留足余量
+RECALL_KEEP_MIN = 0.10            # 实测：无关簇 0.03~0.04 / 相关簇 0.15~0.83（有 ±0.06 抖动）
+                                  # ⇒ 0.10 既留两倍余量、又不会把抖动到 0.14 的相关项误杀
 JEV_RECALL_MIN_CANDIDATES = 4     # 候选少于 4 条不值得花钱
 RECALL_KEEP_MIN_COUNT = 2      # 至少留 2 条，避免极端情况一条都不注入
 JEV_BUDGET_CALLS = 3           # 每个会话 60 秒内最多 3 次 JEV 预取（群里 bot 大多不回复，不能每条都烧）
@@ -1644,7 +1645,7 @@ class AlifeMemoryPlugin(BasePlugin):
         logger.info("[记忆·Z] JEV·画像 %d 条事实 → 已按当前对话重排", len(slots))
         return profiles
 
-    async def _tool_refine(self, query, rows, cfg):
+    async def _tool_refine(self, query, rows, cfg, strict=False):
         """主动召回（查档案/看画像）的候选排序：**只排序、不删**。
 
         与被动召回同一套判据（整批语义 + 0.15 阈值），但工具路径是"模型在等结果"，
@@ -1685,13 +1686,25 @@ class AlifeMemoryPlugin(BasePlugin):
             return rows
         if not scored:
             return rows
-        rank = {k: i for i, (k, _s) in enumerate(
-            sorted(scored, key=lambda kv: -(kv[1] or 0)))}
+        ordered = sorted(scored, key=lambda kv: -(kv[1] or 0))
+        if strict:
+            keep = [k for k, s in ordered if (s or 0) >= RECALL_KEEP_MIN]
+            floor = min(len(ordered), int(getattr(cfg, "top_k", 5) or 5))
+            if len(keep) < floor:
+                keep = [k for k, _s in ordered[:floor]]
+            if keep:
+                keepset = set(keep)
+                rows = [r for r in rows
+                        if str(r.get("id") or r.get("rid") or r.get("short") or "") in keepset]
+                logged_strict = len(keep)
+        rank = {k: i for i, (k, _s) in enumerate(ordered)}
         out = sorted(rows, key=lambda r: rank.get(
             str(r.get("id") or r.get("rid") or r.get("short") or ""), len(rank) + 1)
             if isinstance(r, dict) else len(rank) + 1)
-        logger.info("[记忆·Z] JEV·档案 %d 条候选 → 已按相关度重排（%d ms）",
-                    len(items), int((time.time() - t0) * 1000))
+        logger.info("[记忆·Z] JEV·档案 %d 条候选 → %s（%d ms）",
+                    len(items),
+                    ("筛留 %d 条" % len(out)) if strict else "已按相关度重排",
+                    int((time.time() - t0) * 1000))
         return out
 
     async def prewarm(self, sid, users, scope, query="", cfg=None):
@@ -3439,6 +3452,10 @@ class AlifeMemoryPlugin(BasePlugin):
                 skip_media=self.settings.recall_skip_media,
             )
             raw_items = list(result["items"])  # 先留底：下面会换成紧凑形态
+            # v2.18.74：主动召回（查档案）也吃 JEV，并且**在打包前就筛选** ✓
+            #   ⇒ 后面的 seen 只标记"保留的那批" ⇒ 筛掉的没进已见，换个词还能搜到（不算丢）✓
+            raw_items = await self._tool_refine(
+                (prompt or keyword or "").strip(), raw_items, self.settings, strict=True)
             keep_names = await self.store.call("spaced_names")
             ids = sorted({u for r in raw_items for u in r["users"]})
             entities = await self.store.call("entities", ids=ids, limit=200) if ids else []
@@ -3488,9 +3505,6 @@ class AlifeMemoryPlugin(BasePlugin):
                 packed.append(item)
             # 群名/账号完整形式整批只给一次：bot 之后要用/要汇报时从这里取
             result["items"] = packed
-            # v2.18.74：主动召回（查档案）也吃 JEV —— 只排序、不删 ✓
-            result["items"] = await self._tool_refine(
-                (prompt or keyword or "").strip(), result["items"], self.settings)
             if who:
                 result["who"] = who
             self.seen_window.remember(key, prompt or keyword, [r["id"] for r in raw_items])
@@ -3649,7 +3663,7 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             _q = ""
         if _q:
-            rows = await self._tool_refine(_q, rows, self.settings)
+            rows = await self._tool_refine(_q, rows, self.settings, strict=True)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(
