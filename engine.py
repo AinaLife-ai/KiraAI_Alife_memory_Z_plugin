@@ -1093,11 +1093,17 @@ class Engine:
             return None
         if not getattr(cfg, "jev_audit", False) or not decisions.ready:
             return None
-        texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:12]
+        # v2.18.74：覆盖面放大到 14 条（B 项）——更多对子被真正筛过，
+        # 才敢在"无发现"时跳过审计；单次成本仍只 ~9k token ≈ $0.0004 ✓
+        texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:14]
         if len(texts) < 2:
             return None
+        all_pairs = len(texts) * (len(texts) - 1) // 2
         pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
-                 for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+                 for i in range(len(texts)) for j in range(i + 1, len(texts))][:91]
+        # 批次大时对子会被截断 ⇒ 「没发现可疑」不等于「整批干净」✗
+        # 截断时绝不跳过审计模型（会漏掉没筛到的那些对）
+        self._audit_prescreen_complete = len(pairs) >= all_pairs
         # ★ 确定性兜底：词面高度相似的对**直接算可疑**。
         #   实测 JEV 会漏掉"明显重复"（花生过敏 / 不能吃花生 ⇒ 返回空 ✗），
         #   而"无可疑 ⇒ 跳过审计"如果漏了，就会把该审的跳过去 ✗ ⇒ 先规则兜一层。
@@ -1493,7 +1499,8 @@ class Engine:
         fact_aliases = {"f%d" % (i + 1): fact["id"] for i, fact in enumerate(candidates)}
         keep = await self.store.call("spaced_names")
         suspicious = await self.jev_audit_prescreen(candidates, cfg)
-        if suspicious is not None and not suspicious:
+        complete = getattr(self, "_audit_prescreen_complete", False)
+        if suspicious is not None and not suspicious and complete:
             # 本批无可疑项 ⇒ 跳过审计模型（省一次调用），只把轮转推进（标记已审）
             keep_all = {"actions": [
                 {"action": "keep", "target_id": f.get("id"),
@@ -1511,12 +1518,17 @@ class Engine:
             narrowed = [f for f in candidates if f.get("id") in hot]
             if narrowed and len(narrowed) < len(candidates):
                 logger.info("[记忆·Z] JEV·预筛 %d 条 → 只送 %d 条可疑事实给审计模型（%d tok）",
-                            len(candidates), len(narrowed), decisions.tokens)
+                            len(candidates), len(narrowed),
+                            getattr(getattr(self, "decisions", None), "tokens", 0))
                 candidates = narrowed
                 fact_aliases = {"f%d" % (i + 1): fact["id"]
                                 for i, fact in enumerate(candidates)}
         elif suspicious is not None:
-            logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
+            if not complete:
+                logger.info("[记忆·Z] JEV 预筛：%d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
+                            len(candidates))
+            else:
+                logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
@@ -1620,10 +1632,15 @@ class Engine:
         return total
 
     @staticmethod
-    def _fact_clusters(rows, threshold, cross_threshold=0.0):
+    def _fact_clusters(rows, threshold, cross_threshold=0.0, jev_route=False):
         """Connected components of similar facts sharing the same subject.
 
         同类别用 threshold；跨类别用更保守的 cross_threshold（<=0 表示不跨）。
+
+        v2.18.74（C 项）：`jev_route=True` 时**只把"同类别"那条门槛**适度放宽
+        （词面不重合的同义重复原本进不了组 ⇒ JEV 没机会判 ✗）。
+        **跨类别门槛不动**、跨主体依旧绝不合并 ⇒ 现有不变式一条不破 ✓
+        关闭 JEV 时 jev_route=False ⇒ 与今天逐字节一致 ✓
         """
         from .retrieval import similarity
 
@@ -1644,11 +1661,10 @@ class Engine:
             for right in rows[index + 1 :]:
                 if left["subject"] != right["subject"]:
                     continue  # 跨主体不合并：合并后归谁是个新问题
-                limit = (
-                    threshold
-                    if left["category"] == right["category"]
-                    else cross_threshold
-                )
+                same_cat = left["category"] == right["category"]
+                limit = threshold if same_cat else cross_threshold
+                if jev_route and same_cat and limit > 0:
+                    limit = max(0.10, limit * 0.6)
                 if limit <= 0:
                     continue
                 if similarity(left["content"], right["content"], min_overlap=2) >= limit:
@@ -1687,7 +1703,12 @@ class Engine:
         pending_ids = {row["id"] for row in pending}
         clusters = [
             group
-            for group in self._fact_clusters(list(pool.values()), cfg.fact_merge_threshold)
+            for group in self._fact_clusters(
+                list(pool.values()), cfg.fact_merge_threshold,
+                # C 项：JEV 参与路由时放宽「同类别」的发现门槛（跨类别/跨主体不变）
+                jev_route=bool(getattr(cfg, "jev_enabled", False)
+                               and getattr(cfg, "jev_merge", False)),
+            )
             if pending_ids & {row["id"] for row in group}
         ]
         if not clusters:

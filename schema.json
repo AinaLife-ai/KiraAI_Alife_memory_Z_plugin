@@ -299,10 +299,10 @@
       "jev_timeout_ms": {
         "type": "integer",
         "name": "JEV 超时（毫秒）",
-        "default": 4000,
-        "description": "单次 JEV 调用最多等多久（毫秒），默认 4000。超时即当次弃权、走原有逻辑 —— 绝不阻塞回复。",
+        "default": 5000,
+        "description": "单次 JEV 调用最多等多久（毫秒），默认 5000。超时即当次弃权、走原有逻辑（按需自行调小/调大）。",
         "minimum": 300,
-        "maximum": 30000
+        "maximum": 60000
       },
       "jev_sample": {
         "type": "float",

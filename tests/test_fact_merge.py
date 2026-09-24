@@ -392,3 +392,137 @@ def test_merge_payload_evidence_switch(tmp_path):
             assert group["evidence"], "开启时证据不能为空"
         else:
             assert group["evidence"] == [], "关闭时不应附证据"
+
+
+
+class JevClusterInvariants(unittest.TestCase):
+    """C 项：JEV 路由放宽「同类别」发现门槛 —— 三条不变式 + 一条效果。"""
+
+    @staticmethod
+    def clusters(rows, threshold, cross_threshold=0.0, jev_route=False):
+        # @staticmethod ⇒ 不传 self
+        return e.Engine._fact_clusters(rows, threshold, cross_threshold,
+                                       jev_route=jev_route)
+
+    @staticmethod
+    def row(i, subject, category, content):
+        return {"id": i, "subject": subject, "category": category,
+                "content": content, "summary": content, "sid": "s1", "deleted": 0}
+
+    def test_relaxation_merges_same_category_pair(self):
+        """效果：同主体同类别、词面中等相似 ⇒ 默认不并，放宽后并成一组。"""
+        from alife_merge_test.retrieval import similarity as _sim
+
+        a, b = "工作日吃素，周末不忌口", "工作日吃素"
+        sim = _sim(a, b, min_overlap=2)
+        self.assertGreaterEqual(sim, 0.2, "用例需有中等相似度（否则放宽也够不着）")
+        rows = [self.row(1, "用户", "preference", a),
+                self.row(2, "用户", "preference", b)]
+        thr = sim + 0.02                     # 默认门槛略高于相似度 ⇒ 不并
+        self.assertEqual(len(self.clusters(rows, thr)), 0, "默认门槛 ⇒ 不并")
+        self.assertEqual(len(self.clusters(rows, thr, jev_route=True)), 1,
+                         "放宽同类别门槛（×0.6）⇒ 并成一组")
+
+    def test_never_cross_subject(self):
+        """★ 不变式：跨主体绝不合并（即便开启 JEV 放宽）。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素"),
+                self.row(2, "朋友", "preference", "工作日吃素")]
+        self.assertEqual(len(self.clusters(rows, 0.1, jev_route=True)), 0)
+
+    def test_cross_category_threshold_untouched(self):
+        """★ 不变式：跨类别门槛不受放宽影响（cross_threshold=0 ⇒ 不跨）。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素"),
+                self.row(2, "用户", "plan", "工作日吃素")]
+        self.assertEqual(len(self.clusters(rows, 0.1, 0.0, jev_route=True)), 0)
+
+    def test_off_by_default_unchanged(self):
+        """★ 关闭 JEV（默认）⇒ 行为与放宽前完全一致。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素，周末不忌口"),
+                self.row(2, "用户", "preference", "工作日吃素")]
+        self.assertEqual(self.clusters(rows, 0.9), self.clusters(rows, 0.9, jev_route=False))
+
+
+class JevEngineIntegration(unittest.TestCase):
+    """引擎侧 JEV 集成（预筛 / 合并路由）。
+
+    这两个入口以前**没有任何测试覆盖** ⇒ 埋着一个 NameError（在"只送可疑子集"那条分支上）
+    直到全量静态检查才被发现。这里补上，确保两条分支都被真正执行过。
+    """
+
+    class _Log:
+        """决策留痕桩：产品里 Decisions.log 一定存在且永不抛，这里同样不抛。"""
+
+        def write(self, *a, **k):
+            return None
+
+    class _Decisions:
+        ready = True
+        tokens = 123
+
+        def __init__(self, suspicious=None):
+            self._suspicious = suspicious or []
+            self.log = JevEngineIntegration._Log()   # 运行时解析 ⇒ 不能写在类体里
+
+        async def audit_prescreen(self, pairs):
+            return list(self._suspicious)
+
+        async def merge_route(self, primary, cands):
+            # 引擎按**候选自身 id** 查表 ⇒ 桩必须用真实 key（否则全落进"keep"✗）
+            keys = [k for k, _t in cands]
+            return {keys[0]: "drop", keys[1]: "merge"} if len(keys) >= 2 else {}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_audit = True
+        jev_merge = True
+        top_k = 5
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    def test_audit_prescreen_narrows_branch(self):
+        """非空可疑集 ⇒ 走"只送可疑"分支（旧代码在此处 NameError 崩溃 ✗）。"""
+        eng = self._engine(self._Decisions(["p0_1"]))
+        cands = [{"id": 10, "content": "a"}, {"id": 11, "content": "b"}]
+        out = run(eng.jev_audit_prescreen(cands, self._Cfg()))
+        self.assertEqual(sorted(out or []), [10, 11], "应把可疑对涉及的 id 挑出来")
+
+    def test_audit_prescreen_empty_branch(self):
+        """无可疑对 ⇒ 返回空列表（调用方据此决定跳过审计）。"""
+        eng = self._engine(self._Decisions([]))
+        cands = [{"id": 10, "content": "a"}, {"id": 11, "content": "b"}]
+        out = run(eng.jev_audit_prescreen(cands, self._Cfg()))
+        self.assertEqual(out, [], "无可疑 ⇒ 空列表（且 complete 标记决定能否跳过）")
+
+    def test_merge_route_splits_drop_and_merge(self):
+        """合并路由生效：该丢的丢、该合的合（且不抛异常）。"""
+        eng = self._engine(self._Decisions())
+        group = [{"id": 1, "content": "base"}, {"id": 2, "content": "dup"},
+                 {"id": 3, "content": "extra"}]
+        verdicts = [(group, {"target_id": 1, "source_ids": [1, 2, 3],
+                             "action": "merge", "content": "x", "reason": "t"})]
+        out = run(eng.jev_apply_merge_route(verdicts, self._Cfg()))
+        actions = sorted(v.get("action") for _g, v in out)
+        self.assertIn("drop", actions, "c1 应进回收站")
+        self.assertIn("merge", actions, "c2 应保留合并")
+
+    def test_merge_route_off_returns_unchanged(self):
+        """★ 关闭 JEV ⇒ 原样返回（逐字节一致）。"""
+        eng = self._engine(None)
+        group = [{"id": 1, "content": "base"}]
+        verdicts = [(group, {"target_id": 1, "source_ids": [1], "action": "merge",
+                             "content": "x", "reason": "t"})]
+
+        class Off(self._Cfg):
+            jev_enabled = False
+
+        out = run(eng.jev_apply_merge_route(verdicts, Off()))
+        self.assertEqual(out, verdicts, "关闭 JEV 时不得做任何改动")
