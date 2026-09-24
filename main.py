@@ -81,7 +81,8 @@ from .rerankx import Reranker
 # JEV 判定「这是回忆请求」的概率阈值（实测：回忆请求 0.89~0.94 / 非请求 0.02~0.03）
 RECALL_TRIGGER_MIN = 0.5
 # JEV 召回筛选：只保留分数达标的候选（实测 相关 0.72~0.81 / 无关 0.02~0.06 ⇒ 0.35 分得很开）
-RECALL_KEEP_MIN = 0.35
+RECALL_KEEP_MIN = 0.15            # 实测：无关簇 0.03~0.07 / 相关簇 0.29~0.95 ⇒ 0.15 留足余量
+JEV_RECALL_MIN_CANDIDATES = 4     # 候选少于 4 条不值得花钱
 RECALL_KEEP_MIN_COUNT = 2      # 至少留 2 条，避免极端情况一条都不注入
 JEV_BUDGET_CALLS = 3           # 每个会话 60 秒内最多 3 次 JEV 预取（群里 bot 大多不回复，不能每条都烧）
 JEV_BUDGET_WINDOW = 60.0
@@ -494,8 +495,6 @@ class AlifeMemoryPlugin(BasePlugin):
         self.bootstrap_review = {}
         # v2.18.74：JEV 决策层 + 模型重排（**可选增强**；全关时零行为变化）
         #   顺序缓存：prewarm 期间算好 ⇒ 注入时只查一次字典（零成本）
-        self._order_cache = {}
-        self._jev_calls = {}          # v2.18.74：每会话 JEV 预取预算（滑动窗口）
         self.decisions = None
         self.reranker = None
         self._build_aux()
@@ -1517,118 +1516,70 @@ class AlifeMemoryPlugin(BasePlugin):
         )
 
     # ── v2.18.74：JEV / 模型重排的顺序预取（**可选**；全关时零开销）────────────
-    async def _prefetch_order(self, sid, users, scope, query, cfg):
-        """在预热阶段算好候选顺序；注入路径只读缓存 ⇒ 零成本、绝不阻塞。
+    async def _recall_refine(self, sid, query, rows, cfg):
+        """注入点上的"重排 + 清明显无关"（可选；带**硬预算**，超时/失败一律原样返回）。
 
-        三条安全线（逐条可测）：
-        1. 全关 ⇒ 立即返回（一次属性判断，无 IO）
-        3. 任何失败/超时 ⇒ 不写缓存 ⇒ 注入保持原有顺序
+        为什么放这里（而不是预热）：
+          · 注入点只在"确实要回复"时触发 ⇒ 零浪费 ✓
+          · 用的就是**真实的批次 query** ⇒ 不会像预热那样"键不匹配"白花 ✓
+          · 判据是**整批语义**（对这批消息中任意一条有帮助吗），与现状逻辑一致 ✓
+        安全：超时/失败/未启用 ⇒ 返回原 rows，行为与不开 JEV 逐字节一致 ✓
         """
-        if cfg is None or not query.strip() or scope == "session":
-            return
-        jev_on = bool(getattr(cfg, "jev_enabled", False) and getattr(cfg, "jev_recall", False))
-        rr_on = bool(getattr(cfg, "rerank_enabled", False))
-        if not jev_on and not rr_on:
-            return
-        prefer = ({"prefer_sid": sid, "prefer_users": tuple(users or ())}
-                  if cfg.session_affinity else {})
-        hit = any(w in query for w in cfg.recall_keywords)
-        mkey = self._search_memo_key(sid, query, users, cfg, hit, prefer)
-        try:
-            matches = await self.memo(mkey, lambda: self.store.call(
-                "search", sid, lexical=query, scope=cfg.recall_scope, users=users,
-                limit=cfg.top_k * (2 if hit else 1) * 2, exclude_sid=sid,
-                active=cfg.search_active_only, cold_after_days=cfg.cold_after_days,
-                skip_media=cfg.recall_skip_media, **prefer))
-        except Exception:
-            logger.debug("[记忆·Z] 顺序预取：检索失败（保持原顺序）", exc_info=True)
-            return
-        # v2.18.74：JEV 补召回触发（关键词没命中但确实是回忆请求时也能触发）
-        trigger = None
-        if jev_on and not hit:
-            decisions0 = getattr(self, "decisions", None)
-            if decisions0 is not None and decisions0.ready:
-                score = await decisions0.recall_trigger(query)
-                if score is not None and score >= RECALL_TRIGGER_MIN:
-                    trigger = True
-                    logger.info("[记忆·Z] JEV 判定这是回忆请求（关键词未命中），已放宽召回")
+        if not rows or cfg is None:
+            return rows
+        use_rerank = bool(getattr(cfg, "rerank_enabled", False)) and \
+            getattr(self, "reranker", None) is not None
+        use_jev = bool(getattr(cfg, "jev_enabled", False)
+                       and getattr(cfg, "jev_recall", False))
+        decisions = getattr(self, "decisions", None)
+        if not use_rerank and not (use_jev and decisions is not None and decisions.ready):
+            return rows
         items = [(str(r.get("id")), str(r.get("summary") or r.get("content") or "")[:300])
-                 for r in (matches.get("items") or []) if r.get("id")]
-        if len(items) < 2:
-            if trigger:
-                self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
-            return
-        order = None
-        strict = False
-        dropped = 0
-        tokens0 = getattr(getattr(self, "decisions", None), "tokens", 0)
-        reranker = getattr(self, "reranker", None)
-        if rr_on and reranker is not None and reranker.ready:
-            order = await reranker.rank(query, items)
-        if not order and jev_on:
-            decisions = getattr(self, "decisions", None)
-            if decisions is not None and decisions.ready:
-                timeout = None
-                if rr_on:
-                    timeout = (getattr(cfg, "rerank_timeout_ms", 1500) or 1500) / 1000.0
-                scored = await decisions.recall_filter(query, items, timeout=timeout)
+                 for r in rows if r.get("id")]
+        if len(items) < JEV_RECALL_MIN_CANDIDATES:
+            return rows
+        budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        t0 = time.time()
+        order, strict, dropped, timed_out = None, False, 0, False
+        try:
+            if use_rerank and self.reranker.ready:
+                order = await asyncio.wait_for(
+                    self.reranker.rank(query, items), timeout=budget)
+            if not order and use_jev and decisions.ready:
+                scored = await asyncio.wait_for(
+                    decisions.recall_filter(query, items, timeout=budget),
+                    timeout=budget)
                 if scored:
                     keep = [(k, s) for k, s in scored
                             if s is not None and s >= RECALL_KEEP_MIN]
-                    if len(keep) < RECALL_KEEP_MIN_COUNT:
-                        keep = sorted(scored, key=lambda kv: -(kv[1] or 0))[
-                            :RECALL_KEEP_MIN_COUNT]
+                    floor = min(len(scored), max(2, int(getattr(cfg, "top_k", 5) or 5)))
+                    if len(keep) < floor:
+                        keep = sorted(scored, key=lambda kv: -(kv[1] or 0))[:floor]
                     order = [k for k, _s in keep]
-                    strict = True       # 真筛过 ⇒ 注入时丢弃未入选的（这才叫"挑出"）
+                    strict = True
                     dropped = len(scored) - len(order)
-        if not order:
-            if trigger:
-                self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
-            return
-        try:
-            revision = await self.store.call("revision")
+        except asyncio.TimeoutError:
+            timed_out = True
         except Exception:
-            revision = None
-        used = getattr(getattr(self, "decisions", None), "tokens", 0) - tokens0
-        logger.info("[记忆·Z] JEV·召回 %d 条候选 → 挑出 %d 条优先注入%s（%d tok）",
-                    len(items), len(order), ("，滤掉 %d 条无关" % dropped) if dropped else "",
-                    used)
-        self._order_cache[mkey] = {"rev": revision, "order": list(order),
-                                   "trigger": trigger, "strict": strict}
-        if len(self._order_cache) > 256:
-            self._order_cache.clear()
-        logger.debug("[记忆·Z] 顺序预取完成：%d 条候选已重排", len(order))
-
-    def _apply_jev_order(self, mkey, rows):
-        """按预取顺序重排（无缓存 / 已失效 ⇒ 原样返回；每次只查一次字典）。"""
-        entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
-        if not entry:
-            return rows
-        revision, order = entry.get("rev"), entry.get("order") or []
+            logger.debug("[记忆·Z] 召回精修失败（用原排序）", exc_info=True)
+        used = int((time.time() - t0) * 1000)
         if not order:
+            logger.info("[记忆·Z] JEV·召回 %d 条候选 → %s，用原排序（%d ms）",
+                        len(items), "超时" if timed_out else "未返回", used)
             return rows
-        cached = self._memo.get(mkey)
-        if cached is not None and cached[0] != revision:
-            self._order_cache.pop(mkey, None)      # 期间有写入 ⇒ 缓存失效，保持原顺序
-            return rows
-        rank = {rid: i for i, rid in enumerate(order)}
-        try:
-            if entry.get("strict"):
-                # ★ 真筛选：未入选的一律不注入（这才是"挑出"的意义）
-                picked = [r for r in rows if str(r.get("id")) in rank]
-                if picked:
-                    return sorted(picked, key=lambda r: rank.get(str(r.get("id")), 0))
-                return rows          # 兜底：全被滤掉时保持原样，绝不注入空
-            return sorted(rows, key=lambda r: rank.get(str(r.get("id")), len(rank) + 1))
-        except Exception:
-            return rows
+        rank = {k: i for i, k in enumerate(order)}
+        if strict:
+            picked = [r for r in rows if str(r.get("id")) in rank]
+            out = sorted(picked, key=lambda r: rank.get(str(r.get("id")), 0)) if picked else rows
+        else:
+            out = sorted(rows, key=lambda r: rank.get(str(r.get("id")), len(rank) + 1))
+        logger.info("[记忆·Z] JEV·召回 %d 条候选 → 挑出 %d 条优先注入%s（%d ms%s）",
+                    len(items), len(order),
+                    ("，滤掉 %d 条无关" % dropped) if dropped else "", used,
+                    "，超时" if timed_out else "")
+        return out
 
-    def _jev_trigger_hit(self, mkey) -> bool:
-        """JEV 是否判定本轮是回忆请求（关键词未命中时的补充判断）。"""
-        entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
-        return bool(entry and entry.get("trigger"))
-
-    async def prewarm(self, sid, users, scope, query="", cfg=None, jev=True):
+    async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
         消息一到就调用（此时用户还在打字、消息还要走网络），
@@ -1643,10 +1594,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 ),
             )
             await self._prefetch_search(sid, users, scope, query, cfg)
-            # v2.18.74：JEV/重排的顺序**只在这里算**（用户还在打字），注入时零成本 ✓
-            # jev=False（预算用尽）时只跳过"要花钱的决策调用"，检索预热照常 ✓
-            if jev:
-                await self._prefetch_order(sid, users, scope, query, cfg)
+            # 注：JEV/重排已移到**注入点**执行（预热用单条消息、注入用整批 ⇒ 键不匹配会白花 ✗）
         except Exception:
             logger.debug("[记忆·Z] 预热失败（不影响正常注入）", exc_info=True)
 
@@ -2045,21 +1993,6 @@ class AlifeMemoryPlugin(BasePlugin):
         last = str(getattr(users[-1], "content", "")) if users else ""
         return (len(users), hash(last))
 
-    def _jev_budget_ok(self, sid) -> bool:
-        """JEV 预取预算：每会话 60 秒内最多 JEV_BUDGET_CALLS 次（滑动窗口）。"""
-        if not getattr(self, "decisions", None) or not self.decisions.ready:
-            return False
-        now = time.time()
-        marks = self._jev_calls.setdefault(sid, [])
-        marks[:] = [x for x in marks if now - x < JEV_BUDGET_WINDOW]
-        if len(marks) >= JEV_BUDGET_CALLS:
-            return False
-        marks.append(now)
-        if len(self._jev_calls) > 256:
-            for key in list(self._jev_calls)[:128]:
-                self._jev_calls.pop(key, None)
-        return True
-
     def bootstrap_allowed(self):
         """是否允许把宿主旧历史播种进本会话。"""
         mode = self.settings.bootstrap_seed
@@ -2093,10 +2026,8 @@ class AlifeMemoryPlugin(BasePlugin):
             return
         _q = " ".join(capture_text(text_of(_m)) for _m in event_messages(event))
         # JEV（要花钱的决策调用）另受每会话预算限制；启发层预热不受影响 ✓
-        jev_ok = self._jev_budget_ok(sid)
         asyncio.create_task(
-            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg,
-                         jev=jev_ok)
+            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
         )
         # ★ 冷归档（P7）：长会话的兜底 —— 启动已跑过一次，这里按 6 小时节流补跑 ✓
         #   （内部节流 ✓ 真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
@@ -2282,7 +2213,7 @@ class AlifeMemoryPlugin(BasePlugin):
         if cfg.recall_scope != "session" and query.strip() and not over_budget:
             _mkey = self._search_memo_key(sid, query, users, cfg, keyword_hit, prefer)
             # v2.18.74：关键词未命中时用 JEV 的判定放宽召回条数（只影响 reach，不动 memo 键）
-            reach = cfg.top_k * (2 if (keyword_hit or self._jev_trigger_hit(_mkey)) else 1)
+            reach = cfg.top_k * (2 if keyword_hit else 1)
             matches = await self.memo(_mkey, lambda: self.store.call(
                 "search",
                 sid,
@@ -2310,7 +2241,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   （`archive_pool` 由 `fresh` 派生 ⇒ 这里一处同时覆盖主召回与轮换 ✓）
                 and not media_only(r.get("summary") or "", keep_names)
             ]
-            related_rows = self._apply_jev_order(_mkey, fresh)[:reach]
+            fresh = await self._recall_refine(sid, query, fresh, cfg)
+            related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
             # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
             archive_pool = [] if not cfg.rotate_archive_enabled else [

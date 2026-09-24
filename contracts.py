@@ -309,7 +309,7 @@ class Settings(Strict):
     jev_base_url: str = ""                # 可留空（自动取所选提供商的 base_url）
     jev_api_key: str = ""                 # 可留空（自动取所选提供商的 key）；支持 $$ENV_NAME
     jev_model_name: str = ""              # 可留空（自动取所选模型的 model_id）
-    jev_timeout_ms: int = Field(default=4000, ge=300, le=30000)
+    jev_timeout_ms: int = Field(default=5000, ge=300, le=60000)
     jev_sample: float = Field(default=1.0, ge=0.05, le=1.0)
     jev_recall: bool = False              # 召回筛选（被动召回）
     jev_merge: bool = False               # 合并路由（merge / drop→回收站 / keep）
