@@ -966,6 +966,59 @@ class Engine:
                 return entity_id
         return value
 
+    # ── v2.18.74：JEV 影子记录（**只写日志，绝不改任何行为**）──────────────
+    async def jev_shadow_merge(self, groups_view, cfg):
+        """记录「JEV 会怎么路由这些合并组」，供离线对比。有界调用，失败即忽略。"""
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return
+        if not getattr(cfg, "jev_merge", False):
+            return
+        try:
+            for group in list(groups_view)[:3]:
+                facts = [
+                    str(f.get("text") or f.get("content") or f.get("summary") or "")
+                    for f in (group.get("facts") or [])
+                ]
+                facts = [t for t in facts if t]
+                if len(facts) < 2:
+                    continue
+                primary = max(facts, key=len)
+                cands = [("c%d" % i, t) for i, t in enumerate(facts) if t != primary][:5]
+                if not cands:
+                    continue
+                route = await decisions.merge_route(primary, cands)
+                if route:
+                    decisions.log.write("merge", {
+                        "subject": group.get("subject"), "category": group.get("category"),
+                        "primary": primary[:160], "route": route,
+                        "cands": {k: t[:80] for k, t in cands},
+                        "tokens": decisions.tokens})
+        except Exception:
+            logger.debug("[记忆·Z] JEV 合并影子记录失败（忽略）", exc_info=True)
+
+    async def jev_shadow_audit(self, facts, cfg):
+        """记录「JEV 认为哪些事实对可疑」，供离线对比。有界调用，失败即忽略。"""
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return
+        if not getattr(cfg, "jev_audit", False):
+            return
+        try:
+            texts = [(str(f.get("id") or ""), str(f.get("content") or f.get("text") or ""))
+                     for f in (facts or [])]
+            texts = [(k, t) for k, t in texts if t][:12]
+            pairs = [(("p%d_%d" % (i, j)), texts[i][1], texts[j][1])
+                     for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+            if not pairs:
+                return
+            hot = await decisions.audit_prescreen(pairs)
+            if hot is not None:
+                decisions.log.write("audit", {"checked": len(pairs), "suspicious": hot,
+                                              "tokens": decisions.tokens})
+        except Exception:
+            logger.debug("[记忆·Z] JEV 审计影子记录失败（忽略）", exc_info=True)
+
     async def structured(
         self, contract, purpose, payload, cfg, retry_timeout=True, forced=False,
         facts_cap=None,
@@ -1330,6 +1383,7 @@ class Engine:
         # 服务端合并时从数据库行自己汇总。
         fact_aliases = {"f%d" % (i + 1): fact["id"] for i, fact in enumerate(candidates)}
         keep = await self.store.call("spaced_names")
+        await self.jev_shadow_audit(candidates, cfg)
         output = await self.structured(
             Audit,
             "audit",
@@ -1570,6 +1624,7 @@ class Engine:
             payload = {"groups": groups_view}
             fallback = False
             try:
+                await self.jev_shadow_merge(groups_view, cfg)
                 output = await self.structured(FactMerge, "fact_merge", payload, cfg)
                 output = restore_group_ids(output, group_aliases)
                 if len(output["groups"]) != len(batch):

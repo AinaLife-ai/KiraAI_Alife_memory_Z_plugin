@@ -94,8 +94,8 @@
         "name": "自动压缩概率",
         "default": 0.8,
         "description": "每次检查时开始整理的机会。0为仅手动，0.8为80%，1为满足阈值就整理；检查点=每次回复后+每30秒一次，所以低于1也只是晚几十秒。",
-        "minimum": 0,
-        "maximum": 1
+        "minimum": 0.0,
+        "maximum": 1.0
       },
       "max_level": {
         "type": "integer",
@@ -152,7 +152,7 @@
         "default": 20,
         "description": "每次最多核对多少条事实。默认20；审计慢时可调到5～10。",
         "minimum": 1,
-        "maximum": 50
+        "maximum": 200
       },
       "audit_recheck_days": {
         "type": "integer",
@@ -262,6 +262,104 @@
         "description": "每轮最多自动找回几条相关跨会话存档。默认5；本地事实最多读取这个数的10倍，再受总字数限制。",
         "minimum": 1,
         "maximum": 30
+      },
+      "jev_enabled": {
+        "type": "switch",
+        "name": "启用 JEV 决策层（可选，默认关闭）",
+        "default": false,
+        "description": "可选增强，默认完全关闭。开启前请先在「设置 → 提供商」注册一个类 JEV 决策模型（官方 https://api.typesafe.ai 或兼容中转），再在下面选中它。全部关闭时行为与以前完全一致。"
+      },
+      "jev_shadow": {
+        "type": "switch",
+        "name": "影子模式（只记录不生效）",
+        "default": true,
+        "description": "影子模式（默认开）：只把「JEV 会怎么判」记进日志供比对，不改任何现有行为。确认效果后再关掉它，JEV 才会真正生效。"
+      },
+      "jev_model": {
+        "type": "model_select",
+        "name": "JEV 决策模型（在提供商里注册好的）",
+        "default": "",
+        "description": "【重要】请正确选择类 JEV 决策模型，误选其他将无法正常使用。留空则 JEV 不生效，其它功能照常。",
+        "model_type": "llm"
+      },
+      "jev_base_url": {
+        "type": "string",
+        "name": "JEV 接口地址（可留空）",
+        "default": "",
+        "description": "只有需要覆盖时才填。留空会自动使用所选提供商的接口地址；官方默认为 https://api.typesafe.ai。"
+      },
+      "jev_api_key": {
+        "type": "string",
+        "name": "JEV API 密钥（可留空）",
+        "default": "",
+        "description": "留空自动使用所选提供商的密钥（推荐这么做）。也可填 $$环境变量名 从环境变量读取。"
+      },
+      "jev_model_name": {
+        "type": "string",
+        "name": "JEV 模型名（可留空）",
+        "default": "",
+        "description": "留空自动使用所选模型的模型名；官方默认为 jev-latest。"
+      },
+      "jev_timeout_ms": {
+        "type": "integer",
+        "name": "JEV 超时（毫秒）",
+        "default": 4000,
+        "description": "单次 JEV 调用最多等多久（毫秒），默认 4000。超时即当次弃权、走原有逻辑 —— 绝不阻塞回复。",
+        "minimum": 300,
+        "maximum": 30000
+      },
+      "jev_sample": {
+        "type": "float",
+        "name": "JEV 采样比例（1=全部）",
+        "default": 1.0,
+        "description": "调用采样比例：1=全部（默认），0.3=只对 30% 的情况调用。想省额度又怕误判时用它逐步放量。",
+        "minimum": 0.05,
+        "maximum": 1.0
+      },
+      "jev_recall": {
+        "type": "switch",
+        "name": "JEV 用于召回筛选",
+        "default": false,
+        "description": "用 JEV 帮召回挑更该注入的记忆（实测能把「花生过敏」这类漏召回捞回来）。走预取、不进回复热路径，超时即回退到原排序。"
+      },
+      "jev_merge": {
+        "type": "switch",
+        "name": "JEV 用于合并路由",
+        "default": false,
+        "description": "用 JEV 判断候选事实该合并、该丢进回收站、还是不动。低重要度的纯重复会进回收站（可还原），既不参与合并、也不会稀释高重要度的事实。"
+      },
+      "jev_audit": {
+        "type": "switch",
+        "name": "JEV 用于审计预筛",
+        "default": false,
+        "description": "用 JEV 先筛出可疑对（矛盾/重复/过时），只把可疑项交给审计模型 —— 省成本、提命中；整批干净时可直接跳过这次审计调用。"
+      },
+      "jev_importance": {
+        "type": "switch",
+        "name": "JEV 用于重要度定级",
+        "default": false,
+        "description": "写入时由 JEV 给事实定重要度（核心/重要/一般/琐碎，对应分数 9/7/5/3）。重要度 ≥8 永不沉；一次性事务会自然下沉。"
+      },
+      "rerank_model": {
+        "type": "model_select",
+        "name": "启用模型重排（可选，默认关闭）",
+        "default": "",
+        "description": "选择 reranker（如硅基流动 / 阿里百炼的 rerank 模型，或你自行部署的）。留空则不重排；超时或报错一律保持原顺序。",
+        "model_type": "rerank"
+      },
+      "rerank_enabled": {
+        "type": "switch",
+        "name": "重排模型（Rerank）",
+        "default": false,
+        "description": "启用模型重排（可选）。需先在「设置 → 提供商」添加 Rerank 模型并在此选择；关闭时使用内置词面+向量排序，行为不变。"
+      },
+      "rerank_timeout_ms": {
+        "type": "integer",
+        "name": "重排超时（毫秒）",
+        "default": 1500,
+        "description": "单次重排最多等多久（毫秒），默认 1500。超时保持原顺序，不影响召回速度。",
+        "minimum": 300,
+        "maximum": 10000
       },
       "proactive_enabled": {
         "type": "switch",

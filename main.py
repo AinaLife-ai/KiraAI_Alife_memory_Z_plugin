@@ -75,6 +75,8 @@ from .retrieval import (
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
+from .mdecide import Decisions
+from .rerankx import Reranker
 
 PLUGIN_ID = "alife_memory_z"
 
@@ -482,6 +484,41 @@ class AlifeMemoryPlugin(BasePlugin):
         self._passive_injected_ids = {}   # v2.18.19：本轮实际注入的 id 全量 ✓
         self._bootstrap_review_logged = False
         self.bootstrap_review = {}
+        # v2.18.74：JEV 决策层 + 模型重排（**可选增强**；全关时零行为变化）
+        #   顺序缓存：prewarm 期间算好 ⇒ 注入时只查一次字典（零成本）
+        self._order_cache = {}
+        self.decisions = None
+        self.reranker = None
+        self._build_aux()
+
+    def _build_aux(self):
+        """(重)建 JEV 决策层与重排器；任何失败都退回「不可用」，绝不影响主流程。"""
+        try:
+            mgr = getattr(self.ctx, "provider_mgr", None)
+            try:
+                shadow = Path(get_data_path()) / "memory_jev_shadow.jsonl"
+            except Exception:
+                shadow = None
+            self.decisions = Decisions(self.settings, mgr, shadow)
+            self.reranker = Reranker(
+                getattr(self.settings, "rerank_model", "") or "",
+                mgr,
+                self.decisions,
+                (getattr(self.settings, "rerank_timeout_ms", 1500) or 1500) / 1000.0,
+            )
+            if getattr(self, "engine", None) is not None:
+                self.engine.decisions = self.decisions   # 引擎侧影子记录用
+            if self.decisions.ready:
+                logger.info(
+                    "[记忆·Z] JEV 已启用（模型 %s · 端点 %s · %s）",
+                    self.decisions.cfg.model,
+                    self.decisions.cfg.base_url,
+                    "影子模式（只记录）" if self.decisions.shadow else "生效模式",
+                )
+        except Exception:
+            logger.debug("[记忆·Z] JEV/重排初始化失败（按不可用处理）", exc_info=True)
+            self.decisions = None
+            self.reranker = None
 
     def conflicts(self):
         pm = getattr(self.ctx, "plugin_mgr", None)
@@ -646,6 +683,7 @@ class AlifeMemoryPlugin(BasePlugin):
         self.ctx.plugin_mgr.plugin_configs[PLUGIN_ID] = updated
         self.settings = Settings.model_validate(updated.get("alife", {}))
         logger.info("[记忆·Z] 配置已迁移到新默认值：%s", "、".join(changed))
+        self._build_aux()
         return changed
 
     async def initialize(self):
@@ -715,6 +753,7 @@ class AlifeMemoryPlugin(BasePlugin):
         self.engine = Engine(
             self.store, self.runtime_settings, self.model_call, self.embed, self.notice
         )
+        self.engine.decisions = getattr(self, "decisions", None)   # v2.18.74 影子记录用
         # ★ 2026-09-19：压缩完成 ⇒ 解除该会话的「已给过」压制 ✓
         #   seen 只记得"我给过" ✗ 不知道上下文是否已被压掉 ⇒ 压缩后放行 ✓
         #   （可选回调 + 内部全包异常 ✓ 绝不影响压缩本身 ✓）
@@ -1469,6 +1508,85 @@ class AlifeMemoryPlugin(BasePlugin):
                                     skip_media=cfg.recall_skip_media, **prefer),
         )
 
+    # ── v2.18.74：JEV / 模型重排的顺序预取（**可选**；全关时零开销）────────────
+    async def _prefetch_order(self, sid, users, scope, query, cfg):
+        """在预热阶段算好候选顺序；注入路径只读缓存 ⇒ 零成本、绝不阻塞。
+
+        三条安全线（逐条可测）：
+        1. 全关 ⇒ 立即返回（一次属性判断，无 IO）
+        2. 影子模式 ⇒ 只写日志、**不写缓存** ⇒ 行为与之前逐字节一致
+        3. 任何失败/超时 ⇒ 不写缓存 ⇒ 注入保持原有顺序
+        """
+        if cfg is None or not query.strip() or scope == "session":
+            return
+        jev_on = bool(getattr(cfg, "jev_enabled", False) and getattr(cfg, "jev_recall", False))
+        rr_on = bool(getattr(cfg, "rerank_enabled", False))
+        if not jev_on and not rr_on:
+            return
+        prefer = ({"prefer_sid": sid, "prefer_users": tuple(users or ())}
+                  if cfg.session_affinity else {})
+        hit = any(w in query for w in cfg.recall_keywords)
+        mkey = self._search_memo_key(sid, query, users, cfg, hit, prefer)
+        try:
+            matches = await self.memo(mkey, lambda: self.store.call(
+                "search", sid, lexical=query, scope=cfg.recall_scope, users=users,
+                limit=cfg.top_k * (2 if hit else 1) * 2, exclude_sid=sid,
+                active=cfg.search_active_only, cold_after_days=cfg.cold_after_days,
+                skip_media=cfg.recall_skip_media, **prefer))
+        except Exception:
+            logger.debug("[记忆·Z] 顺序预取：检索失败（保持原顺序）", exc_info=True)
+            return
+        items = [(str(r.get("id")), str(r.get("summary") or r.get("content") or "")[:300])
+                 for r in (matches.get("items") or []) if r.get("id")]
+        if len(items) < 2:
+            return
+        order = None
+        reranker = getattr(self, "reranker", None)
+        if rr_on and reranker is not None and reranker.ready:
+            order = await reranker.rank(query, items)
+        if not order and jev_on:
+            decisions = getattr(self, "decisions", None)
+            if decisions is not None and decisions.ready:
+                timeout = None
+                if rr_on:
+                    timeout = (getattr(cfg, "rerank_timeout_ms", 1500) or 1500) / 1000.0
+                scored = await decisions.recall_filter(query, items, timeout=timeout)
+                order = [k for k, _s in scored] if scored else None
+        if not order:
+            return
+        try:
+            revision = await self.store.call("revision")
+        except Exception:
+            revision = None
+        if getattr(cfg, "jev_shadow", True):
+            decisions = getattr(self, "decisions", None)
+            if decisions is not None:
+                decisions.log.write("recall", {
+                    "sid": sid, "query": query[:200],
+                    "before": [k for k, _t in items], "after": list(order),
+                    "tokens": decisions.tokens, "calls": decisions.calls})
+            return
+        self._order_cache[mkey] = (revision, list(order))
+        if len(self._order_cache) > 256:
+            self._order_cache.clear()
+        logger.debug("[记忆·Z] 顺序预取完成：%d 条候选已重排", len(order))
+
+    def _apply_jev_order(self, mkey, rows):
+        """按预取顺序重排（无缓存 / 已失效 ⇒ 原样返回；每次只查一次字典）。"""
+        entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
+        if not entry:
+            return rows
+        revision, order = entry
+        cached = self._memo.get(mkey)
+        if cached is not None and cached[0] != revision:
+            self._order_cache.pop(mkey, None)      # 期间有写入 ⇒ 缓存失效，保持原顺序
+            return rows
+        rank = {rid: i for i, rid in enumerate(order)}
+        try:
+            return sorted(rows, key=lambda r: rank.get(str(r.get("id")), len(rank) + 1))
+        except Exception:
+            return rows
+
     async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
@@ -1484,6 +1602,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 ),
             )
             await self._prefetch_search(sid, users, scope, query, cfg)
+            # v2.18.74：JEV/重排的顺序**只在这里算**（用户还在打字），注入时零成本 ✓
+            await self._prefetch_order(sid, users, scope, query, cfg)
         except Exception:
             logger.debug("[记忆·Z] 预热失败（不影响正常注入）", exc_info=True)
 
@@ -2120,7 +2240,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   （`archive_pool` 由 `fresh` 派生 ⇒ 这里一处同时覆盖主召回与轮换 ✓）
                 and not media_only(r.get("summary") or "", keep_names)
             ]
-            related_rows = fresh[:reach]
+            related_rows = self._apply_jev_order(_mkey, fresh)[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
             # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
             archive_pool = [] if not cfg.rotate_archive_enabled else [
