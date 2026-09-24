@@ -518,12 +518,30 @@ class AlifeMemoryPlugin(BasePlugin):
             )
             if getattr(self, "engine", None) is not None:
                 self.engine.decisions = self.decisions   # 引擎侧决策留痕用
-            if self.decisions.ready:
-                logger.info(
-                    "[记忆·Z] JEV 已启用（模型 %s · 端点 %s）",
-                    self.decisions.cfg.model,
-                    self.decisions.cfg.base_url,
-                )
+            self._jev_notice = None          # 配置变了 ⇒ 允许重新提示
+            self._aux_fp = self._aux_fingerprint(self.settings)
+            _c = getattr(self.decisions, "cfg", None)
+            if _c is not None and getattr(_c, "enabled", False):
+                if self.decisions.ready:
+                    _s = getattr(self, "settings", None)
+                    _on = lambda k: "✓" if getattr(_s, k, False) else "✗"   # noqa: E731
+                    logger.info(
+                        "[记忆·Z] JEV 已启用（模型 %s · 端点 %s）｜开关：召回%s 合并%s 审计%s 重要度%s",
+                        _c.model, _c.base_url,
+                        _on("jev_recall"), _on("jev_merge"),
+                        _on("jev_audit"), _on("jev_importance"))
+                else:
+                    # ★ 以前这里是**静默**的 ✗ ⇒ 用户开了配置却一行 JEV 日志都没有，无从排查
+                    if not getattr(_c, "uuid", "") and not getattr(_c, "api_key", ""):
+                        _why = "未选择类 JEV 决策模型，且未填 JEV 接口密钥"
+                    elif not getattr(_c, "api_key", ""):
+                        _why = "未解析到密钥（提供商不可用，或该模型没有配密钥）"
+                    else:
+                        _why = "接口地址为空"
+                    logger.warning(
+                        "[记忆·Z] JEV 已开启但**未就绪**（暂不生效）：%s。"
+                        "请在「设置 → 提供商」注册类 JEV 决策模型，并在插件设置里选中它"
+                        "（或在高级项里直接填 JEV 接口地址与密钥）", _why)
         except Exception:
             logger.debug("[记忆·Z] JEV/重排初始化失败（按不可用处理）", exc_info=True)
             self.decisions = None
@@ -1523,6 +1541,35 @@ class AlifeMemoryPlugin(BasePlugin):
         )
 
     # ── v2.18.74：JEV / 模型重排的顺序预取（**可选**；全关时零开销）────────────
+    @staticmethod
+    def _aux_fingerprint(settings):
+        """JEV/重排相关配置指纹：变了就重建决策层（与在哪改的无关）。"""
+        keys = ("jev_enabled", "jev_model", "jev_base_url", "jev_api_key",
+                "jev_model_name", "jev_timeout_ms", "jev_sample", "jev_recall",
+                "jev_merge", "jev_audit", "jev_importance",
+                "rerank_enabled", "rerank_model", "rerank_timeout_ms")
+        return tuple(str(getattr(settings, k, "")) for k in keys)
+
+    def _ensure_aux(self) -> None:
+        """配置若在别处被改过（宿主设置页、手工编辑配置文件）⇒ 重建一次。
+
+        很便宜（只比几个属性），且不涉及网络 ⇒ 放在注入前调用是安全的。
+        """
+        try:
+            fp = self._aux_fingerprint(self.settings)
+        except Exception:
+            return
+        if getattr(self, "_aux_fp", None) != fp:
+            self._build_aux()
+            self._aux_fp = fp
+
+    def _jev_skip_notice(self, why: str) -> None:
+        """JEV 被跳过时给一次**明确提示**（同因不重复刷屏；配置变更后会重新提示）。"""
+        if getattr(self, "_jev_notice", None) == why:
+            return
+        self._jev_notice = why
+        logger.info("[记忆·Z] JEV 本次未参与：%s", why)
+
     async def _recall_refine(self, sid, query, rows, cfg, keyword_hit=False):
         """注入点上的"重排 + 清明显无关"（可选；带**硬预算**，超时/失败一律原样返回）。
 
@@ -1534,16 +1581,21 @@ class AlifeMemoryPlugin(BasePlugin):
         """
         if not rows or cfg is None:
             return rows
+        self._ensure_aux()       # ★ 自愈：配置在别处改过 ⇒ 立即重建，不必等重载插件
         use_rerank = bool(getattr(cfg, "rerank_enabled", False)) and \
             getattr(self, "reranker", None) is not None
         use_jev = bool(getattr(cfg, "jev_enabled", False)
                        and getattr(cfg, "jev_recall", False))
         decisions = getattr(self, "decisions", None)
         if not use_rerank and not (use_jev and decisions is not None and decisions.ready):
+            if use_jev and (decisions is None or not decisions.ready):
+                self._jev_skip_notice("开关已开但决策层未就绪（见启动时那条 warning）")
             return rows
         items = [(str(r.get("id")), str(r.get("summary") or r.get("content") or "")[:300])
                  for r in rows if r.get("id")]
         if len(items) < JEV_RECALL_MIN_CANDIDATES:
+            self._jev_skip_notice("候选只有 %d 条（少于 %d 条不值得调用）"
+                                  % (len(items), JEV_RECALL_MIN_CANDIDATES))
             return rows
         budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
         t0 = time.time()
@@ -1605,6 +1657,9 @@ class AlifeMemoryPlugin(BasePlugin):
             return profiles
         decisions = getattr(self, "decisions", None)
         if decisions is None or not decisions.ready:
+            self._ensure_aux()
+            decisions = getattr(self, "decisions", None)
+        if decisions is None or not decisions.ready:
             return profiles
         try:
             query = " ".join(capture_text(text_of(m)) for m in event_messages(event)).strip()
@@ -1663,6 +1718,9 @@ class AlifeMemoryPlugin(BasePlugin):
                     and getattr(cfg, "jev_recall", False)):
             return rows
         decisions = getattr(self, "decisions", None)
+        if decisions is None or not decisions.ready:
+            self._ensure_aux()          # 自愈一次再试（配置可能刚在别处改过）
+            decisions = getattr(self, "decisions", None)
         if decisions is None or not decisions.ready:
             return rows
         items = []
@@ -4124,6 +4182,10 @@ class AlifeMemoryPlugin(BasePlugin):
             self.ctx.plugin_mgr.plugin_configs[PLUGIN_ID] = config
             old_settings = self.settings.model_dump()
             self.settings = edit.settings
+            # ★ 关键修复：面板改配置后必须重建 JEV/重排 —— 否则 decisions 仍是旧配置构建的
+            #   （ready=False）⇒ 所有 JEV 入口静默 return ✗
+            #   （用户实测：配置全开了，后台却一行 JEV 日志都没有）
+            self._build_aux()
             self.engine.wake.set()
             # Re-run only when migration controls change, not for unrelated edits.
             if any(

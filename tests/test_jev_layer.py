@@ -462,3 +462,34 @@ class OffParityCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class AuxRebuildCase(unittest.TestCase):
+    """★ 回归守护：配置开启后**重建**必须能拿到就绪的决策层。
+
+    用户实测的问题：面板里开了配置，但 self.decisions 还是开启前构建的（ready=False）
+    ⇒ 所有 JEV 入口静默 return，后台一行日志都没有 ✗
+    修法是"配置变化后重建"（_build_aux / _ensure_aux）。这里守住机制本身：
+    同样的构造代码，配置开了就必须 ready；关了就必须 not ready（且不抛异常）。
+    """
+
+    class _S:
+        def __init__(self, **kw):
+            base = dict(jev_enabled=False, jev_model="", jev_base_url="", jev_api_key="",
+                        jev_model_name="", jev_timeout_ms=5000, jev_sample=1.0)
+            base.update(kw)
+            for k, v in base.items():
+                setattr(self, k, v)
+
+    def test_rebuild_after_enabling_config(self):
+        off = md.Decisions(self._S(), None, None)
+        self.assertFalse(off.ready, "未启用 ⇒ 未就绪")
+        on = md.Decisions(self._S(jev_enabled=True, jev_api_key="k",
+                                  jev_model_name="jev-latest"), None, None)
+        self.assertTrue(on.ready, "启用且密钥解析成功 ⇒ 必须就绪（否则就是静默失效 ✗）")
+        self.assertTrue(on.cfg.base_url.startswith("http"))
+
+    def test_ready_requires_key(self):
+        """开了但密钥没解析到 ⇒ 未就绪（此时应打 warning 提示，而不是静默 ✗）。"""
+        d = md.Decisions(self._S(jev_enabled=True), None, None)
+        self.assertFalse(d.ready)
