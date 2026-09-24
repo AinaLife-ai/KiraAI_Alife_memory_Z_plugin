@@ -269,12 +269,6 @@
         "default": false,
         "description": "可选增强，默认完全关闭。开启前请先在「设置 → 提供商」注册一个类 JEV 决策模型（官方 https://api.typesafe.ai 或兼容中转），再在下面选中它。全部关闭时行为与以前完全一致。"
       },
-      "jev_shadow": {
-        "type": "switch",
-        "name": "影子模式（只记录不生效）",
-        "default": false,
-        "description": "调试开关，默认关（即：开启 JEV 后立即生效）。打开它则只记录判定、不改任何行为，用于对照排查。"
-      },
       "jev_model": {
         "type": "model_select",
         "name": "JEV 决策模型（在提供商里注册好的）",

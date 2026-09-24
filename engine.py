@@ -966,7 +966,7 @@ class Engine:
                 return entity_id
         return value
 
-    # ── v2.18.74：JEV 影子记录（**只写日志，绝不改任何行为**）──────────────
+    # ── v2.18.74：JEV 决策（生效）──────────────────────────────
     async def jev_apply_merge_route(self, verdicts, cfg):
         """JEV 参与合并路由（**生效**）：merge 照合 / drop 进回收站 / 不该动的摘出去。
 
@@ -1090,28 +1090,6 @@ class Engine:
         decisions.log.write("audit", {"checked": len(pairs), "hot": len(out),
                                       "tokens": decisions.tokens})
         return out
-
-    async def jev_shadow_audit(self, facts, cfg):
-        """记录「JEV 认为哪些事实对可疑」，供离线对比。有界调用，失败即忽略。"""
-        decisions = getattr(self, "decisions", None)
-        if decisions is None or not getattr(cfg, "jev_enabled", False):
-            return
-        if not getattr(cfg, "jev_audit", False):
-            return
-        try:
-            texts = [(str(f.get("id") or ""), str(f.get("content") or f.get("text") or ""))
-                     for f in (facts or [])]
-            texts = [(k, t) for k, t in texts if t][:12]
-            pairs = [(("p%d_%d" % (i, j)), texts[i][1], texts[j][1])
-                     for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
-            if not pairs:
-                return
-            hot = await decisions.audit_prescreen(pairs)
-            if hot is not None:
-                decisions.log.write("audit", {"checked": len(pairs), "suspicious": hot,
-                                              "tokens": decisions.tokens})
-        except Exception:
-            logger.debug("[记忆·Z] JEV 审计影子记录失败（忽略）", exc_info=True)
 
     async def structured(
         self, contract, purpose, payload, cfg, retry_timeout=True, forced=False,

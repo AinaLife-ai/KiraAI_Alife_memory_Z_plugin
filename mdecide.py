@@ -4,7 +4,7 @@
 1. **永不抛异常**：任何失败（未配置/超时/网络/额度/返回异常）一律返回 None
    ⇒ 调用方永远走原有逻辑，功能不受影响。
 2. **绝不进热路径**：只允许在 prewarm（用户打字时）或后台任务里调用，且带硬超时。
-3. **影子模式**：默认只记录"JEV 会怎么判"，一个字节都不改现有行为。
+3. **决策留痕**：每次判定写一行 JSONL，供后续标定与回溯。
 4. **连接解析顺序**：显式 base_url+api_key > 用户选中的 KiraAI 模型（取其 provider_config）。
 
 原生接口（OpenAI 格式**不支持**，实测 400，故必须走这条）：
@@ -53,7 +53,7 @@ DEFAULT_MODEL = "jev-latest"
 SAME_HIGH = 0.60      # ≥ 视为"同一件事"
 SAME_LOW = 0.30       # ≤ 视为"明确不是同一件事"
 NEW_HIGH = 0.60       # ≥ 视为"带来实质新信息"
-DILUTE_HIGH = 0.70    # ≥ 视为"并入正文会稀释重点"
+DILUTE_HIGH = 0.75     # 实测：该合并档稀释 0.31~0.69 / 真会稀释 0.77~0.84    # ≥ 视为"并入正文会稀释重点"
                       #   实测：该合并的档位稀释 0.30~0.58，真会稀释的 0.77~0.84
                       #   ⇒ 阈值取 0.70 才不误杀（0.60 会卡在贴边的 0.58 上 ✗）
 TRIGGER_HIGH = 0.50   # 召回触发阈值（实测阈值 0.5 命中 8/8）
@@ -175,12 +175,11 @@ def endpoint_of(base_url: str) -> str:
 class JevConfig:
     """不可变快照：一次事件只解析一次，避免热路径反复读配置。"""
 
-    __slots__ = ("enabled", "shadow", "base_url", "api_key", "model", "timeout", "sample", "uuid")
+    __slots__ = ("enabled", "base_url", "api_key", "model", "timeout", "sample", "uuid")
 
-    def __init__(self, enabled=False, shadow=True, base_url="", api_key="", model="",
+    def __init__(self, enabled=False, base_url="", api_key="", model="",
                  timeout=4.0, sample=1.0, uuid=""):
         self.enabled = bool(enabled)
-        self.shadow = bool(shadow)
         self.base_url = base_url or DEFAULT_BASE_URL
         self.api_key = api_key or ""
         self.model = model or DEFAULT_MODEL
@@ -200,7 +199,7 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
     """解析 JEV 连接信息：显式字段优先，其次取所选 KiraAI 模型的 provider_config。"""
     def get(name, default=""):
         """取设置值。★ 不能写 `getattr(...) or default`：False 会被 or 吃掉，
-        导致 jev_shadow=False 永远读成 True（实测踩过 ✗）。"""
+        导致布尔型设置里的 False 永远读成默认值（实测踩过 ✗）。"""
         value = getattr(settings, name, default)
         return default if value is None else value
 
@@ -228,7 +227,6 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
         sample = 1.0
     return JevConfig(
         enabled=bool(get("jev_enabled", False)),
-        shadow=bool(get("jev_shadow", True)),
         base_url=base, api_key=key, model=model,
         timeout=timeout, sample=sample, uuid=uuid,
     )
@@ -339,9 +337,11 @@ def route_merge(same: Optional[float], new: Optional[float], dilute: Optional[fl
         return "keep"
     if same < SAME_HIGH:
         return "keep"                      # 不是同一件事 ⇒ 本来就不该合，也不会膨胀
-    if new >= NEW_HIGH and (dilute is None or dilute < DILUTE_HIGH):
-        return "merge"                     # 该合的照合（减少事实数量）
-    return "drop"                          # 同一件事 + 无实质新信息 ⇒ 软删进回收站
+    if new < NEW_HIGH:
+        return "drop"                      # 同一件事但只是更弱的重复 ⇒ 软删进回收站（可还原）
+    if dilute < DILUTE_HIGH:
+        return "merge"                     # 有新信息且不稀释 ⇒ 该合的照合
+    return "keep"                          # 会稀释主事实 ⇒ 不动（防稀释优先）
 
 
 # ── 3) 重要度（写入时定级，进"重要度×2"的现有公式）──
@@ -377,10 +377,10 @@ def build_audit_pairs(pairs: list[tuple[str, str, str]]) -> dict:
         )
     return qs
 
-# ────────────────────────── 影子记录 ──────────────────────────
+# ────────────────────────── 决策留痕（JSONL） ──────────────────────────
 
 
-class ShadowLog:
+class DecisionLog:
     """把"JEV 会怎么判"记成 JSONL，供离线对比；**任何异常都吞掉**。"""
 
     def __init__(self, path: Optional[Path] = None):
@@ -409,15 +409,13 @@ class Decisions:
     契约（逐条可测）：
       · 未启用 / 未配置 key / 熔断中 / 调用失败 ⇒ 每个方法都返回 None
       · 返回 None ⇒ 调用方**必须**走原有逻辑（功能与今天完全一致）
-      · `shadow=True`（默认）⇒ 调用方只记录、不应用
-    """
+          """
 
     def __init__(self, settings: Any = None, provider_mgr: Any = None,
-                 shadow_path: Optional[Path] = None):
+                 log_path: Optional[Path] = None):
         self.cfg = resolve_config(settings, provider_mgr) if settings is not None else JevConfig()
-        self.shadow = self.cfg.shadow
         self._client = self.cfg.client()
-        self.log = ShadowLog(shadow_path)
+        self.log = DecisionLog(log_path)
         self.calls = 0
         self.skipped = 0
 
@@ -431,7 +429,7 @@ class Decisions:
         return int(getattr(self._client, "tokens", 0) or 0)
 
     def _maybe(self, sample: float) -> bool:
-        """按采样率决定是否真的发起调用（影子模式下用来控制成本）。"""
+        """按采样率决定是否真的发起调用（控制额度消耗）。"""
         if not self.ready:
             self.skipped += 1
             return False
@@ -498,7 +496,6 @@ class Decisions:
             return None
         if not self._hit():
             return None
-        import asyncio as _aio
 
         async def one(key: str, text: str):
             data = await self._ask(
@@ -514,8 +511,13 @@ class Decisions:
                 return key, None
             return key, route_merge(same, new, dil if dil is not None else 0.0)
 
-        pairs = await _aio.gather(*[one(k, s) for k, s in cands[:8]])
-        out = {k: v for k, v in pairs if v}
+        # ★ 顺序调用（不并发）：实测并发请求会互相干扰/被上游限流，
+        #   同一候选单独问 3 次结果稳定（.88/.98/.58），并发时会被判成 drop ✗
+        out = {}
+        for k, s in cands[:8]:
+            key, route = await one(k, s)
+            if route:
+                out[key] = route
         self.calls += 1
         return out or None
 

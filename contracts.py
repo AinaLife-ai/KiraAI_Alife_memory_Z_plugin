@@ -305,7 +305,6 @@ class Settings(Strict):
     top_k: int = Field(default=5, ge=1, le=30)
     # ── v2.18.74：JEV 决策层（**可选增强**；默认全关 ⇒ 行为与之前逐字节一致）──
     jev_enabled: bool = False
-    jev_shadow: bool = False              # 调试用：只记录不生效（默认关 ⇒ 打开即生效）
     jev_model: str = ""                   # 在 KiraAI 里选一个类 JEV 决策模型
     jev_base_url: str = ""                # 可留空（自动取所选提供商的 base_url）
     jev_api_key: str = ""                 # 可留空（自动取所选提供商的 key）；支持 $$ENV_NAME

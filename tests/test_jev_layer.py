@@ -1,4 +1,4 @@
-"""JEV 决策层与模型重排：路由组合、失败即回退、影子安全、全关零影响。
+"""JEV 决策层与模型重排：路由组合、失败即回退、留痕安全、全关零影响。
 
 对应《方案 v4》：每个阈值都来自真机实测（2026-09-24，约 150 条中英标注样本）。
 本文件**不需要网络**：所有后端都用桩件替换，只验证契约与组合逻辑。
@@ -72,8 +72,8 @@ class RouteCase(unittest.TestCase):
             self.assertIn(md.route_merge(0.95, new, 0.1), ("merge", "drop"))
 
     def test_dilution_blocks_merge(self):
-        """会稀释就不许并进正文（保护高重要度事实）。"""
-        self.assertEqual(md.route_merge(0.9, 0.95, 0.8), "drop")
+        """会稀释就不许并进正文（保护高重要度事实）——既不合并也不删，保持原样。"""
+        self.assertEqual(md.route_merge(0.9, 0.95, 0.8), "keep")
 
     def test_missing_signal_is_keep(self):
         for same, new in ((None, 0.9), (0.9, None), (None, None)):
@@ -224,7 +224,7 @@ class DecisionsCase(unittest.TestCase):
         self.assertEqual(d.calls, 0)
 
     def test_partial_answers_mean_abstain(self):
-        d = md.Decisions(S(jev_enabled=True, jev_api_key="k", jev_shadow=True))
+        d = md.Decisions(S(jev_enabled=True, jev_api_key="k"))
         d._client = md.JevClient("https://x", "k", "m")
         d._client._post_sync = lambda p, t: {                       # type: ignore[assignment]
             "answers": {"hit_a": {"noul": 0.9}}, "usage": {"input_tokens": 10}}
@@ -253,17 +253,17 @@ class DecisionsCase(unittest.TestCase):
         self.assertEqual(out, {"a": 9}, "置信不足 ⇒ 不写，保留原值")
 
 
-class ShadowCase(unittest.TestCase):
+class DecisionLogCase(unittest.TestCase):
     def test_writes_jsonl_and_never_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
-            log = md.ShadowLog(Path(tmp) / "sub" / "s.jsonl")
+            log = md.DecisionLog(Path(tmp) / "sub" / "s.jsonl")
             log.write("recall", {"sid": "s1", "after": ["a"]})
             lines = (Path(tmp) / "sub" / "s.jsonl").read_text(encoding="utf-8").strip().split("\n")
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["kind"], "recall")
 
     def test_bad_path_is_swallowed(self):
-        log = md.ShadowLog(Path("/proc/definitely/not/writable.jsonl"))
+        log = md.DecisionLog(Path("/proc/definitely/not/writable.jsonl"))
         for _ in range(5):
             log.write("x", {"a": 1})       # 不许抛
         self.assertGreaterEqual(log.errors, 1)
@@ -358,7 +358,6 @@ class OffParityCase(unittest.TestCase):
         cfg = md.resolve_config(S())            # 等价于「用户什么都没配」
         self.assertFalse(cfg.enabled)
         self.assertFalse(cfg.ready)
-        self.assertTrue(cfg.shadow, "影子模式默认开（第一次开启也不会立刻改行为）")
 
     def test_ready_predicate_matrix(self):
         rows = [

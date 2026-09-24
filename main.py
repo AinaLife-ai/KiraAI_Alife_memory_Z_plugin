@@ -499,10 +499,10 @@ class AlifeMemoryPlugin(BasePlugin):
         try:
             mgr = getattr(self.ctx, "provider_mgr", None)
             try:
-                shadow = Path(get_data_path()) / "memory_jev_shadow.jsonl"
+                log_path = Path(get_data_path()) / "memory_jev_decisions.jsonl"
             except Exception:
-                shadow = None
-            self.decisions = Decisions(self.settings, mgr, shadow)
+                log_path = None
+            self.decisions = Decisions(self.settings, mgr, log_path)
             self.reranker = Reranker(
                 getattr(self.settings, "rerank_model", "") or "",
                 mgr,
@@ -510,13 +510,12 @@ class AlifeMemoryPlugin(BasePlugin):
                 (getattr(self.settings, "rerank_timeout_ms", 1500) or 1500) / 1000.0,
             )
             if getattr(self, "engine", None) is not None:
-                self.engine.decisions = self.decisions   # 引擎侧影子记录用
+                self.engine.decisions = self.decisions   # 引擎侧决策留痕用
             if self.decisions.ready:
                 logger.info(
-                    "[记忆·Z] JEV 已启用（模型 %s · 端点 %s · %s）",
+                    "[记忆·Z] JEV 已启用（模型 %s · 端点 %s）",
                     self.decisions.cfg.model,
                     self.decisions.cfg.base_url,
-                    "影子模式（只记录）" if self.decisions.shadow else "生效模式",
                 )
         except Exception:
             logger.debug("[记忆·Z] JEV/重排初始化失败（按不可用处理）", exc_info=True)
@@ -756,7 +755,7 @@ class AlifeMemoryPlugin(BasePlugin):
         self.engine = Engine(
             self.store, self.runtime_settings, self.model_call, self.embed, self.notice
         )
-        self.engine.decisions = getattr(self, "decisions", None)   # v2.18.74 影子记录用
+        self.engine.decisions = getattr(self, "decisions", None)   # v2.18.74 决策留痕用
         # ★ 2026-09-19：压缩完成 ⇒ 解除该会话的「已给过」压制 ✓
         #   seen 只记得"我给过" ✗ 不知道上下文是否已被压掉 ⇒ 压缩后放行 ✓
         #   （可选回调 + 内部全包异常 ✓ 绝不影响压缩本身 ✓）
@@ -1517,7 +1516,6 @@ class AlifeMemoryPlugin(BasePlugin):
 
         三条安全线（逐条可测）：
         1. 全关 ⇒ 立即返回（一次属性判断，无 IO）
-        2. 影子模式 ⇒ 只写日志、**不写缓存** ⇒ 行为与之前逐字节一致
         3. 任何失败/超时 ⇒ 不写缓存 ⇒ 注入保持原有顺序
         """
         if cfg is None or not query.strip() or scope == "session":
@@ -1574,14 +1572,6 @@ class AlifeMemoryPlugin(BasePlugin):
             revision = await self.store.call("revision")
         except Exception:
             revision = None
-        if getattr(cfg, "jev_shadow", True):
-            decisions = getattr(self, "decisions", None)
-            if decisions is not None:
-                decisions.log.write("recall", {
-                    "sid": sid, "query": query[:200],
-                    "before": [k for k, _t in items], "after": list(order),
-                    "tokens": decisions.tokens, "calls": decisions.calls})
-            return
         self._order_cache[mkey] = {"rev": revision, "order": list(order), "trigger": trigger}
         if len(self._order_cache) > 256:
             self._order_cache.clear()
