@@ -1023,7 +1023,12 @@ class Engine:
             if keep_ids:
                 logger.info("[记忆·Z] JEV 摘出 %d 条不具备合并必要的事实（保持原样）", len(keep_ids))
         if len(out) != len(verdicts):
-            logger.info("[记忆·Z] JEV 合并路由：%d 组 → %d 个动作", len(verdicts), len(out))
+            _merged = sum(len(v.get("source_ids") or []) - 1 for _g, v in out
+                          if v.get("action") != "drop")
+            _dropped = sum(len(v.get("source_ids") or []) for _g, v in out
+                           if v.get("action") == "drop")
+            logger.info("[记忆·Z] JEV·合并 %d 组 → 并入 %d 条、回收站 %d 条（%d tok）",
+                        len(verdicts), max(_merged, 0), _dropped, decisions.tokens)
         return out
 
     async def jev_apply_importance(self, facts, cfg):
@@ -1062,7 +1067,16 @@ class Engine:
             if mapped < current:        # ★ 只压不抬（绝不自增强）
                 item["importance"] = mapped
             out.append(item)
-        logger.info("[记忆·Z] JEV 定级：%d 条事实重要度已由决策模型设定", len(out))
+        _down = []
+        for _i in range(len(facts)):
+            _lv = levels.get(str(_i))
+            _mv = importance_of(_lv) if _lv else None
+            if _mv is not None:              # 核心/重要/一般 ⇒ None（不写回，不进日志）
+                _down.append((_lv, _mv))
+        logger.info("[记忆·Z] JEV·定级 下调 %d/%d 条（%s）（%d tok）",
+                    len(_down), len(facts),
+                    "、".join("%s→%d" % (_lv, _mv) for _lv, _mv in _down[:4]) or "无",
+                    decisions.tokens)
         return out
 
     async def jev_audit_prescreen(self, candidates, cfg):
@@ -1084,10 +1098,26 @@ class Engine:
             return None
         pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
                  for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+        # ★ 确定性兜底：词面高度相似的对**直接算可疑**。
+        #   实测 JEV 会漏掉"明显重复"（花生过敏 / 不能吃花生 ⇒ 返回空 ✗），
+        #   而"无可疑 ⇒ 跳过审计"如果漏了，就会把该审的跳过去 ✗ ⇒ 先规则兜一层。
+        idx: set[int] = set()
+        try:
+            from .retrieval import similarity as _sim
+
+            for i in range(len(texts)):
+                for j in range(i + 1, len(texts)):
+                    # min_overlap=2：中文短词（花生/香菜）才不会被过滤掉，
+                    # 实测分离：重复 0.33、重复+补充 1.00、无关/矛盾 0.00
+                    if _sim(texts[i], texts[j], min_overlap=2) >= 0.25:
+                        idx.add(i)
+                        idx.add(j)
+        except Exception:
+            logger.debug("[记忆·Z] 审计预筛：词面兜底不可用（忽略）", exc_info=True)
         hot = await decisions.audit_prescreen(pairs)
         if hot is None:
-            return None
-        idx: set[int] = set()
+            # JEV 不可用 ⇒ 只用词面兜底结果；都没有 ⇒ 走原逻辑（不跳过）
+            return [candidates[i].get("id") for i in sorted(idx) if i < len(candidates)] or None
         for key in hot:
             m = _re.match(r"p(\d+)_(\d+)$", str(key))
             if m:
@@ -1480,8 +1510,8 @@ class Engine:
             hot = set(suspicious)
             narrowed = [f for f in candidates if f.get("id") in hot]
             if narrowed and len(narrowed) < len(candidates):
-                logger.info("[记忆·Z] JEV 预筛：%d 条 → 只送 %d 条可疑事实给审计模型",
-                            len(candidates), len(narrowed))
+                logger.info("[记忆·Z] JEV·预筛 %d 条 → 只送 %d 条可疑事实给审计模型（%d tok）",
+                            len(candidates), len(narrowed), decisions.tokens)
                 candidates = narrowed
                 fact_aliases = {"f%d" % (i + 1): fact["id"]
                                 for i, fact in enumerate(candidates)}
@@ -1786,6 +1816,17 @@ class Engine:
                     else ""
                 )
                 try:
+                    # v2.18.74：应用前**重读这一组**拿最新 revision ✗
+                    # （并发编辑会 bump revision ⇒ edit 报 "record changed;
+                    #   reload before saving" ⇒ 整组被跳过、且前端毫无痕迹 ✗）
+                    try:
+                        _fresh = await self.store.call(
+                            "facts_for_merge", ids=[r["id"] for r in group]
+                        )
+                        if _fresh and len(_fresh) == len(group):
+                            group = _fresh
+                    except Exception:
+                        pass
                     action = verdict.get("action", "merge")
                     # 跨类别时先把全组统一到目标类别（合并本身要求同主体同类别）
                     unified = str(verdict.get("category") or "").strip()
@@ -1895,10 +1936,18 @@ class Engine:
                     )
                 except Exception as exc:
                     # A concurrent edit must not leave the group hidden forever.
+                    detail_exc = failure_detail(exc)
+                    self._merge_failed_groups = getattr(self, "_merge_failed_groups", 0) + 1
                     logger.warning(
-                        "[记忆·Z] 一组事实合并失败（%s），已恢复可见",
-                        failure_detail(exc),
+                        "[记忆·Z] 一组事实合并失败（%s），已恢复可见", detail_exc
                     )
+                    # v2.18.74：失败**留痕**（以前只有日志 ⇒ 前端任务栏看不到明细 ✗）
+                    items.append({
+                        "kind": "fact",
+                        "target": group[0]["id"] if group else "",
+                        "action": "keep",
+                        "note": "合并失败：%s（已恢复可见，稍后自动重试）" % detail_exc,
+                    })
                     await self.store.call(
                         "mark_merge_pending", [row["id"] for row in group], 0
                     )
@@ -2216,11 +2265,15 @@ class Engine:
             try:
                 merged = await self.merge_facts(job["sid"], job["id"])
                 job_items = await self.store.call("job_items", job["id"])
+                failed = getattr(self, "_merge_failed_groups", 0)
+                self._merge_failed_groups = 0
                 detail = "合并 %s 组重复事实（%s 条并入）" % (
                     merged,
                     sum(1 for item in job_items if item["action"] == "merged"),
                 )
-                if await self._quiet_automatic(job, detail):
+                if failed:
+                    detail += "；%d 组因并发编辑失败，已恢复可见并留痕" % failed
+                if not failed and await self._quiet_automatic(job, detail):
                     await self.store.call("drop_job", job["id"])
                     continue
                 await self.store.call("finish", job["id"], "completed", detail)

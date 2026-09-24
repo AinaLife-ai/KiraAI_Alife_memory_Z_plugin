@@ -1553,6 +1553,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
             return
         order = None
+        tokens0 = getattr(getattr(self, "decisions", None), "tokens", 0)
         reranker = getattr(self, "reranker", None)
         if rr_on and reranker is not None and reranker.ready:
             order = await reranker.rank(query, items)
@@ -1572,6 +1573,9 @@ class AlifeMemoryPlugin(BasePlugin):
             revision = await self.store.call("revision")
         except Exception:
             revision = None
+        used = getattr(getattr(self, "decisions", None), "tokens", 0) - tokens0
+        logger.info("[记忆·Z] JEV·召回 %d 条候选 → 挑出 %d 条优先注入（%d tok）",
+                    len(items), len(order), used)
         self._order_cache[mkey] = {"rev": revision, "order": list(order), "trigger": trigger}
         if len(self._order_cache) > 256:
             self._order_cache.clear()

@@ -5,6 +5,13 @@ import json
 import sys
 from pathlib import Path
 
+# 字段级提示语（前端占位/说明）——不写的话宿主会显示通用占位（如「使用默认向量模型」）易误导 ✗
+_MODEL_HINTS = {
+    "jev_model": "留空 = 不启用 JEV（其它功能照常）。请选择在「设置 → 提供商」注册好的类 JEV 决策模型。",
+    "rerank_model": "留空 = 不重排（使用内置排序）。请选择在提供商里注册好的 Rerank 模型。",
+    "embedding_model": "留空 = 不启用向量检索。请选择在提供商里注册好的向量模型。",
+}
+
 root = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("contracts", root / "contracts.py")
 module = importlib.util.module_from_spec(spec)
@@ -172,6 +179,8 @@ for key, p in schema["properties"].items():
             "embedding_model": "embedding",
             "rerank_model": "rerank",
         }.get(key, "llm")
+    if key in _MODEL_HINTS:
+        field["hint"] = _MODEL_HINTS[key]
     fields[key] = field
 (root / "schema.json").write_text(
     json.dumps(
