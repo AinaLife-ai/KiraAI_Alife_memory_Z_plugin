@@ -1093,12 +1093,14 @@ class Engine:
             return None
         if not getattr(cfg, "jev_audit", False) or not decisions.ready:
             return None
-        texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:12]
+        # v2.18.74：覆盖面放大到 14 条（B 项）——更多对子被真正筛过，
+        # 才敢在"无发现"时跳过审计；单次成本仍只 ~9k token ≈ $0.0004 ✓
+        texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:14]
         if len(texts) < 2:
             return None
         all_pairs = len(texts) * (len(texts) - 1) // 2
         pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
-                 for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+                 for i in range(len(texts)) for j in range(i + 1, len(texts))][:91]
         # 批次大时对子会被截断 ⇒ 「没发现可疑」不等于「整批干净」✗
         # 截断时绝不跳过审计模型（会漏掉没筛到的那些对）
         self._audit_prescreen_complete = len(pairs) >= all_pairs

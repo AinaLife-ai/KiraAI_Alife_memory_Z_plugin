@@ -833,6 +833,11 @@ class AlifeMemoryPlugin(BasePlugin):
         才带回来，既不丢连续性，也不每轮把整库倒进上下文。
         """
         pinned = []
+        # v2.18.74：JEV 开启时**扩大候选池**（让词面零重合但语义相关的事实也能进池），
+        # 再由注入点的 JEV 步骤筛选回 top_k ⇒ 覆盖面更大、注入 token 反而更少 ✓
+        # 关闭 JEV 时 _jev_pool = 1 ⇒ 与今天逐字节一致 ✓
+        _jev_pool = 3 if (getattr(cfg, "jev_enabled", False)
+                          and getattr(cfg, "jev_recall", False)) else 1
         for category in ("commitment", "preference", "profile"):
             pinned.extend(
                 await self.store.call(
@@ -840,7 +845,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     sid,
                     subject="",
                     category=category,
-                    limit=max(2, cfg.top_k),
+                    limit=max(2, cfg.top_k) * _jev_pool,
                     offset=0,
                     global_scope=cfg.recall_scope == "global",
                     users=users,
@@ -862,7 +867,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     sid,
                     subject=entity,
                     category="",
-                    limit=cfg.top_k,
+                    limit=cfg.top_k * _jev_pool,
                     offset=0,
                     global_scope=cfg.recall_scope == "global",
                     users=users,
@@ -881,7 +886,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     sid,
                     subject="",
                     category="",
-                    limit=cfg.top_k * 2,
+                    limit=cfg.top_k * 2 * _jev_pool,
                     offset=0,
                     global_scope=cfg.recall_scope == "global",
                     users=users,
