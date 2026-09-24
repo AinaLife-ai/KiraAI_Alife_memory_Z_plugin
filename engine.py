@@ -434,6 +434,9 @@ def audit_summary(counts):
     if not isinstance(counts, dict):
         return "本次审计 %s 条事实" % counts
     scanned = counts.get("scanned", 0)
+    if counts.get("screened_skip"):
+        # ★ 以前这里会写成「全部保留」，看着像"审过了"，其实是**跳过了模型** ✗ 容易误判
+        return "本次审计 %d 条：JEV 预筛判定无可疑 ⇒ 跳过模型调用（保持原样）" % scanned
     parts = []
     if counts.get("correct"):
         parts.append("修正 %d" % counts["correct"])
@@ -1006,7 +1009,8 @@ class Engine:
                 "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
                 "tokens": decisions.tokens})
             if not merge_ids and not drop_ids:
-                logger.info("[记忆·Z] JEV 认定该组 %d 条事实不是同一件事，保持原样", len(keep_ids))
+                logger.info("[记忆·Z] JEV·合并 该组 %d 条判定为「不是同一件事」⇒ 保持原样",
+                        len(keep_ids))
                 continue                                  # 全组不动 ⇒ 这组不动作
             if merge_ids:
                 merged_verdict = dict(verdict)
@@ -1021,7 +1025,8 @@ class Engine:
                     "reason": "JEV：低重要度重复，进回收站（可还原）",
                 }))
             if keep_ids:
-                logger.info("[记忆·Z] JEV 摘出 %d 条不具备合并必要的事实（保持原样）", len(keep_ids))
+                logger.info("[记忆·Z] JEV·合并 摘出 %d 条无需合并的事实 ⇒ 保持原样",
+                            len(keep_ids))
         if len(out) != len(verdicts):
             _merged = sum(len(v.get("source_ids") or []) - 1 for _g, v in out
                           if v.get("action") != "drop")
@@ -1442,9 +1447,15 @@ class Engine:
         if row:
             vector, model = await self.embed(row["summary"], cfg)
             if vector and self.settings() == cfg:
-                await self.store.call(
-                    "set_vector", record_id, model, row["revision"], vector
-                )
+                # ★ v2.20.1：embedding 是**慢调用**，期间记录可能被并发写
+                #   ⇒ 用旧 revision 写 vector 会 Conflict ✗ ⇒ 写入前重读一次 ✓
+                fresh = await self.store.call("get", record_id)
+                if fresh:
+                    await self.store.call(
+                        "set_vector", record_id, model, fresh["revision"], vector
+                    )
+                else:
+                    logger.debug("[记忆·Z] 索引跳过：记录已不存在（%s）", record_id)
 
     async def audit(self, sid, job_id=None):
         cfg = self.settings()
@@ -1507,10 +1518,11 @@ class Engine:
                  "source_ids": [f.get("id")], "reason": "JEV 预筛：本批无可疑项"}
                 for f in candidates if f.get("id")
             ]}
-            counts = {"scanned": len(candidates)}
+            counts = {"scanned": len(candidates), "screened_skip": True}
             if self.settings() == cfg:
                 counts.update(await self.store.call("audit", candidates, keep_all, job_id or ""))
-            logger.info("[记忆·Z] JEV 预筛：本批 %d 条无可疑项，已跳过审计模型", len(candidates))
+            logger.info("[记忆·Z] JEV·预筛 本批 %d 条无可疑项 ⇒ 已跳过审计模型（省一次调用）",
+                        len(candidates))
             return counts
         if suspicious:
             # 只把"涉及可疑对"的事实送审计模型（其余留到下一轮抽查），省输入 token
@@ -1525,10 +1537,10 @@ class Engine:
                                 for i, fact in enumerate(candidates)}
         elif suspicious is not None:
             if not complete:
-                logger.info("[记忆·Z] JEV 预筛：%d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
+                logger.info("[记忆·Z] JEV·预筛 %d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
                             len(candidates))
             else:
-                logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
+                logger.info("[记忆·Z] JEV·预筛 本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
@@ -2162,7 +2174,24 @@ class Engine:
             if action == "split" and patch.get("summary"):
                 patch.pop("active")  # split：约束那段留在常驻
             if patch:
-                await self.store.call("edit", "record", record_id, row["revision"], patch, reason)
+                # ★ v2.20.1：整理是**长任务**（先跑模型再逐条应用）⇒ 期间记录可能被并发写
+                #   旧 revision 会 Conflict ✗ ⇒ 冲突时重读再试一次（仍失败则照旧抛出 ✓ 不吞错）
+                _edit_ok = False          # ★ 别用 applied：它是本函数的**应用计数** ✗（撞名会污染计数）
+                for _try in range(2):
+                    try:
+                        await self.store.call(
+                            "edit", "record", record_id, row["revision"], patch, reason)
+                        _edit_ok = True
+                        break
+                    except ValueError as exc:            # Conflict ⊂ ValueError
+                        if _try or "reload before saving" not in str(exc):
+                            raise
+                        fresh = await self.store.call("get", record_id)
+                        if not fresh:
+                            raise
+                        row = fresh
+                if not _edit_ok:
+                    logger.warning("[记忆·Z] 整理未应用（记录变化频繁）：%s", record_id)
             facts = []
             for fact in verdict.get("facts", []):
                 facts.append(

@@ -254,6 +254,38 @@ class DecisionsCase(unittest.TestCase):
                          "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
+class MixedRefineCase(unittest.TestCase):
+    """★ 一次调用同时给「事实 + 档案」两组候选打分（省一次往返）。
+
+    事实通道此前完全没经过 JEV ✗，而扩池又把事实池放大 3 倍
+    ⇒ 必须能在同一次调用里把两组一起收回来，否则注入 token 会变多 ✗
+    """
+
+    def test_mixed_candidate_call_returns_both_groups(self):
+        calls = {"n": 0}
+
+        def fake_post(payload, timeout):
+            calls["n"] += 1
+            qs = payload.get("questions") or {}
+            ans = {}
+            for k in qs:                      # 事实高分、档案低分（够分开即可）
+                ans[k] = {"type": "noul", "noul": 0.9 if k.startswith("f") else 0.2}
+            return {"answers": ans, "usage": {"input_tokens": 10}}
+
+        c = md.JevClient("https://x.invalid", "k", "jev-latest")
+        c._post_sync = fake_post                # type: ignore[assignment]
+        d = md.Decisions(md.JevConfig(enabled=True, base_url="https://x.invalid",
+                                      api_key="k", model="jev-latest"), None, None)
+        d._client = c
+        items = [("f%d" % i, "事实%d" % i) for i in range(4)] + \
+                [("r%d" % i, "档案%d" % i) for i in range(3)]
+        out = run(d.recall_filter("看看这些", items, want_trigger=True))
+        self.assertEqual(calls["n"], 1, "两组候选必须**一次调用**完成 ✗")
+        keys = [k for k, _s in (out or [])]
+        self.assertTrue(any(k.startswith("f") for k in keys), "事实组必须被打分")
+        self.assertTrue(any(k.startswith("r") for k in keys), "档案组必须被打分")
+        self.assertGreaterEqual(min(s for _k, s in out), 0.0)
+
 class ProviderCompatCase(unittest.TestCase):
     """★ 任意提供商类型下注册的 JEV 都要能连上（用户要求）。"""
 
@@ -462,3 +494,34 @@ class OffParityCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class AuxRebuildCase(unittest.TestCase):
+    """★ 回归守护：配置开启后**重建**必须能拿到就绪的决策层。
+
+    用户实测的问题：面板里开了配置，但 self.decisions 还是开启前构建的（ready=False）
+    ⇒ 所有 JEV 入口静默 return，后台一行日志都没有 ✗
+    修法是"配置变化后重建"（_build_aux / _ensure_aux）。这里守住机制本身：
+    同样的构造代码，配置开了就必须 ready；关了就必须 not ready（且不抛异常）。
+    """
+
+    class _S:
+        def __init__(self, **kw):
+            base = dict(jev_enabled=False, jev_model="", jev_base_url="", jev_api_key="",
+                        jev_model_name="", jev_timeout_ms=5000, jev_sample=1.0)
+            base.update(kw)
+            for k, v in base.items():
+                setattr(self, k, v)
+
+    def test_rebuild_after_enabling_config(self):
+        off = md.Decisions(self._S(), None, None)
+        self.assertFalse(off.ready, "未启用 ⇒ 未就绪")
+        on = md.Decisions(self._S(jev_enabled=True, jev_api_key="k",
+                                  jev_model_name="jev-latest"), None, None)
+        self.assertTrue(on.ready, "启用且密钥解析成功 ⇒ 必须就绪（否则就是静默失效 ✗）")
+        self.assertTrue(on.cfg.base_url.startswith("http"))
+
+    def test_ready_requires_key(self):
+        """开了但密钥没解析到 ⇒ 未就绪（此时应打 warning 提示，而不是静默 ✗）。"""
+        d = md.Decisions(self._S(jev_enabled=True), None, None)
+        self.assertFalse(d.ready)

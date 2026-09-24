@@ -175,3 +175,12 @@ class PacingCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditSkipWordingCase(unittest.TestCase):
+    """★ JEV 预筛跳过时，任务详情必须写「跳过」，不能写成「全部保留」✗（会让人以为审过了）。"""
+
+    def test_skip_marker_changes_wording(self):
+        e = importlib.import_module("alife_pacing_test.engine")
+        self.assertIn("跳过模型", e.audit_summary({"scanned": 4, "screened_skip": True}))
+        self.assertIn("全部保留", e.audit_summary({"scanned": 4}))
