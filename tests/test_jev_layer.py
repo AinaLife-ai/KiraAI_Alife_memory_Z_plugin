@@ -254,6 +254,29 @@ class DecisionsCase(unittest.TestCase):
                          "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
+class PayloadShapeCase(unittest.TestCase):
+    """/v1/systemone 的请求体形状（实测约束，别改坏）。"""
+
+    def test_payload_never_includes_stream(self):
+        """★ 实测：body 里带 "stream" ⇒ HTTP 400 ✗（systemone 不接受该字段）。
+
+        而 `Accept: text/event-stream` 头是无害的（实测 200）。
+        所以请求体必须**只有** model / state / questions 三个键。
+        """
+        captured = {}
+        c = md.JevClient("https://example.invalid", "k", "jev-latest")
+
+        def fake(payload, timeout):
+            captured.update(payload)
+            return {"answers": {}, "usage": {}}
+
+        c._post_sync = fake                                   # type: ignore[assignment]
+        run(c.call("state", {"q": {"type": "noul", "instructions": "x",
+                                  "criteria": {"true": "a", "false": "b"}}}))
+        self.assertEqual(set(captured), {"model", "state", "questions"})
+        self.assertNotIn("stream", captured, "带了 stream 字段会 400 ✗")
+
+
 class DecisionLogCase(unittest.TestCase):
     def test_writes_jsonl_and_never_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
