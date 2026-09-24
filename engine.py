@@ -1518,7 +1518,8 @@ class Engine:
             narrowed = [f for f in candidates if f.get("id") in hot]
             if narrowed and len(narrowed) < len(candidates):
                 logger.info("[记忆·Z] JEV·预筛 %d 条 → 只送 %d 条可疑事实给审计模型（%d tok）",
-                            len(candidates), len(narrowed), decisions.tokens)
+                            len(candidates), len(narrowed),
+                            getattr(getattr(self, "decisions", None), "tokens", 0))
                 candidates = narrowed
                 fact_aliases = {"f%d" % (i + 1): fact["id"]
                                 for i, fact in enumerate(candidates)}

@@ -1701,7 +1701,6 @@ class AlifeMemoryPlugin(BasePlugin):
                 keepset = set(keep)
                 rows = [r for r in rows
                         if str(r.get("id") or r.get("rid") or r.get("short") or "") in keepset]
-                logged_strict = len(keep)
         rank = {k: i for i, (k, _s) in enumerate(ordered)}
         out = sorted(rows, key=lambda r: rank.get(
             str(r.get("id") or r.get("rid") or r.get("short") or ""), len(rank) + 1)
