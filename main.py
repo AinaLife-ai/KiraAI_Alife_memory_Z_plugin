@@ -3641,6 +3641,15 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
+        # v2.18.74：主动召回（overview：一批没见过的事实）也吃 JEV。
+        # 这里排序价值最直接：取回的事实会被**标记为已见** ⇒
+        # 顺序决定「模型先看到哪些、哪些被这轮消耗掉」✓ 只排不删 ✓
+        try:
+            _q = " ".join(capture_text(text_of(m)) for m in event_messages(event)).strip()
+        except Exception:
+            _q = ""
+        if _q:
+            rows = await self._tool_refine(_q, rows, self.settings)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(
