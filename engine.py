@@ -1786,6 +1786,17 @@ class Engine:
                     else ""
                 )
                 try:
+                    # v2.18.74：应用前**重读这一组**拿最新 revision ✗
+                    # （并发编辑会 bump revision ⇒ edit 报 "record changed;
+                    #   reload before saving" ⇒ 整组被跳过、且前端毫无痕迹 ✗）
+                    try:
+                        _fresh = await self.store.call(
+                            "facts_for_merge", ids=[r["id"] for r in group]
+                        )
+                        if _fresh and len(_fresh) == len(group):
+                            group = _fresh
+                    except Exception:
+                        pass
                     action = verdict.get("action", "merge")
                     # 跨类别时先把全组统一到目标类别（合并本身要求同主体同类别）
                     unified = str(verdict.get("category") or "").strip()
@@ -1895,10 +1906,18 @@ class Engine:
                     )
                 except Exception as exc:
                     # A concurrent edit must not leave the group hidden forever.
+                    detail_exc = failure_detail(exc)
+                    self._merge_failed_groups = getattr(self, "_merge_failed_groups", 0) + 1
                     logger.warning(
-                        "[记忆·Z] 一组事实合并失败（%s），已恢复可见",
-                        failure_detail(exc),
+                        "[记忆·Z] 一组事实合并失败（%s），已恢复可见", detail_exc
                     )
+                    # v2.18.74：失败**留痕**（以前只有日志 ⇒ 前端任务栏看不到明细 ✗）
+                    items.append({
+                        "kind": "fact",
+                        "target": group[0]["id"] if group else "",
+                        "action": "keep",
+                        "note": "合并失败：%s（已恢复可见，稍后自动重试）" % detail_exc,
+                    })
                     await self.store.call(
                         "mark_merge_pending", [row["id"] for row in group], 0
                     )
@@ -2216,11 +2235,15 @@ class Engine:
             try:
                 merged = await self.merge_facts(job["sid"], job["id"])
                 job_items = await self.store.call("job_items", job["id"])
+                failed = getattr(self, "_merge_failed_groups", 0)
+                self._merge_failed_groups = 0
                 detail = "合并 %s 组重复事实（%s 条并入）" % (
                     merged,
                     sum(1 for item in job_items if item["action"] == "merged"),
                 )
-                if await self._quiet_automatic(job, detail):
+                if failed:
+                    detail += "；%d 组因并发编辑失败，已恢复可见并留痕" % failed
+                if not failed and await self._quiet_automatic(job, detail):
                     await self.store.call("drop_job", job["id"])
                     continue
                 await self.store.call("finish", job["id"], "completed", detail)
