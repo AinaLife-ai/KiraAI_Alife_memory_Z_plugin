@@ -985,7 +985,7 @@ class Engine:
         if not getattr(cfg, "jev_merge", False) or not decisions.ready:
             return verdicts
         _tok0 = getattr(decisions, "tokens", 0)      # ★ 用**本次增量**，别打累计值 ✗（会被误读成单次开销）
-        n_same = n_diff = 0
+        n_same = n_diff = n_inherit = 0
         out = []
         for group, verdict in verdicts:
             action = str(verdict.get("action") or "merge")
@@ -1003,14 +1003,17 @@ class Engine:
             if not route:
                 out.append((group, verdict))
                 continue
-            merge_ids = [fid for fid, _ in cands if route.get(fid) == "merge"]
+            # inherit = 判不准 ⇒ **保持大模型的原判定**（不干预 ✓）
+            merge_ids = [fid for fid, _ in cands if route.get(fid) in ("merge", "inherit")]
             drop_ids = [fid for fid, _ in cands if route.get(fid) == "drop"]
-            keep_ids = [fid for fid, _ in cands if route.get(fid) not in ("merge", "drop")]
+            keep_ids = [fid for fid, _ in cands
+                        if route.get(fid) not in ("merge", "drop", "inherit")]
             decisions.log.write("merge", {
                 "target": verdict["target_id"], "primary": str(target["content"])[:160],
                 "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
                 "tokens": decisions.tokens})
-            n_same += len(merge_ids) + len(drop_ids)
+            n_inherit += sum(1 for fid, _ in cands if route.get(fid) == "inherit")
+            n_same += sum(1 for fid, _ in cands if route.get(fid) == "merge") + len(drop_ids)
             n_diff += len(keep_ids)
             if not merge_ids and not drop_ids:
                 logger.info("[记忆·Z] JEV·合并 该组 %d 条判定为「不是同一件事」⇒ 保持原样",
@@ -1037,9 +1040,9 @@ class Engine:
             _dropped = sum(len(v.get("source_ids") or []) for _g, v in out
                            if v.get("action") == "drop")
             logger.info(
-                "[记忆·Z] JEV·合并 %d 组：判定「同一件事」%d 条 /「不同事」%d 条 "
+                "[记忆·Z] JEV·合并 %d 组：判定「同一件事」%d 条 /「不同事」%d 条 / 交回大模型 %d 条 "
                 "⇒ 并入 %d 条、回收站 %d 条（本次 %d tok）",
-                len(verdicts), n_same, n_diff, max(_merged, 0), _dropped,
+                len(verdicts), n_same, n_diff, n_inherit, max(_merged, 0), _dropped,
                 getattr(decisions, "tokens", 0) - _tok0)
         return out
 

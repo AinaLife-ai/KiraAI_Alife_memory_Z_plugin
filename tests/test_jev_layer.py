@@ -548,3 +548,28 @@ class AuxRebuildCase(unittest.TestCase):
         """开了但密钥没解析到 ⇒ 未就绪（此时应打 warning 提示，而不是静默 ✗）。"""
         d = md.Decisions(self._S(jev_enabled=True), None, None)
         self.assertFalse(d.ready)
+
+
+class MergeInheritCase(unittest.TestCase):
+    """★ 第四态 inherit：判不准的一律**交回大模型**（= 原行为）。
+
+    实测依据（2026-09-25）：想加的「同话题」判据不可靠 ——
+      同主题不同角度 0.39 vs 互不相干 0.36（只差 0.03 ✗）
+    ⇒ 用它会把这个区间的无关事实也合进来（稀释 ✗）
+    ⇒ 改为：只在两端出手（明确同/明确异），中间带交回大模型 ✓
+    """
+
+    def test_ambiguous_band_inherits(self):
+        for same in (0.20, 0.30, 0.40, 0.49):
+            self.assertEqual(md.route_merge_soft(same, 0.85, 0.87), "inherit",
+                             "模糊带必须交回大模型，而不是替它决定")
+
+    def test_clearly_different_still_skips_llm(self):
+        for same in (0.05, 0.12):
+            self.assertEqual(md.route_merge_soft(same, 0.85, 0.87), "keep",
+                             "明确无关 ⇒ 省掉大模型调用")
+
+    def test_confident_cases_unchanged(self):
+        self.assertEqual(md.route_merge_soft(0.68, 0.77, 0.58), "merge")
+        self.assertEqual(md.route_merge_soft(0.94, 0.11, 0.35), "drop")
+        self.assertEqual(md.route_merge_soft(None, 0.9, 0.1), "keep")

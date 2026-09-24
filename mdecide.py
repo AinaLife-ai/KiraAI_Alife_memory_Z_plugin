@@ -424,6 +424,23 @@ def route_merge(same: Optional[float], new: Optional[float], dilute: Optional[fl
     return "keep"                          # 会稀释主事实 ⇒ 不动（防稀释优先）
 
 
+# 「不是同一件事」那一侧的判法（实测标定，2026-09-25）：
+#   · 明确无关：same ≤ 0.12 ⇒ 直接 keep（省掉大模型 ✓）
+#   · 模糊地带（0.12 < same < 0.50）⇒ **交回大模型**（= 原行为 ✓）
+#     为什么不用"同话题"判据：实测同主题不同角度 0.39 / 互不相干 0.36 ⇒ 只差 0.03 ✗
+#     用它会把这个区间的**无关事实也合进来**（正是要避开的稀释 ✗）
+SAME_LOW = 0.12
+
+
+def route_merge_soft(same, new, dilute):
+    """带第四态的路由：merge / drop / keep / **inherit**（判不准 ⇒ 交回大模型）。"""
+    if same is None:
+        return "keep"
+    if same >= SAME_HIGH:
+        return route_merge(same, new, dilute)
+    return "keep" if same <= SAME_LOW else "inherit"
+
+
 # ── 3) 重要度（写入时定级，进"重要度×2"的现有公式）──
 def build_importance(facts: list[tuple[str, str]]) -> dict:
     qs: dict = {}
@@ -598,7 +615,7 @@ class Decisions:
             dil = parse_noul(a, "dilute_" + key)
             if same is None or new is None:
                 return key, None
-            return key, route_merge(same, new, dil if dil is not None else 0.0)
+            return key, route_merge_soft(same, new, dil if dil is not None else 0.0)
 
         # ★ 顺序调用（不并发）：实测并发请求会互相干扰/被上游限流，
         #   同一候选单独问 3 次结果稳定（.88/.98/.58），并发时会被判成 drop ✗
