@@ -392,3 +392,4 @@ def test_merge_payload_evidence_switch(tmp_path):
             assert group["evidence"], "开启时证据不能为空"
         else:
             assert group["evidence"] == [], "关闭时不应附证据"
+
