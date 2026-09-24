@@ -393,3 +393,50 @@ def test_merge_payload_evidence_switch(tmp_path):
         else:
             assert group["evidence"] == [], "关闭时不应附证据"
 
+
+
+class JevClusterInvariants(unittest.TestCase):
+    """C 项：JEV 路由放宽「同类别」发现门槛 —— 三条不变式 + 一条效果。"""
+
+    @staticmethod
+    def clusters(rows, threshold, cross_threshold=0.0, jev_route=False):
+        # @staticmethod ⇒ 不传 self
+        return e.Engine._fact_clusters(rows, threshold, cross_threshold,
+                                       jev_route=jev_route)
+
+    @staticmethod
+    def row(i, subject, category, content):
+        return {"id": i, "subject": subject, "category": category,
+                "content": content, "summary": content, "sid": "s1", "deleted": 0}
+
+    def test_relaxation_merges_same_category_pair(self):
+        """效果：同主体同类别、词面中等相似 ⇒ 默认不并，放宽后并成一组。"""
+        from alife_merge_test.retrieval import similarity as _sim
+
+        a, b = "工作日吃素，周末不忌口", "工作日吃素"
+        sim = _sim(a, b, min_overlap=2)
+        self.assertGreaterEqual(sim, 0.2, "用例需有中等相似度（否则放宽也够不着）")
+        rows = [self.row(1, "用户", "preference", a),
+                self.row(2, "用户", "preference", b)]
+        thr = sim + 0.02                     # 默认门槛略高于相似度 ⇒ 不并
+        self.assertEqual(len(self.clusters(rows, thr)), 0, "默认门槛 ⇒ 不并")
+        self.assertEqual(len(self.clusters(rows, thr, jev_route=True)), 1,
+                         "放宽同类别门槛（×0.6）⇒ 并成一组")
+
+    def test_never_cross_subject(self):
+        """★ 不变式：跨主体绝不合并（即便开启 JEV 放宽）。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素"),
+                self.row(2, "朋友", "preference", "工作日吃素")]
+        self.assertEqual(len(self.clusters(rows, 0.1, jev_route=True)), 0)
+
+    def test_cross_category_threshold_untouched(self):
+        """★ 不变式：跨类别门槛不受放宽影响（cross_threshold=0 ⇒ 不跨）。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素"),
+                self.row(2, "用户", "plan", "工作日吃素")]
+        self.assertEqual(len(self.clusters(rows, 0.1, 0.0, jev_route=True)), 0)
+
+    def test_off_by_default_unchanged(self):
+        """★ 关闭 JEV（默认）⇒ 行为与放宽前完全一致。"""
+        rows = [self.row(1, "用户", "preference", "工作日吃素，周末不忌口"),
+                self.row(2, "用户", "preference", "工作日吃素")]
+        self.assertEqual(self.clusters(rows, 0.9), self.clusters(rows, 0.9, jev_route=False))
