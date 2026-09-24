@@ -1084,10 +1084,26 @@ class Engine:
             return None
         pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
                  for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+        # ★ 确定性兜底：词面高度相似的对**直接算可疑**。
+        #   实测 JEV 会漏掉"明显重复"（花生过敏 / 不能吃花生 ⇒ 返回空 ✗），
+        #   而"无可疑 ⇒ 跳过审计"如果漏了，就会把该审的跳过去 ✗ ⇒ 先规则兜一层。
+        idx: set[int] = set()
+        try:
+            from .retrieval import similarity as _sim
+
+            for i in range(len(texts)):
+                for j in range(i + 1, len(texts)):
+                    # min_overlap=2：中文短词（花生/香菜）才不会被过滤掉，
+                    # 实测分离：重复 0.33、重复+补充 1.00、无关/矛盾 0.00
+                    if _sim(texts[i], texts[j], min_overlap=2) >= 0.25:
+                        idx.add(i)
+                        idx.add(j)
+        except Exception:
+            logger.debug("[记忆·Z] 审计预筛：词面兜底不可用（忽略）", exc_info=True)
         hot = await decisions.audit_prescreen(pairs)
         if hot is None:
-            return None
-        idx: set[int] = set()
+            # JEV 不可用 ⇒ 只用词面兜底结果；都没有 ⇒ 走原逻辑（不跳过）
+            return [candidates[i].get("id") for i in sorted(idx) if i < len(candidates)] or None
         for key in hot:
             m = _re.match(r"p(\d+)_(\d+)$", str(key))
             if m:
