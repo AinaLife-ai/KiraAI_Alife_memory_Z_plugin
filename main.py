@@ -1585,6 +1585,56 @@ class AlifeMemoryPlugin(BasePlugin):
                     "，超时" if timed_out else "")
         return out
 
+    async def _tool_refine(self, query, rows, cfg):
+        """主动召回（查档案/看画像）的候选排序：**只排序、不删**。
+
+        与被动召回同一套判据（整批语义 + 0.15 阈值），但工具路径是"模型在等结果"，
+        少给可能让它反复换词重搜 ⇒ 宁可多给、只把最相关的排前面 ✓
+        超时/失败/未启用 ⇒ 原样返回（行为不变）✓
+        """
+        if not rows or not query or cfg is None:
+            return rows
+        if not bool(getattr(cfg, "jev_enabled", False)
+                    and getattr(cfg, "jev_recall", False)):
+            return rows
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not decisions.ready:
+            return rows
+        items = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("id") or r.get("rid") or r.get("short") or ""
+            txt = (r.get("content") or r.get("summary") or r.get("text")
+                   or r.get("preview") or "")
+            if rid and txt:
+                items.append((str(rid), str(txt)[:300]))
+        if len(items) < JEV_RECALL_MIN_CANDIDATES:
+            return rows
+        budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        t0 = time.time()
+        try:
+            scored = await asyncio.wait_for(
+                decisions.recall_filter(query, items, timeout=budget),
+                timeout=budget)
+        except asyncio.TimeoutError:
+            logger.info("[记忆·Z] JEV·档案 %d 条候选 → 超时，保持原顺序（%d ms）",
+                        len(items), int((time.time() - t0) * 1000))
+            return rows
+        except Exception:
+            logger.debug("[记忆·Z] JEV 档案精修失败（保持原顺序）", exc_info=True)
+            return rows
+        if not scored:
+            return rows
+        rank = {k: i for i, (k, _s) in enumerate(
+            sorted(scored, key=lambda kv: -(kv[1] or 0)))}
+        out = sorted(rows, key=lambda r: rank.get(
+            str(r.get("id") or r.get("rid") or r.get("short") or ""), len(rank) + 1)
+            if isinstance(r, dict) else len(rank) + 1)
+        logger.info("[记忆·Z] JEV·档案 %d 条候选 → 已按相关度重排（%d ms）",
+                    len(items), int((time.time() - t0) * 1000))
+        return out
+
     async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
@@ -3377,6 +3427,9 @@ class AlifeMemoryPlugin(BasePlugin):
                 packed.append(item)
             # 群名/账号完整形式整批只给一次：bot 之后要用/要汇报时从这里取
             result["items"] = packed
+            # v2.18.74：主动召回（查档案）也吃 JEV —— 只排序、不删 ✓
+            result["items"] = await self._tool_refine(
+                (prompt or keyword or "").strip(), result["items"], self.settings)
             if who:
                 result["who"] = who
             self.seen_window.remember(key, prompt or keyword, [r["id"] for r in raw_items])
