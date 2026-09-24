@@ -2497,10 +2497,31 @@ class Engine:
                                 fact.get("subject", ""), names
                             )
                         if self.settings() == cfg:
-                            await self.store.call("classify", row, output)
-                            await self.queue_fact_merges(
-                                row["sid"], job_started
-                            )
+                            # v2.18.74：应用前**重新读一次**源记录（模型调用期间可能已被整理），
+                            # 冲突时再重试一次 ⇒ 修掉"记忆归类几乎总是失败"✗（revision 竞态）
+                            applied = False
+                            for _try in range(2):
+                                fresh = await self.store.call("get", job["sid"])
+                                if not fresh:
+                                    break
+                                row = fresh
+                                try:
+                                    await self.store.call("classify", row, output)
+                                    applied = True
+                                    break
+                                except ValueError as exc:      # Conflict ⊂ ValueError
+                                    if "classification source changed" not in str(exc):
+                                        raise
+                                    if _try:
+                                        raise
+                                    logger.info(
+                                        "[记忆·Z] 归类源记录在判定期间被整理，"
+                                        "已重读后重试一次 ✓"
+                                    )
+                            if applied:
+                                await self.queue_fact_merges(
+                                    row["sid"], job_started
+                                )
                 elif job["kind"] == "rewrite":
                     counts = await self.redo_pending_rewrites(10**6, job["id"])
                     detail = (
