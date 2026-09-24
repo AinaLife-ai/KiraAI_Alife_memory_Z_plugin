@@ -434,6 +434,9 @@ def audit_summary(counts):
     if not isinstance(counts, dict):
         return "本次审计 %s 条事实" % counts
     scanned = counts.get("scanned", 0)
+    if counts.get("screened_skip"):
+        # ★ 以前这里会写成「全部保留」，看着像"审过了"，其实是**跳过了模型** ✗ 容易误判
+        return "本次审计 %d 条：JEV 预筛判定无可疑 ⇒ 跳过模型调用（保持原样）" % scanned
     parts = []
     if counts.get("correct"):
         parts.append("修正 %d" % counts["correct"])
@@ -1507,7 +1510,7 @@ class Engine:
                  "source_ids": [f.get("id")], "reason": "JEV 预筛：本批无可疑项"}
                 for f in candidates if f.get("id")
             ]}
-            counts = {"scanned": len(candidates)}
+            counts = {"scanned": len(candidates), "screened_skip": True}
             if self.settings() == cfg:
                 counts.update(await self.store.call("audit", candidates, keep_all, job_id or ""))
             logger.info("[记忆·Z] JEV 预筛：本批 %d 条无可疑项，已跳过审计模型", len(candidates))
