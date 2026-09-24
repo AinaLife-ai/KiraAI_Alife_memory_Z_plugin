@@ -1628,7 +1628,7 @@ class AlifeMemoryPlugin(BasePlugin):
         entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
         return bool(entry and entry.get("trigger"))
 
-    async def prewarm(self, sid, users, scope, query="", cfg=None):
+    async def prewarm(self, sid, users, scope, query="", cfg=None, jev=True):
         """预热：把「不随消息变化」的部分提前算进缓存。
 
         消息一到就调用（此时用户还在打字、消息还要走网络），
@@ -1644,7 +1644,9 @@ class AlifeMemoryPlugin(BasePlugin):
             )
             await self._prefetch_search(sid, users, scope, query, cfg)
             # v2.18.74：JEV/重排的顺序**只在这里算**（用户还在打字），注入时零成本 ✓
-            await self._prefetch_order(sid, users, scope, query, cfg)
+            # jev=False（预算用尽）时只跳过"要花钱的决策调用"，检索预热照常 ✓
+            if jev:
+                await self._prefetch_order(sid, users, scope, query, cfg)
         except Exception:
             logger.debug("[记忆·Z] 预热失败（不影响正常注入）", exc_info=True)
 
@@ -2084,11 +2086,17 @@ class AlifeMemoryPlugin(BasePlugin):
         if len(self._prewarm_seen) > 256:
             for key in sorted(self._prewarm_seen, key=self._prewarm_seen.get)[:128]:
                 self._prewarm_seen.pop(key, None)
-        if not self._jev_budget_ok(sid):
-            return                          # 预算用完 ⇒ 本次只跳过"要花钱的决策调用"
+        # ★ 宿主对每条消息都有 process_strategy：discard = bot 明确不会回应
+        #   ⇒ 这条消息连"预热"都不该做（用户实测：没被唤醒也在烧 JEV ✗）
+        strategy = getattr(event, "process_strategy", "buffer")
+        if strategy == "discard":
+            return
         _q = " ".join(capture_text(text_of(_m)) for _m in event_messages(event))
+        # JEV（要花钱的决策调用）另受每会话预算限制；启发层预热不受影响 ✓
+        jev_ok = self._jev_budget_ok(sid)
         asyncio.create_task(
-            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
+            self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg,
+                         jev=jev_ok)
         )
         # ★ 冷归档（P7）：长会话的兜底 —— 启动已跑过一次，这里按 6 小时节流补跑 ✓
         #   （内部节流 ✓ 真正干活在线程里 ✓ ⇒ **不阻塞对话** ✓）
