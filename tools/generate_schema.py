@@ -53,6 +53,20 @@ names = dict(
             "回忆提示词",
             "Bot可访问范围",
             "感知事实批量（×10）",
+        "启用 JEV 决策层（可选，默认关闭）",
+        "JEV 决策模型（在提供商里注册好的）",
+        "JEV 接口地址（可留空）",
+        "JEV API 密钥（可留空）",
+        "JEV 模型名（可留空）",
+        "JEV 超时（毫秒）",
+        "JEV 采样比例（1=全部）",
+        "JEV 用于召回筛选",
+        "JEV 用于合并路由",
+        "JEV 用于审计预筛",
+        "JEV 用于重要度定级",
+        "启用模型重排（可选，默认关闭）",
+        "重排模型（Rerank）",
+        "重排超时（毫秒）",
             "定时主动感知",
             "主动感知间隔（秒）",
             "主动感知随机偏移（秒）",
@@ -154,7 +168,10 @@ for key, p in schema["properties"].items():
         field["options"] = p["enum"]
     if key.endswith("_model"):
         field["type"] = "model_select"
-        field["model_type"] = "embedding" if key == "embedding_model" else "llm"
+        field["model_type"] = {
+            "embedding_model": "embedding",
+            "rerank_model": "rerank",
+        }.get(key, "llm")
     fields[key] = field
 (root / "schema.json").write_text(
     json.dumps(

@@ -966,6 +966,138 @@ class Engine:
                 return entity_id
         return value
 
+    # ── v2.18.74：JEV 决策（生效）──────────────────────────────
+    async def jev_apply_merge_route(self, verdicts, cfg):
+        """JEV 参与合并路由（**生效**）：merge 照合 / drop 进回收站 / 不该动的摘出去。
+
+        设计（方案 v4 §B）：
+        · **只会细化，不会凭空造动作**：不启用 / 失败 / 无判定 ⇒ 原样返回
+        · 同一件事且带来新信息 → 保持合并；只是更弱的重复 → 软删进回收站（可还原）
+        · 判定"不是同一件事" → 从 source_ids 里摘掉（既不合并、也不删）⇒ 防稀释
+        · 合并正文仍由大模型写（JEV 不生成）
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return verdicts
+        if not getattr(cfg, "jev_merge", False) or not decisions.ready:
+            return verdicts
+        out = []
+        for group, verdict in verdicts:
+            action = str(verdict.get("action") or "merge")
+            sources = list(verdict.get("source_ids") or [])
+            if action != "merge" or len(sources) < 2:
+                out.append((group, verdict))
+                continue
+            try:
+                target = next(r for r in group if r["id"] == verdict["target_id"])
+                cands = [(str(r["id"]), str(r["content"])) for r in group
+                         if r["id"] in sources and r["id"] != verdict["target_id"]]
+                route = await decisions.merge_route(str(target["content"]), cands) if cands else None
+            except Exception:
+                route = None
+            if not route:
+                out.append((group, verdict))
+                continue
+            merge_ids = [fid for fid, _ in cands if route.get(fid) == "merge"]
+            drop_ids = [fid for fid, _ in cands if route.get(fid) == "drop"]
+            keep_ids = [fid for fid, _ in cands if route.get(fid) not in ("merge", "drop")]
+            decisions.log.write("merge", {
+                "target": verdict["target_id"], "primary": str(target["content"])[:160],
+                "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
+                "tokens": decisions.tokens})
+            if not merge_ids and not drop_ids:
+                logger.info("[记忆·Z] JEV 认定该组 %d 条事实不是同一件事，保持原样", len(keep_ids))
+                continue                                  # 全组不动 ⇒ 这组不动作
+            if merge_ids:
+                merged_verdict = dict(verdict)
+                merged_verdict["source_ids"] = merge_ids + [verdict["target_id"]]
+                merged_verdict["reason"] = "%s｜JEV：%d 条确需合并" % (
+                    verdict.get("reason") or "", len(merge_ids))
+                out.append((group, merged_verdict))
+            if drop_ids:
+                out.append((group, {
+                    "target_id": verdict["target_id"], "source_ids": drop_ids,
+                    "action": "drop",
+                    "reason": "JEV：低重要度重复，进回收站（可还原）",
+                }))
+            if keep_ids:
+                logger.info("[记忆·Z] JEV 摘出 %d 条不具备合并必要的事实（保持原样）", len(keep_ids))
+        if len(out) != len(verdicts):
+            logger.info("[记忆·Z] JEV 合并路由：%d 组 → %d 个动作", len(verdicts), len(out))
+        return out
+
+    async def jev_apply_importance(self, facts, cfg):
+        """JEV 写入时**只下调**低价值事实的重要度（生效）。
+
+        · 「核心 / 重要 / 一般」⇒ 一律保留大模型原值（只压不抬，不做自增强）
+        · 「次要」⇒ 3（约半月后自然下沉）；「无价值」⇒ 1（立即可沉）
+        · 未启用 / 失败 / 无判定 ⇒ 原样返回
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return facts
+        if not getattr(cfg, "jev_importance", False) or not decisions.ready:
+            return facts
+        from .mdecide import importance_of
+
+        try:
+            items = [(str(i), str(f.get("content") or "")) for i, f in enumerate(facts or [])]
+            levels = await decisions.importance(items)
+        except Exception:
+            return facts
+        if not levels:
+            return facts
+        out = []
+        for i, f in enumerate(facts):
+            level = levels.get(str(i))
+            mapped = importance_of(level) if level else None
+            if mapped is None:          # 核心/重要/一般 ⇒ ★ 不碰大模型给的细分数值
+                out.append(f)
+                continue
+            item = dict(f)
+            try:
+                current = int(item.get("importance") or 5)
+            except (TypeError, ValueError):
+                current = 5
+            if mapped < current:        # ★ 只压不抬（绝不自增强）
+                item["importance"] = mapped
+            out.append(item)
+        logger.info("[记忆·Z] JEV 定级：%d 条事实重要度已由决策模型设定", len(out))
+        return out
+
+    async def jev_audit_prescreen(self, candidates, cfg):
+        """JEV 审计预筛（**生效**）：返回"可疑事实 id 列表"。
+
+        · 未启用 / 不可用 / 调用失败 ⇒ None（调用方走原逻辑）
+        · 返回 [] ⇒ 本批无可疑项 ⇒ 调用方可跳过审计模型（只推进轮转）
+        · 返回 [id, ...] ⇒ 这些事实涉及可疑对（重复/矛盾/过时），送审计模型
+        """
+        import re as _re
+
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return None
+        if not getattr(cfg, "jev_audit", False) or not decisions.ready:
+            return None
+        texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:12]
+        if len(texts) < 2:
+            return None
+        pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
+                 for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+        hot = await decisions.audit_prescreen(pairs)
+        if hot is None:
+            return None
+        idx: set[int] = set()
+        for key in hot:
+            m = _re.match(r"p(\d+)_(\d+)$", str(key))
+            if m:
+                idx.add(int(m.group(1)))
+                idx.add(int(m.group(2)))
+        out = [candidates[i].get("id") for i in sorted(idx) if i < len(candidates)]
+        decisions.log.write("audit", {"checked": len(pairs), "hot": len(out),
+                                      "tokens": decisions.tokens})
+        return out
+
     async def structured(
         self, contract, purpose, payload, cfg, retry_timeout=True, forced=False,
         facts_cap=None,
@@ -1330,6 +1462,31 @@ class Engine:
         # 服务端合并时从数据库行自己汇总。
         fact_aliases = {"f%d" % (i + 1): fact["id"] for i, fact in enumerate(candidates)}
         keep = await self.store.call("spaced_names")
+        suspicious = await self.jev_audit_prescreen(candidates, cfg)
+        if suspicious is not None and not suspicious:
+            # 本批无可疑项 ⇒ 跳过审计模型（省一次调用），只把轮转推进（标记已审）
+            keep_all = {"actions": [
+                {"action": "keep", "target_id": f.get("id"),
+                 "source_ids": [f.get("id")], "reason": "JEV 预筛：本批无可疑项"}
+                for f in candidates if f.get("id")
+            ]}
+            counts = {"scanned": len(candidates)}
+            if self.settings() == cfg:
+                counts.update(await self.store.call("audit", candidates, keep_all, job_id or ""))
+            logger.info("[记忆·Z] JEV 预筛：本批 %d 条无可疑项，已跳过审计模型", len(candidates))
+            return counts
+        if suspicious:
+            # 只把"涉及可疑对"的事实送审计模型（其余留到下一轮抽查），省输入 token
+            hot = set(suspicious)
+            narrowed = [f for f in candidates if f.get("id") in hot]
+            if narrowed and len(narrowed) < len(candidates):
+                logger.info("[记忆·Z] JEV 预筛：%d 条 → 只送 %d 条可疑事实给审计模型",
+                            len(candidates), len(narrowed))
+                candidates = narrowed
+                fact_aliases = {"f%d" % (i + 1): fact["id"]
+                                for i, fact in enumerate(candidates)}
+        elif suspicious is not None:
+            logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
@@ -1616,6 +1773,8 @@ class Engine:
                 ]
             if self.settings() != cfg:
                 return merged
+            # v2.18.74：JEV 参与合并路由（生效；未启用/失败即原样返回）
+            verdicts = await self.jev_apply_merge_route(verdicts, cfg)
             # 明细：哪几条并进了哪条（前端据此渲染「旧 → 新」）
             for group, verdict in verdicts:
                 target = next(r for r in group if r["id"] == verdict["target_id"])
@@ -1953,6 +2112,8 @@ class Engine:
                     }
                 )
             if facts:
+                # v2.18.74：JEV 写入时定重要度（生效；未启用/失败即沿用模型给的值）
+                facts = await self.jev_apply_importance(facts, self.settings())
                 fact_ids = await self.store.call("add_facts", sid, facts)
                 # ★ 2026-09-19（用户要求）：把"提炼出的事实"也记成明细条目 ✓
                 #   整理明细里就会像"事实合并"那样显示：主体 · 类别 · 重要度 N ✓
@@ -2336,10 +2497,31 @@ class Engine:
                                 fact.get("subject", ""), names
                             )
                         if self.settings() == cfg:
-                            await self.store.call("classify", row, output)
-                            await self.queue_fact_merges(
-                                row["sid"], job_started
-                            )
+                            # v2.18.74：应用前**重新读一次**源记录（模型调用期间可能已被整理），
+                            # 冲突时再重试一次 ⇒ 修掉"记忆归类几乎总是失败"✗（revision 竞态）
+                            applied = False
+                            for _try in range(2):
+                                fresh = await self.store.call("get", job["sid"])
+                                if not fresh:
+                                    break
+                                row = fresh
+                                try:
+                                    await self.store.call("classify", row, output)
+                                    applied = True
+                                    break
+                                except ValueError as exc:      # Conflict ⊂ ValueError
+                                    if "classification source changed" not in str(exc):
+                                        raise
+                                    if _try:
+                                        raise
+                                    logger.info(
+                                        "[记忆·Z] 归类源记录在判定期间被整理，"
+                                        "已重读后重试一次 ✓"
+                                    )
+                            if applied:
+                                await self.queue_fact_merges(
+                                    row["sid"], job_started
+                                )
                 elif job["kind"] == "rewrite":
                     counts = await self.redo_pending_rewrites(10**6, job["id"])
                     detail = (

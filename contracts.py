@@ -289,7 +289,7 @@ class Settings(Strict):
     semantic_enabled: bool = False
     audit_enabled: bool = True
     audit_interval: int = Field(default=7200, ge=30, le=604800)
-    audit_batch: int = Field(default=20, ge=1, le=50)
+    audit_batch: int = Field(default=20, ge=1, le=200)
     audit_recheck_days: int = Field(default=7, ge=0, le=3650)
     audit_daily_calls: int = Field(default=24, ge=0, le=1000)
     model_timeout: int = Field(default=120, ge=5, le=600)
@@ -303,6 +303,22 @@ class Settings(Strict):
     recall_keywords: list[Short] = ["记得", "之前", "上次", "曾经"]
     recall_scope: Literal["session", "linked", "global"] = "global"
     top_k: int = Field(default=5, ge=1, le=30)
+    # ── v2.18.74：JEV 决策层（**可选增强**；默认全关 ⇒ 行为与之前逐字节一致）──
+    jev_enabled: bool = False
+    jev_model: str = ""                   # 在 KiraAI 里选一个类 JEV 决策模型
+    jev_base_url: str = ""                # 可留空（自动取所选提供商的 base_url）
+    jev_api_key: str = ""                 # 可留空（自动取所选提供商的 key）；支持 $$ENV_NAME
+    jev_model_name: str = ""              # 可留空（自动取所选模型的 model_id）
+    jev_timeout_ms: int = Field(default=4000, ge=300, le=30000)
+    jev_sample: float = Field(default=1.0, ge=0.05, le=1.0)
+    jev_recall: bool = False              # 召回筛选（被动召回）
+    jev_merge: bool = False               # 合并路由（merge / drop→回收站 / keep）
+    jev_audit: bool = False               # 审计预筛（只把可疑对喂审计模型）
+    jev_importance: bool = False          # 写入时重要度定级（影响上浮/下沉）
+    # 可选重排模型（KiraAI 里注册的 rerank 模型；留空=不重排，行为与之前一致）
+    rerank_model: str = ""
+    rerank_enabled: bool = False
+    rerank_timeout_ms: int = Field(default=1500, ge=300, le=10000)
     proactive_enabled: bool = False
     proactive_interval: int = Field(default=3600, ge=60, le=604800)
     proactive_jitter: int = Field(default=0, ge=0, le=86400)
