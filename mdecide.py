@@ -198,7 +198,12 @@ class JevConfig:
 
 def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
     """解析 JEV 连接信息：显式字段优先，其次取所选 KiraAI 模型的 provider_config。"""
-    get = lambda name, default="": getattr(settings, name, default) or default  # noqa: E731
+    def get(name, default=""):
+        """取设置值。★ 不能写 `getattr(...) or default`：False 会被 or 吃掉，
+        导致 jev_shadow=False 永远读成 True（实测踩过 ✗）。"""
+        value = getattr(settings, name, default)
+        return default if value is None else value
+
     uuid = str(get("jev_model")).strip()
     base = str(get("jev_base_url")).strip()
     key = _env(str(get("jev_api_key")))
@@ -278,6 +283,27 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]]) -> dict:
 
 
 # ── 2) 合并路由：三信号 → 代码组合（绝不问"该怎么办"）──
+def build_merge_route_single(primary: str, key: str, text: str) -> dict:
+    """单条候选的三问（自包含）。★ 与 build_merge_route 的区别：只问一条，避免批内干扰。"""
+    pre = f"[主事实] {primary} [/主事实]\n[候选] {text} [/候选]\n"
+    return {
+        "same_" + key: q_noul(
+            pre + "候选和主事实讲的是同一个事实吗？（可以有更多细节）",
+            "同一个事实，只是说法不同或附带更多细节",
+            "另一件不同的事",
+        ),
+        "new_" + key: q_noul(
+            pre + "候选里有主事实没有的实质信息吗？",
+            "有：主事实没提到的严重程度、后果、应对方式、时间或更具体的信息",
+            "没有：和主事实是同一层信息，只是换了说法或更短的表达",
+        ),
+        "dilute_" + key: q_noul(
+            pre + "如果把候选并进主事实的正文，会让主事实的重点变模糊吗？",
+            "会：引入与重点无关或更弱的细节，把重点冲淡",
+            "不会：并进去反而更完整、更准确",
+        ),
+    }
+
 def build_merge_route(primary: str, cands: list[tuple[str, str]]) -> dict:
     qs: dict = {}
     for key, text in cands:
@@ -418,6 +444,17 @@ class Decisions:
             return False
         return True
 
+    def _hit(self) -> bool:
+        """采样闸门：jev_sample < 1 时按比例调用（省额度），未命中即当次弃权。"""
+        if self.cfg.sample >= 1.0:
+            return True
+        import random
+
+        if random.random() <= self.cfg.sample:
+            return True
+        self.skipped += 1
+        return False
+
     async def _ask(self, state: str, questions: dict, kind: str,
                    timeout: Optional[float] = None) -> Optional[dict]:
         if not self._maybe(self.cfg.sample):
@@ -450,24 +487,38 @@ class Decisions:
         return scored
 
     # ---------- 2) 合并路由 ----------
-    async def merge_route(self, primary: str, cands: list[tuple[str, str]],
-                          timeout: Optional[float] = None) -> Optional[dict[str, str]]:
-        """返回 {候选key: "merge"|"drop"|"keep"}；失败返回 None（走原合并逻辑）。"""
-        if not cands:
-            return None
-        data = await self._ask("lang: zh", build_merge_route(primary, cands), "merge", timeout)
-        if not data:
-            return None
-        answers = data.get("answers") or {}
-        out: dict[str, str] = {}
-        for key, _text in cands:
-            same = parse_noul(answers, "same_" + key)
-            new = parse_noul(answers, "new_" + key)
-            dilute = parse_noul(answers, "dilute_" + key)
-            out[key] = route_merge(same, new, dilute)
-        return out
+    async def merge_route(self, primary: str, cands, timeout=None):
+        """逐条候选判定 merge/drop/keep。
 
-    # ---------- 3) 重要度 ----------
+        ★ 必须**一条候选一次调用**（实测：把两条近似候选放进同一次调用会互相干扰，
+          本该 merge 的被判成 drop ✗）。并发发出 ⇒ 墙钟时间与批内提问相当。
+        """
+        fn = self._client
+        if fn is None or not self.ready or not cands:
+            return None
+        if not self._hit():
+            return None
+        import asyncio as _aio
+
+        async def one(key: str, text: str):
+            data = await self._ask(
+                "lang: zh", build_merge_route_single(primary, key, text), "merge",
+                timeout)
+            if not data:
+                return key, None
+            a = data.get("answers") or {}
+            same = parse_noul(a, "same_" + key)
+            new = parse_noul(a, "new_" + key)
+            dil = parse_noul(a, "dilute_" + key)
+            if same is None or new is None:
+                return key, None
+            return key, route_merge(same, new, dil if dil is not None else 0.0)
+
+        pairs = await _aio.gather(*[one(k, s) for k, s in cands[:8]])
+        out = {k: v for k, v in pairs if v}
+        self.calls += 1
+        return out or None
+
     async def importance(self, facts: list[tuple[str, str]],
                          timeout: Optional[float] = None) -> Optional[dict[str, int]]:
         if not facts:

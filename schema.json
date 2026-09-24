@@ -272,8 +272,8 @@
       "jev_shadow": {
         "type": "switch",
         "name": "影子模式（只记录不生效）",
-        "default": true,
-        "description": "影子模式（默认开）：只把「JEV 会怎么判」记进日志供比对，不改任何现有行为。确认效果后再关掉它，JEV 才会真正生效。"
+        "default": false,
+        "description": "调试开关，默认关（即：开启 JEV 后立即生效）。打开它则只记录判定、不改任何行为，用于对照排查。"
       },
       "jev_model": {
         "type": "model_select",
