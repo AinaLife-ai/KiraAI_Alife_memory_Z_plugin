@@ -1568,7 +1568,99 @@ class AlifeMemoryPlugin(BasePlugin):
         if getattr(self, "_jev_notice", None) == why:
             return
         self._jev_notice = why
-        logger.info("[记忆·Z] JEV 本次未参与：%s", why)
+        logger.info("[记忆·Z] JEV·未参与：%s", why)
+
+    async def _refine_recall(self, sid, query, facts, rows, cfg, keyword_hit=False):
+        """**一次调用**同时精修「事实」与「档案」两组候选（省一次往返）。
+
+        背景：事实通道（含事实轮换槽）此前**完全没经过 JEV** ✗，而 A 项又把事实池 ×3
+        ⇒ JEV 开启时注入的事实会多出约 3 倍 ✗（回归）。这里一次调用同时处理两组，
+        各自排序 + 清明显无关（阈值 0.10 + 保底条数），把事实收回到约 top_k 条 ✓
+
+        返回 (facts, rows, trigger)；超时/失败/未启用 ⇒ 两组原样返回 ✓
+        """
+        self._ensure_aux()
+        facts = list(facts or [])
+        rows = list(rows or [])
+        if not facts and not rows:
+            return facts, rows, None
+        use_rerank = bool(getattr(cfg, "rerank_enabled", False)) and \
+            getattr(self, "reranker", None) is not None
+        use_jev = bool(getattr(cfg, "jev_enabled", False)
+                       and getattr(cfg, "jev_recall", False))
+        decisions = getattr(self, "decisions", None)
+        if not use_rerank and not (use_jev and decisions is not None and decisions.ready):
+            if use_jev:
+                self._jev_skip_notice("开关已开但决策层未就绪（见启动时那条 warning）")
+            return facts, rows, None
+        text_of_row = lambda r: str(  # noqa: E731
+            r.get("summary") or r.get("content") or "")[:300]
+        items = [("f%d" % i, text_of_row(f)) for i, f in enumerate(facts) if f.get("id")]
+        items += [("r%d" % i, text_of_row(r)) for i, r in enumerate(rows) if r.get("id")]
+        if len(items) < JEV_RECALL_MIN_CANDIDATES:
+            self._jev_skip_notice(
+                "候选只有 %d 条（少于 %d 条不值得调用）" % (len(items),
+                                                         JEV_RECALL_MIN_CANDIDATES))
+            return facts, rows, None
+        budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        t0 = time.time()
+        order, trigger, timed_out = None, None, False
+        try:
+            if use_rerank and self.reranker.ready:
+                order = await asyncio.wait_for(self.reranker.rank(query, items),
+                                               timeout=budget)
+            if not order and use_jev and decisions.ready:
+                scored = await asyncio.wait_for(
+                    decisions.recall_filter(query, items, timeout=budget,
+                                            want_trigger=not keyword_hit),
+                    timeout=budget)
+                if scored:
+                    _trig = getattr(decisions, "last_trigger", None)
+                    if _trig is not None and _trig >= RECALL_TRIGGER_MIN:
+                        trigger = True
+                    keep = [k for k, s in sorted(scored, key=lambda kv: -(kv[1] or 0))
+                            if s is not None and s >= RECALL_KEEP_MIN]
+                    # 两组各自保底：事实保 min(top_k, 全量)，档案保 2 条
+                    if not keep:
+                        keep = [k for k, _s in sorted(scored,
+                                                      key=lambda kv: -(kv[1] or 0))][:2]
+                    else:
+                        fkeys = [k for k in keep if k[0] == "f"]
+                        rkeys = [k for k in keep if k[0] == "r"]
+                        if len(fkeys) < min(len(facts), max(2, int(getattr(cfg, "top_k", 5) or 5))) \
+                                and len(facts) >= 2:
+                            extra = [k for k, _s in sorted(
+                                scored, key=lambda kv: -(kv[1] or 0)) if k[0] == "f"]
+                            keep += [k for k in extra if k not in keep][:2]
+                        if not rkeys and len(rows) >= 2:
+                            extra = [k for k, _s in sorted(
+                                scored, key=lambda kv: -(kv[1] or 0)) if k[0] == "r"]
+                            keep += [k for k in extra if k not in keep][:2]
+                    order = list(dict.fromkeys(keep))     # 去重且保序 ✓
+        except asyncio.TimeoutError:
+            timed_out = True
+        except Exception:
+            logger.debug("[记忆·Z] 召回精修失败（用原排序）", exc_info=True)
+        used = int((time.time() - t0) * 1000)
+        if not order:
+            logger.info("[记忆·Z] JEV·召回（事实 %d / 档案 %d）→ %s，用原排序（%d ms）",
+                        len(facts), len(rows),
+                        "超时" if timed_out else "未返回", used)
+            return facts, rows, trigger
+        rank = {k: i for i, k in enumerate(order)}
+        keepset = set(order)
+        # ★ 用「索引配对」排序：不能用 list.index（O(n²)，且重复项会错配 ✗）
+        facts2 = [f for _r, f in sorted(
+            [(rank["f%d" % i], f) for i, f in enumerate(facts)
+             if ("f%d" % i) in keepset], key=lambda t: t[0])]
+        rows2 = [r for _r, r in sorted(
+            [(rank["r%d" % i], r) for i, r in enumerate(rows)
+             if ("r%d" % i) in keepset], key=lambda t: t[0])]
+        logger.info(
+            "[记忆·Z] JEV·召回（事实 %d→%d / 档案 %d→%d）已按相关度重排并清无关（%d ms%s）",
+            len(facts), len(facts2), len(rows), len(rows2), used,
+            "，超时" if timed_out else "")
+        return (facts2 or facts), (rows2 or rows), trigger
 
     async def _recall_refine(self, sid, query, rows, cfg, keyword_hit=False):
         """注入点上的"重排 + 清明显无关"（可选；带**硬预算**，超时/失败一律原样返回）。
@@ -1685,11 +1777,12 @@ class AlifeMemoryPlugin(BasePlugin):
             return profiles
         items = [("s%d" % i, s[3]) for i, s in enumerate(slots)]
         budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        _t0 = time.time()
         try:
             scored = await asyncio.wait_for(
                 decisions.recall_filter(query, items, timeout=budget), timeout=budget)
         except Exception:
-            logger.debug("[记忆·Z] JEV 画像排序失败（保持原顺序）", exc_info=True)
+            logger.debug("[记忆·Z] JEV·画像 排序失败 ⇒ 保持原顺序", exc_info=True)
             return profiles
         if not scored:
             return profiles
@@ -1702,7 +1795,8 @@ class AlifeMemoryPlugin(BasePlugin):
             order = [fi for _r, fi in sorted(grouped[(prof_i, cat)])]
             facts = profiles[prof_i]["categories"][cat]
             profiles[prof_i]["categories"][cat] = [facts[i] for i in order if i < len(facts)]
-        logger.info("[记忆·Z] JEV·画像 %d 条事实 → 已按当前对话重排", len(slots))
+        logger.info("[记忆·Z] JEV·画像 %d 条事实 → 已按当前对话重排（%d ms）",
+                    len(slots), int((time.time() - _t0) * 1000))
         return profiles
 
     async def _tool_refine(self, query, rows, cfg, strict=False):
@@ -1745,7 +1839,7 @@ class AlifeMemoryPlugin(BasePlugin):
                         len(items), int((time.time() - t0) * 1000))
             return rows
         except Exception:
-            logger.debug("[记忆·Z] JEV 档案精修失败（保持原顺序）", exc_info=True)
+            logger.debug("[记忆·Z] JEV·档案 精修失败 ⇒ 保持原顺序", exc_info=True)
             return rows
         if not scored:
             return rows
@@ -2434,8 +2528,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 and not media_only(r.get("summary") or "", keep_names)
             ]
             self._recall_triggered = False
-            fresh = await self._recall_refine(sid, query, fresh, cfg,
-                                              keyword_hit=keyword_hit)
+            # v2.18.74：事实 + 档案**一次调用**共同精修（事实通道此前没经过 JEV ✗）
+            facts, fresh, _jev_trig = await self._refine_recall(
+                sid, query, facts, fresh, cfg, keyword_hit=keyword_hit)
+            if _jev_trig:
+                self._recall_triggered = True
             # 关键词命中 **或** JEV 判定是回忆请求 ⇒ 放宽注入条数（候选已取够 ✓）
             if getattr(self, "_recall_triggered", False) and not keyword_hit:
                 reach = cfg.top_k * 2

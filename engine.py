@@ -1009,7 +1009,8 @@ class Engine:
                 "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
                 "tokens": decisions.tokens})
             if not merge_ids and not drop_ids:
-                logger.info("[记忆·Z] JEV 认定该组 %d 条事实不是同一件事，保持原样", len(keep_ids))
+                logger.info("[记忆·Z] JEV·合并 该组 %d 条判定为「不是同一件事」⇒ 保持原样",
+                        len(keep_ids))
                 continue                                  # 全组不动 ⇒ 这组不动作
             if merge_ids:
                 merged_verdict = dict(verdict)
@@ -1024,7 +1025,8 @@ class Engine:
                     "reason": "JEV：低重要度重复，进回收站（可还原）",
                 }))
             if keep_ids:
-                logger.info("[记忆·Z] JEV 摘出 %d 条不具备合并必要的事实（保持原样）", len(keep_ids))
+                logger.info("[记忆·Z] JEV·合并 摘出 %d 条无需合并的事实 ⇒ 保持原样",
+                            len(keep_ids))
         if len(out) != len(verdicts):
             _merged = sum(len(v.get("source_ids") or []) - 1 for _g, v in out
                           if v.get("action") != "drop")
@@ -1513,7 +1515,8 @@ class Engine:
             counts = {"scanned": len(candidates), "screened_skip": True}
             if self.settings() == cfg:
                 counts.update(await self.store.call("audit", candidates, keep_all, job_id or ""))
-            logger.info("[记忆·Z] JEV 预筛：本批 %d 条无可疑项，已跳过审计模型", len(candidates))
+            logger.info("[记忆·Z] JEV·预筛 本批 %d 条无可疑项 ⇒ 已跳过审计模型（省一次调用）",
+                        len(candidates))
             return counts
         if suspicious:
             # 只把"涉及可疑对"的事实送审计模型（其余留到下一轮抽查），省输入 token
@@ -1528,10 +1531,10 @@ class Engine:
                                 for i, fact in enumerate(candidates)}
         elif suspicious is not None:
             if not complete:
-                logger.info("[记忆·Z] JEV 预筛：%d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
+                logger.info("[记忆·Z] JEV·预筛 %d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
                             len(candidates))
             else:
-                logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
+                logger.info("[记忆·Z] JEV·预筛 本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
