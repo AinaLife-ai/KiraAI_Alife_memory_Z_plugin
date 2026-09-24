@@ -1027,10 +1027,11 @@ class Engine:
         return out
 
     async def jev_apply_importance(self, facts, cfg):
-        """JEV 写入时定重要度（**生效**）：核心/重要/一般/琐碎 → 9/7/5/3。
+        """JEV 写入时**只下调**低价值事实的重要度（生效）。
 
-        · 未启用 / 失败 ⇒ 原样返回（沿用大模型给的重要度）
-        · 重要度直接进下沉公式（×2）⇒ 决定"永不沉 / 自然下沉"
+        · 「核心 / 重要 / 一般」⇒ 一律保留大模型原值（只压不抬，不做自增强）
+        · 「次要」⇒ 3（约半月后自然下沉）；「无价值」⇒ 1（立即可沉）
+        · 未启用 / 失败 / 无判定 ⇒ 原样返回
         """
         decisions = getattr(self, "decisions", None)
         if decisions is None or not getattr(cfg, "jev_enabled", False):
@@ -1049,11 +1050,17 @@ class Engine:
         out = []
         for i, f in enumerate(facts):
             level = levels.get(str(i))
-            if not level:
+            mapped = importance_of(level) if level else None
+            if mapped is None:          # 核心/重要/一般 ⇒ ★ 不碰大模型给的细分数值
                 out.append(f)
                 continue
             item = dict(f)
-            item["importance"] = importance_of(level)
+            try:
+                current = int(item.get("importance") or 5)
+            except (TypeError, ValueError):
+                current = 5
+            if mapped < current:        # ★ 只压不抬（绝不自增强）
+                item["importance"] = mapped
             out.append(item)
         logger.info("[记忆·Z] JEV 定级：%d 条事实重要度已由决策模型设定", len(out))
         return out

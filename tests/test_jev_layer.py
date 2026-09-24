@@ -79,18 +79,16 @@ class RouteCase(unittest.TestCase):
         for same, new in ((None, 0.9), (0.9, None), (None, None)):
             self.assertEqual(md.route_merge(same, new, 0.1), "keep")
 
-    def test_importance_mapping(self):
-        self.assertEqual(md.importance_of("核心"), 9)
-        self.assertEqual(md.importance_of("重要"), 7)
-        self.assertEqual(md.importance_of("一般"), 5)
-        self.assertEqual(md.importance_of("琐碎"), 3)
-        self.assertEqual(md.importance_of(None), 5)      # 未知 ⇒ 保守默认
-        # 核心 ≥8 才会命中"永不沉"保护（与现有下沉公式对齐）
-        self.assertGreaterEqual(md.IMPORTANCE_LEVELS["核心"], 8)
-
-
-class QuestionCase(unittest.TestCase):
-    """问题构造的两个硬约束（实测踩过，写错必错）。"""
+    def test_importance_mapping_only_lowers(self):
+        """★ 只压不抬：核心/重要/一般 不动（None），只有低价值档才下调。"""
+        self.assertIsNone(md.importance_of("核心"))
+        self.assertIsNone(md.importance_of("重要"))
+        self.assertIsNone(md.importance_of("一般"))
+        self.assertIsNone(md.importance_of(None))       # 未知 ⇒ 不动最安全
+        self.assertEqual(md.importance_of("次要"), 3)    # 约半月自然沉
+        self.assertEqual(md.importance_of("无价值"), 1)  # 立即沉（2+10 < 15）
+        # 与下沉公式一致：≥8 才会触发"永不沉"，而本机制永不产生 ≥8 的值
+        self.assertLess(max(md.IMPORTANCE_LEVELS.values()), 8)
 
     def test_candidates_are_self_contained(self):
         qs = md.build_merge_route("主事实内容", [("c0", "候选甲内容"), ("c1", "候选乙内容")])
@@ -247,10 +245,13 @@ class DecisionsCase(unittest.TestCase):
         d._client = md.JevClient("https://x", "k", "m")
         d._client._post_sync = lambda p, t: {                       # type: ignore[assignment]
             "answers": {"imp_a": {"choice": "核心", "confidence": 0.9},
-                        "imp_b": {"choice": "琐碎", "confidence": 0.2}},
+                        "imp_c": {"choice": "一般", "confidence": 0.9},
+                        "imp_b": {"choice": "无价值", "confidence": 0.9},
+                        "imp_d": {"choice": "无价值", "confidence": 0.1}},
             "usage": {"input_tokens": 10}}
-        out = run(d.importance([("a", "A"), ("b", "B")]))
-        self.assertEqual(out, {"a": 9}, "置信不足 ⇒ 不写，保留原值")
+        out = run(d.importance([("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")]))
+        self.assertEqual(out, {"b": 1},
+                         "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
 class DecisionLogCase(unittest.TestCase):

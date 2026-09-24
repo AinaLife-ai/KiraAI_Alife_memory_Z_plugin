@@ -56,16 +56,20 @@ NEW_HIGH = 0.60       # ≥ 视为"带来实质新信息"
 DILUTE_HIGH = 0.75     # 实测：该合并档稀释 0.31~0.69 / 真会稀释 0.77~0.84    # ≥ 视为"并入正文会稀释重点"
                       #   实测：该合并的档位稀释 0.30~0.58，真会稀释的 0.77~0.84
                       #   ⇒ 阈值取 0.70 才不误杀（0.60 会卡在贴边的 0.58 上 ✗）
+IMPORTANCE_MIN_CONF = 0.35  # 定级置信门槛（实测该任务置信偏低 0.10~1.00，过高会几乎不生效）
 TRIGGER_HIGH = 0.50   # 召回触发阈值（实测阈值 0.5 命中 8/8）
 RELEVANT_HIGH = 0.50  # 候选相关性阈值（实测相关 0.75~0.98 / 干扰 0.02~0.24）
 
-# 四级重要度 → 1~10 分（进"重要度×2"的现有公式；≥8 触发"永不沉"保护）
-IMPORTANCE_LEVELS = {"核心": 9, "重要": 7, "一般": 5, "琐碎": 3}
+# 重要度：★ **只压不抬**（用户约定）——「核心/重要/一般」一律保留大模型原值，
+# 只有低价值档才由 JEV 下调；映射值进现有「重要度×2」公式（阈值 15，≥8 永不沉）。
+#   无价值=1 ⇒ 2+10=12 < 15 ⇒ 立即沉     ｜ 次要=3 ⇒ 16 刚存，约半月后自然沉
+IMPORTANCE_LEVELS = {"次要": 3, "无价值": 1}
 IMPORTANCE_OPTIONS = {
     "核心": "影响健康安全或长期关系，必须永远记住",
     "重要": "稳定的个人情况或长期约定",
     "一般": "背景信息，有用但不关键",
-    "琐碎": "闲聊或一次性事务，很快没用",
+    "次要": "一次性事务、很快过期的安排",
+    "无价值": "寒暄、口头语、没有信息量的内容",
 }
 
 # ────────────────────────── 客户端 ──────────────────────────
@@ -354,8 +358,9 @@ def build_importance(facts: list[tuple[str, str]]) -> dict:
     return qs
 
 
-def importance_of(level: Optional[str], default: int = 5) -> int:
-    return IMPORTANCE_LEVELS.get(level or "", default)
+def importance_of(level: Optional[str]) -> Optional[int]:
+    """返回应**下调到**的分值；**None = 不动**（核心/重要/一般 保留大模型原值）。"""
+    return IMPORTANCE_LEVELS.get(level or "")
 
 
 # ── 4) 召回触发（主动）：替代字面关键词（实测阈值 0.5 命中 8/8）──
@@ -532,9 +537,12 @@ class Decisions:
         out: dict[str, int] = {}
         for key, _text in facts:
             level, conf = parse_choice(answers, "imp_" + key)
-            if not level or conf < 0.5:
+            if not level or conf < IMPORTANCE_MIN_CONF:
                 continue                      # 置信不足 ⇒ 不写，保留原值
-            out[key] = importance_of(level)
+            mapped = importance_of(level)
+            if mapped is None:
+                continue                      # ★ 只压不抬：核心/重要/一般 一律不写回
+            out[key] = mapped
         return out or None
 
     # ---------- 4) 召回触发 ----------
