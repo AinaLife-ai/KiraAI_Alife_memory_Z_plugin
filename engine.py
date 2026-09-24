@@ -1026,6 +1026,38 @@ class Engine:
             logger.info("[记忆·Z] JEV 合并路由：%d 组 → %d 个动作", len(verdicts), len(out))
         return out
 
+    async def jev_apply_importance(self, facts, cfg):
+        """JEV 写入时定重要度（**生效**）：核心/重要/一般/琐碎 → 9/7/5/3。
+
+        · 未启用 / 失败 ⇒ 原样返回（沿用大模型给的重要度）
+        · 重要度直接进下沉公式（×2）⇒ 决定"永不沉 / 自然下沉"
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return facts
+        if not getattr(cfg, "jev_importance", False) or not decisions.ready:
+            return facts
+        from .mdecide import importance_of
+
+        try:
+            items = [(str(i), str(f.get("content") or "")) for i, f in enumerate(facts or [])]
+            levels = await decisions.importance(items)
+        except Exception:
+            return facts
+        if not levels:
+            return facts
+        out = []
+        for i, f in enumerate(facts):
+            level = levels.get(str(i))
+            if not level:
+                out.append(f)
+                continue
+            item = dict(f)
+            item["importance"] = importance_of(level)
+            out.append(item)
+        logger.info("[记忆·Z] JEV 定级：%d 条事实重要度已由决策模型设定", len(out))
+        return out
+
     async def jev_audit_prescreen(self, candidates, cfg):
         """JEV 审计预筛（**生效**）：返回"可疑事实 id 列表"。
 
@@ -1458,9 +1490,18 @@ class Engine:
                 counts.update(await self.store.call("audit", candidates, keep_all, job_id or ""))
             logger.info("[记忆·Z] JEV 预筛：本批 %d 条无可疑项，已跳过审计模型", len(candidates))
             return counts
-        if suspicious is not None:
-            logger.info("[记忆·Z] JEV 预筛：%d 条中 %d 条可疑，送审计模型",
-                        len(candidates), len(suspicious))
+        if suspicious:
+            # 只把"涉及可疑对"的事实送审计模型（其余留到下一轮抽查），省输入 token
+            hot = set(suspicious)
+            narrowed = [f for f in candidates if f.get("id") in hot]
+            if narrowed and len(narrowed) < len(candidates):
+                logger.info("[记忆·Z] JEV 预筛：%d 条 → 只送 %d 条可疑事实给审计模型",
+                            len(candidates), len(narrowed))
+                candidates = narrowed
+                fact_aliases = {"f%d" % (i + 1): fact["id"]
+                                for i, fact in enumerate(candidates)}
+        elif suspicious is not None:
+            logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
@@ -2086,6 +2127,8 @@ class Engine:
                     }
                 )
             if facts:
+                # v2.18.74：JEV 写入时定重要度（生效；未启用/失败即沿用模型给的值）
+                facts = await self.jev_apply_importance(facts, self.settings())
                 fact_ids = await self.store.call("add_facts", sid, facts)
                 # ★ 2026-09-19（用户要求）：把"提炼出的事实"也记成明细条目 ✓
                 #   整理明细里就会像"事实合并"那样显示：主体 · 类别 · 重要度 N ✓

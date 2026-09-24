@@ -78,6 +78,9 @@ from .config_migrate import migrate as migrate_config
 from .mdecide import Decisions
 from .rerankx import Reranker
 
+# JEV 判定「这是回忆请求」的概率阈值（实测：回忆请求 0.89~0.94 / 非请求 0.02~0.03）
+RECALL_TRIGGER_MIN = 0.5
+
 PLUGIN_ID = "alife_memory_z"
 
 from .retrieval import recall_text   # v2.18.12：媒体判定统一放 retrieval ✓
@@ -1536,9 +1539,20 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             logger.debug("[记忆·Z] 顺序预取：检索失败（保持原顺序）", exc_info=True)
             return
+        # v2.18.74：JEV 补召回触发（关键词没命中但确实是回忆请求时也能触发）
+        trigger = None
+        if jev_on and not hit:
+            decisions0 = getattr(self, "decisions", None)
+            if decisions0 is not None and decisions0.ready:
+                score = await decisions0.recall_trigger(query)
+                if score is not None and score >= RECALL_TRIGGER_MIN:
+                    trigger = True
+                    logger.info("[记忆·Z] JEV 判定这是回忆请求（关键词未命中），已放宽召回")
         items = [(str(r.get("id")), str(r.get("summary") or r.get("content") or "")[:300])
                  for r in (matches.get("items") or []) if r.get("id")]
         if len(items) < 2:
+            if trigger:
+                self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
             return
         order = None
         reranker = getattr(self, "reranker", None)
@@ -1553,6 +1567,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 scored = await decisions.recall_filter(query, items, timeout=timeout)
                 order = [k for k, _s in scored] if scored else None
         if not order:
+            if trigger:
+                self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
             return
         try:
             revision = await self.store.call("revision")
@@ -1566,7 +1582,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     "before": [k for k, _t in items], "after": list(order),
                     "tokens": decisions.tokens, "calls": decisions.calls})
             return
-        self._order_cache[mkey] = (revision, list(order))
+        self._order_cache[mkey] = {"rev": revision, "order": list(order), "trigger": trigger}
         if len(self._order_cache) > 256:
             self._order_cache.clear()
         logger.debug("[记忆·Z] 顺序预取完成：%d 条候选已重排", len(order))
@@ -1576,7 +1592,9 @@ class AlifeMemoryPlugin(BasePlugin):
         entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
         if not entry:
             return rows
-        revision, order = entry
+        revision, order = entry.get("rev"), entry.get("order") or []
+        if not order:
+            return rows
         cached = self._memo.get(mkey)
         if cached is not None and cached[0] != revision:
             self._order_cache.pop(mkey, None)      # 期间有写入 ⇒ 缓存失效，保持原顺序
@@ -1586,6 +1604,11 @@ class AlifeMemoryPlugin(BasePlugin):
             return sorted(rows, key=lambda r: rank.get(str(r.get("id")), len(rank) + 1))
         except Exception:
             return rows
+
+    def _jev_trigger_hit(self, mkey) -> bool:
+        """JEV 是否判定本轮是回忆请求（关键词未命中时的补充判断）。"""
+        entry = (getattr(self, "_order_cache", None) or {}).get(mkey)
+        return bool(entry and entry.get("trigger"))
 
     async def prewarm(self, sid, users, scope, query="", cfg=None):
         """预热：把「不随消息变化」的部分提前算进缓存。
@@ -2211,8 +2234,9 @@ class AlifeMemoryPlugin(BasePlugin):
             )
         related, related_rows, related_shorts = [], [], {}
         if cfg.recall_scope != "session" and query.strip() and not over_budget:
-            reach = cfg.top_k * (2 if keyword_hit else 1)
             _mkey = self._search_memo_key(sid, query, users, cfg, keyword_hit, prefer)
+            # v2.18.74：关键词未命中时用 JEV 的判定放宽召回条数（只影响 reach，不动 memo 键）
+            reach = cfg.top_k * (2 if (keyword_hit or self._jev_trigger_hit(_mkey)) else 1)
             matches = await self.memo(_mkey, lambda: self.store.call(
                 "search",
                 sid,
