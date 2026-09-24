@@ -254,6 +254,29 @@ class DecisionsCase(unittest.TestCase):
                          "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
+class MergeThresholdCase(unittest.TestCase):
+    """★ 用户实测反馈：换词重复（不吃香菜 / 讨厌香菜）曾被阈值误杀 ⇒ keep ✗（既不合并也不丢）。
+
+    真机实测（2026-09-25，放宽判据 + 阈值 0.5 后）：
+      换词重复 same=0.68 new=0.77 ⇒ merge ✓
+      纯重复   same=0.94 new=0.11 ⇒ drop（回收站）✓
+      真不同事 same≤0.12           ⇒ keep ✓（不误合）
+    """
+
+    def test_paraphrase_duplicate_merges(self):
+        self.assertEqual(md.route_merge(0.68, 0.77, 0.58), "merge",
+                         "换词重复必须能合并（曾经的回归 ✗）")
+
+    def test_pure_repeat_goes_to_recycle(self):
+        self.assertEqual(md.route_merge(0.94, 0.11, 0.35), "drop")
+
+    def test_clearly_different_kept(self):
+        for same in (0.05, 0.07, 0.12):
+            self.assertEqual(md.route_merge(same, 0.85, 0.87), "keep",
+                             "明确不同事 ⇒ 不动（不误合、不误删）")
+        self.assertEqual(md.SAME_HIGH, 0.50, "阈值 0.5 是有实测依据的，别随手改")
+
+
 class MixedRefineCase(unittest.TestCase):
     """★ 一次调用同时给「事实 + 档案」两组候选打分（省一次往返）。
 
