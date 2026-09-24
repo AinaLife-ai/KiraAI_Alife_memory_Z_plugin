@@ -2303,8 +2303,23 @@ class Store:
                     "SELECT revision,active,deleted FROM records WHERE id=? AND sid=?",
                     (row["id"], sid),
                 ).fetchone()
-                if not current or tuple(current) != (row["revision"], 1, 0):
+                if not current or current["deleted"] or not current["active"]:
                     raise Conflict("source changed during compression")
+                if current["revision"] != row["revision"]:
+                    # v2.18.74：语义化守卫（同 classify 的修法）——
+                    # 抽事实（_add_fact）/补索引都会 bump revision 但**不改正文**，
+                    # 以前一律判死 ⇒ 归类一成功、压缩计划就失效 ✗（互相打架）
+                    # 比较「压缩会覆盖的字段」（正文 + 摘要）：
+                    #   抽事实/补索引只 bump revision ⇒ 容忍
+                    #   用户手改过 summary/content ⇒ 仍然拒绝（不许被模型输出覆盖）
+                    fresh = db.execute(
+                        "SELECT content,summary FROM records WHERE id=?", (row["id"],)
+                    ).fetchone()
+                    if fresh and (
+                        (fresh["content"] or "") != (row.get("content") or "")
+                        or (fresh["summary"] or "") != (row.get("summary") or "")
+                    ):
+                        raise Conflict("source changed during compression")
             ids = {r["id"] for r in candidates}
             widen_source_ids(output["facts"], candidates)  # 补齐漏列来源（见模块级函数）✓
             if any(not set(f["source_ids"]) <= ids for f in output["facts"]):
@@ -4215,8 +4230,10 @@ class Store:
                 cur = db.execute(
                     "SELECT revision,deleted FROM facts WHERE id=?", (old["id"],)
                 ).fetchone()
-                if not cur or tuple(cur) != (old["revision"], 0):
+                if not cur or cur["deleted"]:
                     raise Conflict("audit evidence changed")
+                # v2.18.74：revision 变化不再判死（合并/编辑等并发写很常见）；
+                # 事实仍在、未被删 ⇒ 这次审计判定仍然成立 ✓
             for a in output["actions"]:
                 old = by_id[a["target_id"]]
                 group = {a["target_id"], *a["source_ids"]}
