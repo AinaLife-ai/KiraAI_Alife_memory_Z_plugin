@@ -984,6 +984,8 @@ class Engine:
             return verdicts
         if not getattr(cfg, "jev_merge", False) or not decisions.ready:
             return verdicts
+        _tok0 = getattr(decisions, "tokens", 0)      # ★ 用**本次增量**，别打累计值 ✗（会被误读成单次开销）
+        n_same = n_diff = 0
         out = []
         for group, verdict in verdicts:
             action = str(verdict.get("action") or "merge")
@@ -1008,9 +1010,11 @@ class Engine:
                 "target": verdict["target_id"], "primary": str(target["content"])[:160],
                 "route": route, "merge": merge_ids, "drop": drop_ids, "keep": keep_ids,
                 "tokens": decisions.tokens})
+            n_same += len(merge_ids) + len(drop_ids)
+            n_diff += len(keep_ids)
             if not merge_ids and not drop_ids:
                 logger.info("[记忆·Z] JEV·合并 该组 %d 条判定为「不是同一件事」⇒ 保持原样",
-                        len(keep_ids))
+                            len(keep_ids))
                 continue                                  # 全组不动 ⇒ 这组不动作
             if merge_ids:
                 merged_verdict = dict(verdict)
@@ -1032,8 +1036,11 @@ class Engine:
                           if v.get("action") != "drop")
             _dropped = sum(len(v.get("source_ids") or []) for _g, v in out
                            if v.get("action") == "drop")
-            logger.info("[记忆·Z] JEV·合并 %d 组 → 并入 %d 条、回收站 %d 条（%d tok）",
-                        len(verdicts), max(_merged, 0), _dropped, decisions.tokens)
+            logger.info(
+                "[记忆·Z] JEV·合并 %d 组：判定「同一件事」%d 条 /「不同事」%d 条 "
+                "⇒ 并入 %d 条、回收站 %d 条（本次 %d tok）",
+                len(verdicts), n_same, n_diff, max(_merged, 0), _dropped,
+                getattr(decisions, "tokens", 0) - _tok0)
         return out
 
     async def jev_apply_importance(self, facts, cfg):
@@ -1984,6 +1991,13 @@ class Engine:
                     await self.store.call(
                         "mark_merge_pending", [row["id"] for row in group], 0
                     )
+            # ★ v2.20.1：收尾统一解除「待合并」标记。
+            #   merge / drop 由存储层清掉了，但 **JEV 判全组不同事** 与 **relabel** 两条路径不会 ✗
+            #   ⇒ 那些事实会带着 merge_pending=1 被排除在召回与审计之外（等于被隐藏 ✗✗）
+            try:
+                await self.store.call("mark_merge_pending", sorted(covered), 0)
+            except Exception:
+                logger.debug("[记忆·Z] 解除待合并标记失败（下次任务会再扫）", exc_info=True)
             if job_id and items:
                 await self.store.call("add_job_items", job_id, items)
         return merged
