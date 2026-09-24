@@ -497,6 +497,7 @@ class AlifeMemoryPlugin(BasePlugin):
         #   顺序缓存：prewarm 期间算好 ⇒ 注入时只查一次字典（零成本）
         self.decisions = None
         self.reranker = None
+        self._recall_triggered = False   # v2.18.74：JEV 判定的"回忆请求"标记
         self._build_aux()
 
     def _build_aux(self):
@@ -1516,7 +1517,7 @@ class AlifeMemoryPlugin(BasePlugin):
         )
 
     # ── v2.18.74：JEV / 模型重排的顺序预取（**可选**；全关时零开销）────────────
-    async def _recall_refine(self, sid, query, rows, cfg):
+    async def _recall_refine(self, sid, query, rows, cfg, keyword_hit=False):
         """注入点上的"重排 + 清明显无关"（可选；带**硬预算**，超时/失败一律原样返回）。
 
         为什么放这里（而不是预热）：
@@ -1547,8 +1548,13 @@ class AlifeMemoryPlugin(BasePlugin):
                     self.reranker.rank(query, items), timeout=budget)
             if not order and use_jev and decisions.ready:
                 scored = await asyncio.wait_for(
-                    decisions.recall_filter(query, items, timeout=budget),
+                    decisions.recall_filter(query, items, timeout=budget,
+                                            want_trigger=not keyword_hit),
                     timeout=budget)
+                # 触发判定（与候选同一次调用）⇒ 关键词没命中时的补充判断 ✓
+                _trig = getattr(decisions, "last_trigger", None)
+                if _trig is not None and _trig >= RECALL_TRIGGER_MIN:
+                    self._recall_triggered = True
                 if scored:
                     keep = [(k, s) for k, s in scored
                             if s is not None and s >= RECALL_KEEP_MIN]
@@ -2241,7 +2247,14 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   （`archive_pool` 由 `fresh` 派生 ⇒ 这里一处同时覆盖主召回与轮换 ✓）
                 and not media_only(r.get("summary") or "", keep_names)
             ]
-            fresh = await self._recall_refine(sid, query, fresh, cfg)
+            self._recall_triggered = False
+            fresh = await self._recall_refine(sid, query, fresh, cfg,
+                                              keyword_hit=keyword_hit)
+            # 关键词命中 **或** JEV 判定是回忆请求 ⇒ 放宽注入条数（候选已取够 ✓）
+            if getattr(self, "_recall_triggered", False) and not keyword_hit:
+                reach = cfg.top_k * 2
+                logger.info("[记忆·Z] JEV·触发 判定为回忆请求（关键词未命中）⇒ reach %d",
+                            reach)
             related_rows = fresh[:reach]
             # 轮换槽位（档案）：从"同样过门槛、但没进主召回"的候选里补几条
             # ★ 同上：工具结果不是记忆 ⇒ 不进轮换槽 ✓（主召回照旧 ✓）
@@ -2581,7 +2594,8 @@ class AlifeMemoryPlugin(BasePlugin):
             ),
         )
         query = " ".join(capture_text(text_of(m)) for m in event.messages)
-        if any(k in query for k in cfg.recall_keywords):
+        if (any(k in query for k in cfg.recall_keywords)
+                or getattr(self, '_recall_triggered', False)):
             req.user_prompt.insert(
                 1,
                 Prompt(

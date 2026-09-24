@@ -92,7 +92,8 @@ class JevClient:
         self.timeout = float(timeout)
         self.fails = 0
         self.opened_at = 0.0
-        self.tokens = 0          # 累计输入 token（面板可观测）
+        self.tokens = 0
+        self.last_trigger: Optional[float] = None          # 累计输入 token（面板可观测）
 
     # ---------- 状态 ----------
     @property
@@ -325,7 +326,8 @@ def parse_choice(answers: dict, key: str) -> tuple[Optional[str], float]:
 
 
 # ── 1) 召回筛选（被动）：参照物=当前上下文，逐候选问"是否直接相关" ──
-def build_recall_filter(context: str, hits: list[tuple[str, str]]) -> dict:
+def build_recall_filter(context: str, hits: list[tuple[str, str]],
+                        want_trigger: bool = False) -> dict:
     """上下文放 state（只计一次费），每条候选自带正文。
 
     ★ 判据按**整批**语义（实测 2026-09-24）：
@@ -344,6 +346,14 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]]) -> dict:
             "这条记忆对理解或回应这批消息中的任意一条有帮助吗？",
             "有帮助：直接关系到这批消息里某一条的人物/偏好/约定/禁忌/事实",
             "没帮助：与这批消息都无关",
+        )
+    if want_trigger:
+        # 与候选**同一个请求**里附带问一句 ⇒ 零额外调用、零额外延迟 ✓
+        qs["__trigger__"] = q_noul(
+            "这批消息里，用户是在要求回忆过去说过或发生过的事吗"
+            "（哪怕没有用记得/上次/之前这类词）？",
+            "是：在问我过去说过的信息、旧事、约定、以前提过的人或事",
+            "不是：只是在聊当下、问新东西或让我做事",
         )
     return qs
 
@@ -534,15 +544,23 @@ class Decisions:
 
     # ---------- 1) 召回筛选 ----------
     async def recall_filter(self, context: str, hits: list[tuple[str, str]],
-                            timeout: Optional[float] = None) -> Optional[list[tuple[str, float]]]:
-        """返回 [(key, 相关度)] 按分降序；失败返回 None（调用方用原排序）。"""
+                            timeout: Optional[float] = None,
+                            want_trigger: bool = False) -> Optional[list[tuple[str, float]]]:
+        """返回 [(key, 相关度)] 按分降序；失败返回 None（调用方用原排序）。
+
+        want_trigger=True 时，在**同一次请求**里附带问一句"这批消息是否在要求回忆往事"，
+        结果放入 self.last_trigger（零额外调用、零额外延迟）。
+        """
         if not hits:
             return None
-        data = await self._ask(context or "lang: zh", build_recall_filter(context, hits),
-                             "recall", timeout)
+        data = await self._ask(context or "lang: zh",
+                               build_recall_filter(context, hits, want_trigger),
+                               "recall", timeout)
         if not data:
             return None
         answers = data.get("answers") or {}
+        self.last_trigger = (parse_noul(answers, "__trigger__")
+                             if want_trigger else None)
         scored = []
         for key, _text in hits:
             score = parse_noul(answers, "hit_" + key)
