@@ -1096,8 +1096,12 @@ class Engine:
         texts = [str(f.get("content") or f.get("text") or "") for f in (candidates or [])][:12]
         if len(texts) < 2:
             return None
+        all_pairs = len(texts) * (len(texts) - 1) // 2
         pairs = [("p%d_%d" % (i, j), texts[i], texts[j])
                  for i in range(len(texts)) for j in range(i + 1, len(texts))][:30]
+        # 批次大时对子会被截断 ⇒ 「没发现可疑」不等于「整批干净」✗
+        # 截断时绝不跳过审计模型（会漏掉没筛到的那些对）
+        self._audit_prescreen_complete = len(pairs) >= all_pairs
         # ★ 确定性兜底：词面高度相似的对**直接算可疑**。
         #   实测 JEV 会漏掉"明显重复"（花生过敏 / 不能吃花生 ⇒ 返回空 ✗），
         #   而"无可疑 ⇒ 跳过审计"如果漏了，就会把该审的跳过去 ✗ ⇒ 先规则兜一层。
@@ -1493,7 +1497,8 @@ class Engine:
         fact_aliases = {"f%d" % (i + 1): fact["id"] for i, fact in enumerate(candidates)}
         keep = await self.store.call("spaced_names")
         suspicious = await self.jev_audit_prescreen(candidates, cfg)
-        if suspicious is not None and not suspicious:
+        complete = getattr(self, "_audit_prescreen_complete", False)
+        if suspicious is not None and not suspicious and complete:
             # 本批无可疑项 ⇒ 跳过审计模型（省一次调用），只把轮转推进（标记已审）
             keep_all = {"actions": [
                 {"action": "keep", "target_id": f.get("id"),
@@ -1516,7 +1521,11 @@ class Engine:
                 fact_aliases = {"f%d" % (i + 1): fact["id"]
                                 for i, fact in enumerate(candidates)}
         elif suspicious is not None:
-            logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
+            if not complete:
+                logger.info("[记忆·Z] JEV 预筛：%d 条（对子被截断、未全筛）⇒ 仍交给审计模型",
+                            len(candidates))
+            else:
+                logger.info("[记忆·Z] JEV 预筛：本批 %d 条未发现可疑项", len(candidates))
         output = await self.structured(
             Audit,
             "audit",
