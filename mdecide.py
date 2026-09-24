@@ -360,6 +360,23 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]],
 
 
 # ── 2) 合并路由：三信号 → 代码组合（绝不问"该怎么办"）──
+def build_merge_prescreen(primary: str, key: str, text: str) -> dict:
+    """合并**预筛**：只问「是不是同一件事」（1 问/候选 ⇒ 最省 ✓）。
+
+    用途：在**调用大模型之前**先看一眼。若整批候选都明确「不是同一件事」，
+    就可以跳过大模型合并调用（省一次大调用 ✓）。
+    """
+    pre = f"[主事实] {primary} [/主事实]\n[候选] {text} [/候选]\n"
+    return {
+        "same_" + key: q_noul(
+            pre + "候选和主事实讲的是同一件事吗？",
+            "是：同一话题/同一对象的事 —— 说法不同、详略不同、角度不同、"
+            "重复询问或补充说明，都算同一件事",
+            "不是：互不相干的两件事（只是恰好都提到了同一个词）",
+        ),
+    }
+
+
 def build_merge_route_single(primary: str, key: str, text: str) -> dict:
     """单条候选的三问（自包含）。★ 与 build_merge_route 的区别：只问一条，避免批内干扰。"""
     pre = f"[主事实] {primary} [/主事实]\n[候选] {text} [/候选]\n"
@@ -591,6 +608,31 @@ class Decisions:
         return scored
 
     # ---------- 2) 合并路由 ----------
+    async def merge_prescreen(self, items, timeout=None):
+        """对 [(key, 主事实, 候选)] 一次性问「是不是同一件事」⇒ {key: 分数}。
+
+        失败 / 未启用 ⇒ None（调用方据此**照常调大模型** ✓ 绝不误跳）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, primary, cand in items:
+            questions.update(build_merge_prescreen(primary, key, cand))
+        data = await self._ask("lang: zh", questions, "merge_prescreen", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _p, _c in items:
+            score = parse_noul(answers, "same_" + key)
+            if score is None:
+                return None          # 有解析不出来的 ⇒ 不冒险，交给大模型 ✓
+            out[key] = score
+        self.calls += 1
+        return out or None
+
     async def merge_route(self, primary: str, cands, timeout=None):
         """逐条候选判定 merge/drop/keep。
 

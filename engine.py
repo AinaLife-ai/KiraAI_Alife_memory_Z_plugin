@@ -34,6 +34,8 @@ from .contracts import (
     dump,
 )
 
+from .mdecide import SAME_LOW   # 合并预筛：同一个「明确无关」阈值 ✓
+
 logger = logging.getLogger("alife_memory_z")
 
 COMMON_INSTRUCTION = (
@@ -970,6 +972,40 @@ class Engine:
         return value
 
     # ── v2.18.74：JEV 决策（生效）──────────────────────────────
+    async def jev_merge_prescreen(self, batch, cfg):
+        """合并**预筛**：返回 True 表示「整批候选都明确不是同一件事」⇒ 可跳过大模型合并。
+
+        **保守**：只要有一条落在模糊带（> SAME_LOW），或解析失败/不可用 ⇒ 返回 False
+        （照常调大模型 ✓ 绝不误跳）。省的是那次**大调用**（含来源原文证据 + 生成正文）。
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return False
+        if not getattr(cfg, "jev_merge", False) or not decisions.ready:
+            return False
+        items = []
+        for gi, group in enumerate(batch):
+            members = sorted(group, key=lambda r: (-len(str(r.get("content") or "")), r["id"]))
+            primary = str(members[0].get("content") or "")
+            if not primary:
+                return False                     # 数据不全 ⇒ 不冒险 ✓
+            for ci, row in enumerate(members[1:], 1):
+                cand = str(row.get("content") or "")
+                if not cand:
+                    return False
+                items.append(("g%d_%d" % (gi, ci), primary, cand))
+        if not items:
+            return False
+        try:
+            scores = await decisions.merge_prescreen(items)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 合并预筛失败（照常调大模型）", exc_info=True)
+            return False
+        if not scores or len(scores) != len(items):
+            return False                          # 不完整 ⇒ 不跳 ✓
+        low = [s for s in scores.values() if s is not None and s <= SAME_LOW]
+        return len(low) == len(scores)            # **全部**明确不同才跳 ✓
+
     async def jev_apply_merge_route(self, verdicts, cfg):
         """JEV 参与合并路由（**生效**）：merge 照合 / drop 进回收站 / 不该动的摘出去。
 
@@ -1797,6 +1833,17 @@ class Engine:
                         "evidence": evidence,
                     }
                 )
+            # ★ v2.20.1 预筛：整批候选都「明确不是同一件事」⇒ **跳过大模型合并调用**
+            #   （大模型这次调用含来源原文证据还要生成正文 ⇒ 是真·大调用；跳过即省 ✓）
+            if await self.jev_merge_prescreen(batch, cfg):
+                logger.info(
+                    "[记忆·Z] JEV·合并 预筛：本批 %d 组（%d 条候选）均判定「非同一件事」"
+                    " ⇒ 跳过大模型合并调用（省一次）",
+                    len(batch), sum(len(g) for g in batch))
+                await self.store.call(
+                    "mark_merge_pending",
+                    sorted({row["id"] for group in batch for row in group}), 0)
+                continue
             payload = {"groups": groups_view}
             fallback = False
             try:

@@ -527,3 +527,69 @@ class JevEngineIntegration(unittest.TestCase):
         out = run(eng.jev_apply_merge_route(verdicts, Off()))
         self.assertEqual(out, verdicts, "关闭 JEV 时不得做任何改动")
 
+
+
+class JevMergePrescreenCase(unittest.TestCase):
+    """★ 合并预筛：只有「整批候选都**明确**不是同一件事」才跳过大模型调用（保守 ✓）。
+
+    这是真正的"更快更省"：大模型那次合并调用含来源原文证据 + 要生成正文 ⇒ 真·大调用。
+    """
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+        tokens = 1
+
+        def __init__(self, scores):
+            self._scores = scores
+            self.log = JevMergePrescreenCase._Log()
+
+        async def merge_prescreen(self, items):
+            if self._scores is None:
+                return None
+            return dict(self._scores)
+
+        async def merge_route(self, primary, cands):
+            return {}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_merge = True
+        top_k = 5
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    BATCH = [[{"id": 1, "content": "AAA"}, {"id": 2, "content": "BBB"},
+              {"id": 3, "content": "CCC"}]]
+
+    def test_all_clearly_different_skips_llm(self):
+        eng = self._engine(self._D({"g0_1": 0.05, "g0_2": 0.03}))
+        self.assertTrue(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                        "全部明确不同 ⇒ 可以跳过大模型 ✓")
+
+    def test_ambiguous_band_does_not_skip(self):
+        eng = self._engine(self._D({"g0_1": 0.05, "g0_2": 0.40}))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "有模糊带 ⇒ 必须照常调大模型 ✓")
+
+    def test_unavailable_does_not_skip(self):
+        eng = self._engine(self._D(None))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "JEV 不可用 ⇒ 照常调大模型 ✓（绝不误跳）")
+
+    def test_incomplete_scores_do_not_skip(self):
+        eng = self._engine(self._D({"g0_1": 0.05}))
+        self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
+                         "分数不完整 ⇒ 不冒险 ✓")
