@@ -80,6 +80,11 @@ from .rerankx import Reranker
 
 # JEV 判定「这是回忆请求」的概率阈值（实测：回忆请求 0.89~0.94 / 非请求 0.02~0.03）
 RECALL_TRIGGER_MIN = 0.5
+# JEV 召回筛选：只保留分数达标的候选（实测 相关 0.72~0.81 / 无关 0.02~0.06 ⇒ 0.35 分得很开）
+RECALL_KEEP_MIN = 0.35
+RECALL_KEEP_MIN_COUNT = 2      # 至少留 2 条，避免极端情况一条都不注入
+JEV_BUDGET_CALLS = 3           # 每个会话 60 秒内最多 3 次 JEV 预取（群里 bot 大多不回复，不能每条都烧）
+JEV_BUDGET_WINDOW = 60.0
 
 PLUGIN_ID = "alife_memory_z"
 
@@ -490,6 +495,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # v2.18.74：JEV 决策层 + 模型重排（**可选增强**；全关时零行为变化）
         #   顺序缓存：prewarm 期间算好 ⇒ 注入时只查一次字典（零成本）
         self._order_cache = {}
+        self._jev_calls = {}          # v2.18.74：每会话 JEV 预取预算（滑动窗口）
         self.decisions = None
         self.reranker = None
         self._build_aux()
@@ -1553,6 +1559,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
             return
         order = None
+        strict = False
+        dropped = 0
         tokens0 = getattr(getattr(self, "decisions", None), "tokens", 0)
         reranker = getattr(self, "reranker", None)
         if rr_on and reranker is not None and reranker.ready:
@@ -1564,7 +1572,15 @@ class AlifeMemoryPlugin(BasePlugin):
                 if rr_on:
                     timeout = (getattr(cfg, "rerank_timeout_ms", 1500) or 1500) / 1000.0
                 scored = await decisions.recall_filter(query, items, timeout=timeout)
-                order = [k for k, _s in scored] if scored else None
+                if scored:
+                    keep = [(k, s) for k, s in scored
+                            if s is not None and s >= RECALL_KEEP_MIN]
+                    if len(keep) < RECALL_KEEP_MIN_COUNT:
+                        keep = sorted(scored, key=lambda kv: -(kv[1] or 0))[
+                            :RECALL_KEEP_MIN_COUNT]
+                    order = [k for k, _s in keep]
+                    strict = True       # 真筛过 ⇒ 注入时丢弃未入选的（这才叫"挑出"）
+                    dropped = len(scored) - len(order)
         if not order:
             if trigger:
                 self._order_cache[mkey] = {"rev": None, "order": [], "trigger": True}
@@ -1574,9 +1590,11 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             revision = None
         used = getattr(getattr(self, "decisions", None), "tokens", 0) - tokens0
-        logger.info("[记忆·Z] JEV·召回 %d 条候选 → 挑出 %d 条优先注入（%d tok）",
-                    len(items), len(order), used)
-        self._order_cache[mkey] = {"rev": revision, "order": list(order), "trigger": trigger}
+        logger.info("[记忆·Z] JEV·召回 %d 条候选 → 挑出 %d 条优先注入%s（%d tok）",
+                    len(items), len(order), ("，滤掉 %d 条无关" % dropped) if dropped else "",
+                    used)
+        self._order_cache[mkey] = {"rev": revision, "order": list(order),
+                                   "trigger": trigger, "strict": strict}
         if len(self._order_cache) > 256:
             self._order_cache.clear()
         logger.debug("[记忆·Z] 顺序预取完成：%d 条候选已重排", len(order))
@@ -1595,6 +1613,12 @@ class AlifeMemoryPlugin(BasePlugin):
             return rows
         rank = {rid: i for i, rid in enumerate(order)}
         try:
+            if entry.get("strict"):
+                # ★ 真筛选：未入选的一律不注入（这才是"挑出"的意义）
+                picked = [r for r in rows if str(r.get("id")) in rank]
+                if picked:
+                    return sorted(picked, key=lambda r: rank.get(str(r.get("id")), 0))
+                return rows          # 兜底：全被滤掉时保持原样，绝不注入空
             return sorted(rows, key=lambda r: rank.get(str(r.get("id")), len(rank) + 1))
         except Exception:
             return rows
@@ -2019,6 +2043,21 @@ class AlifeMemoryPlugin(BasePlugin):
         last = str(getattr(users[-1], "content", "")) if users else ""
         return (len(users), hash(last))
 
+    def _jev_budget_ok(self, sid) -> bool:
+        """JEV 预取预算：每会话 60 秒内最多 JEV_BUDGET_CALLS 次（滑动窗口）。"""
+        if not getattr(self, "decisions", None) or not self.decisions.ready:
+            return False
+        now = time.time()
+        marks = self._jev_calls.setdefault(sid, [])
+        marks[:] = [x for x in marks if now - x < JEV_BUDGET_WINDOW]
+        if len(marks) >= JEV_BUDGET_CALLS:
+            return False
+        marks.append(now)
+        if len(self._jev_calls) > 256:
+            for key in list(self._jev_calls)[:128]:
+                self._jev_calls.pop(key, None)
+        return True
+
     def bootstrap_allowed(self):
         """是否允许把宿主旧历史播种进本会话。"""
         mode = self.settings.bootstrap_seed
@@ -2039,9 +2078,14 @@ class AlifeMemoryPlugin(BasePlugin):
         if now - self._prewarm_seen.get(sid, 0) < 2:
             return  # 同一会话 2 秒内只预热一次，避免连发消息时重复计算
         self._prewarm_seen[sid] = now
+        # v2.18.74：JEV 预取**限流** —— 群聊里 bot 大多数消息都不会回复，
+        # 若每条都调一次决策模型就是纯烧钱 ✗（用户实测：没被唤醒也在烧）
+        # 启发层（检索缓存）照常预热（几乎零成本），只有"要花钱的决策调用"受限。
         if len(self._prewarm_seen) > 256:
             for key in sorted(self._prewarm_seen, key=self._prewarm_seen.get)[:128]:
                 self._prewarm_seen.pop(key, None)
+        if not self._jev_budget_ok(sid):
+            return                          # 预算用完 ⇒ 本次只跳过"要花钱的决策调用"
         _q = " ".join(capture_text(text_of(_m)) for _m in event_messages(event))
         asyncio.create_task(
             self.prewarm(sid, user_ids(event), cfg.recall_scope, query=_q, cfg=cfg)
