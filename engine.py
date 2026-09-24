@@ -1631,10 +1631,15 @@ class Engine:
         return total
 
     @staticmethod
-    def _fact_clusters(rows, threshold, cross_threshold=0.0):
+    def _fact_clusters(rows, threshold, cross_threshold=0.0, jev_route=False):
         """Connected components of similar facts sharing the same subject.
 
         同类别用 threshold；跨类别用更保守的 cross_threshold（<=0 表示不跨）。
+
+        v2.18.74（C 项）：`jev_route=True` 时**只把"同类别"那条门槛**适度放宽
+        （词面不重合的同义重复原本进不了组 ⇒ JEV 没机会判 ✗）。
+        **跨类别门槛不动**、跨主体依旧绝不合并 ⇒ 现有不变式一条不破 ✓
+        关闭 JEV 时 jev_route=False ⇒ 与今天逐字节一致 ✓
         """
         from .retrieval import similarity
 
@@ -1655,11 +1660,10 @@ class Engine:
             for right in rows[index + 1 :]:
                 if left["subject"] != right["subject"]:
                     continue  # 跨主体不合并：合并后归谁是个新问题
-                limit = (
-                    threshold
-                    if left["category"] == right["category"]
-                    else cross_threshold
-                )
+                same_cat = left["category"] == right["category"]
+                limit = threshold if same_cat else cross_threshold
+                if jev_route and same_cat and limit > 0:
+                    limit = max(0.10, limit * 0.6)
                 if limit <= 0:
                     continue
                 if similarity(left["content"], right["content"], min_overlap=2) >= limit:
@@ -1698,7 +1702,12 @@ class Engine:
         pending_ids = {row["id"] for row in pending}
         clusters = [
             group
-            for group in self._fact_clusters(list(pool.values()), cfg.fact_merge_threshold)
+            for group in self._fact_clusters(
+                list(pool.values()), cfg.fact_merge_threshold,
+                # C 项：JEV 参与路由时放宽「同类别」的发现门槛（跨类别/跨主体不变）
+                jev_route=bool(getattr(cfg, "jev_enabled", False)
+                               and getattr(cfg, "jev_merge", False)),
+            )
             if pending_ids & {row["id"] for row in group}
         ]
         if not clusters:
