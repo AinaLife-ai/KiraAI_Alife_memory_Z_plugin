@@ -1447,9 +1447,15 @@ class Engine:
         if row:
             vector, model = await self.embed(row["summary"], cfg)
             if vector and self.settings() == cfg:
-                await self.store.call(
-                    "set_vector", record_id, model, row["revision"], vector
-                )
+                # ★ v2.20.1：embedding 是**慢调用**，期间记录可能被并发写
+                #   ⇒ 用旧 revision 写 vector 会 Conflict ✗ ⇒ 写入前重读一次 ✓
+                fresh = await self.store.call("get", record_id)
+                if fresh:
+                    await self.store.call(
+                        "set_vector", record_id, model, fresh["revision"], vector
+                    )
+                else:
+                    logger.debug("[记忆·Z] 索引跳过：记录已不存在（%s）", record_id)
 
     async def audit(self, sid, job_id=None):
         cfg = self.settings()
@@ -2168,7 +2174,24 @@ class Engine:
             if action == "split" and patch.get("summary"):
                 patch.pop("active")  # split：约束那段留在常驻
             if patch:
-                await self.store.call("edit", "record", record_id, row["revision"], patch, reason)
+                # ★ v2.20.1：整理是**长任务**（先跑模型再逐条应用）⇒ 期间记录可能被并发写
+                #   旧 revision 会 Conflict ✗ ⇒ 冲突时重读再试一次（仍失败则照旧抛出 ✓ 不吞错）
+                _edit_ok = False          # ★ 别用 applied：它是本函数的**应用计数** ✗（撞名会污染计数）
+                for _try in range(2):
+                    try:
+                        await self.store.call(
+                            "edit", "record", record_id, row["revision"], patch, reason)
+                        _edit_ok = True
+                        break
+                    except ValueError as exc:            # Conflict ⊂ ValueError
+                        if _try or "reload before saving" not in str(exc):
+                            raise
+                        fresh = await self.store.call("get", record_id)
+                        if not fresh:
+                            raise
+                        row = fresh
+                if not _edit_ok:
+                    logger.warning("[记忆·Z] 整理未应用（记录变化频繁）：%s", record_id)
             facts = []
             for fact in verdict.get("facts", []):
                 facts.append(
