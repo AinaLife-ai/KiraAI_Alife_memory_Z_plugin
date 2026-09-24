@@ -254,6 +254,73 @@ class DecisionsCase(unittest.TestCase):
                          "只压不抬：核心/一般 不写回；无价值=1；置信 0.1 不足 ⇒ 跳过")
 
 
+class ProviderCompatCase(unittest.TestCase):
+    """★ 任意提供商类型下注册的 JEV 都要能连上（用户要求）。"""
+
+    def _resolve(self, provider_config):
+        class Mgr:
+            def get_model_info(self, pid, mid):
+                class Info:
+                    pass
+
+                info = Info()
+                info.provider_config = provider_config
+                return info
+
+        class S:
+            jev_enabled = True
+            jev_model = "someprovider:jev-latest"
+            jev_base_url = ""
+            jev_api_key = ""
+            jev_model_name = ""
+            jev_timeout_ms = 4000
+            jev_sample = 1.0
+
+        return md.resolve_config(S(), Mgr())
+
+    def test_endpoint_normalisation(self):
+        cases = {
+            "https://api.typesafe.ai": "https://api.typesafe.ai/v1/systemone",
+            "https://api.typesafe.ai/": "https://api.typesafe.ai/v1/systemone",
+            "https://api.typesafe.ai/v1": "https://api.typesafe.ai/v1/systemone",
+            "https://x/v1/chat/completions": "https://x/v1/systemone",
+            "https://x/v1/systemone": "https://x/v1/systemone",
+            "https://x/openai/v1/": "https://x/openai/v1/systemone",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(md.endpoint_of(raw), want, raw)
+
+    def test_config_key_variants(self):
+        """不同提供商/第三方插件的键名差异都要认得。"""
+        for cfg in (
+            {"base_url": "https://a.example", "api_key": "k1"},          # openai 系
+            {"api_base": "https://b.example", "apikey": "k2"},           # 别名
+            {"host": "https://c.example", "token": "k3"},                # ollama 风
+            {"endpoint": "https://d.example", "key": "k4"},              # azure 风
+            {"openai": {"base_url": "https://e.example", "api_key": "k5"}},  # 嵌套
+        ):
+            c = self._resolve(cfg)
+            self.assertTrue(c.base_url.startswith("https://"), cfg)
+            self.assertTrue(c.api_key.startswith("k"), cfg)
+            self.assertEqual(c.model, "jev-latest")
+
+    def test_client_uses_normalised_endpoint(self):
+        """★ 实测过的坑：OpenAI 型提供商的 base_url 带 /v1，直接拼会变成 /v1/v1 ✗"""
+        self.assertEqual(
+            md.JevClient("https://api.x.com/v1", "k", "jev-latest").endpoint,
+            "https://api.x.com/v1/systemone",
+        )
+        self.assertEqual(
+            md.JevClient("https://api.x.com", "k", "jev-latest").endpoint,
+            "https://api.x.com/v1/systemone",
+        )
+
+    def test_missing_key_falls_back_to_default_endpoint(self):
+        c = self._resolve({})
+        self.assertEqual(c.base_url, md.DEFAULT_BASE_URL)   # 官方默认，不炸
+        self.assertFalse(c.ready, "没 key ⇒ 视为不可用（不影响其它功能）")
+
+
 class PayloadShapeCase(unittest.TestCase):
     """/v1/systemone 的请求体形状（实测约束，别改坏）。"""
 

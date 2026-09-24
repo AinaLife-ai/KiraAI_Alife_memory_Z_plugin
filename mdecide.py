@@ -83,6 +83,9 @@ class JevClient:
 
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 4.0):
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        # ★ 必须走 endpoint_of 规整：OpenAI 类型提供商的 base_url 常带 /v1，
+        #   直接拼会变成 …/v1/v1/systemone ✗（实测：解析对了但真机调用失败）
+        self.endpoint = endpoint_of(base_url or DEFAULT_BASE_URL)
         self.api_key = api_key or ""
         self.model = model or DEFAULT_MODEL
         self.timeout = float(timeout)
@@ -111,7 +114,7 @@ class JevClient:
     # ---------- 同步实现 ----------
     def _post_sync(self, payload: dict, timeout: float) -> Optional[dict]:
         req = urllib.request.Request(
-            self.base_url + "/v1/systemone",
+            self.endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": "Bearer " + self.api_key,
@@ -168,12 +171,49 @@ def split_uuid(uuid: str) -> tuple[str, str]:
     return pid.strip(), mid.strip()
 
 
+# 常见"末端路径"——用户可能直接粘贴完整端点，规整时要先剥掉
+_ENDPOINT_SUFFIXES = ("/v1/systemone", "/systemone", "/chat/completions",
+                      "/completions", "/embeddings", "/models", "/v1/messages")
+
+
 def endpoint_of(base_url: str) -> str:
-    """把提供商 base_url 规整成 systemone 端点（容忍结尾带/不带 /v1）。"""
+    """把提供商 base_url 规整成 systemone 端点。
+
+    要容忍各种粘法（实测用户会直接粘贴完整地址）：
+      https://api.typesafe.ai            → .../v1/systemone
+      https://api.typesafe.ai/v1         → .../v1/systemone
+      https://x/v1/chat/completions      → .../v1/systemone
+      https://x/v1/systemone             → .../v1/systemone（不重复拼 ✗）
+    """
     b = (base_url or DEFAULT_BASE_URL).strip().rstrip("/")
+    for suffix in _ENDPOINT_SUFFIXES:
+        if b.endswith(suffix):
+            b = b[: -len(suffix)].rstrip("/")
+            break
     if b.endswith("/v1"):
         b = b[:-3].rstrip("/")
     return b + "/v1/systemone"
+
+
+# 不同提供商/第三方插件对这两个字段的叫法可能不同 ⇒ 多键名兜底
+_BASE_KEYS = ("base_url", "api_base", "openai_api_base", "base", "endpoint",
+              "url", "host", "server", "api_host")
+_KEY_KEYS = ("api_key", "apikey", "api_token", "token", "key",
+             "access_key", "secret", "auth_token")
+
+
+def _pick(cfg: dict, names) -> str:
+    """从 provider_config 里挑第一个非空的候选键；支持嵌套一层（如 {"openai": {...}}）。"""
+    for name in names:
+        value = cfg.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for value in cfg.values():
+        if isinstance(value, dict):
+            found = _pick(value, names)
+            if found:
+                return found
+    return ""
 
 
 class JevConfig:
@@ -216,9 +256,18 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
             pid, mid = split_uuid(uuid)
             info = provider_mgr.get_model_info(pid, mid)
             cfg = (getattr(info, "provider_config", None) or {}) if info else {}
-            base = base or str(cfg.get("base_url") or "")
-            key = key or _env(str(cfg.get("api_key") or ""))
+            if not isinstance(cfg, dict):
+                cfg = {}
+            base = base or _pick(cfg, _BASE_KEYS)
+            key = key or _env(_pick(cfg, _KEY_KEYS))
             model = model or mid
+            if not base or not key:
+                # 诊断一行：让用户知道“选了模型但连不上”缺的是哪一样 ✓
+                logger.warning(
+                    "[记忆·Z] JEV 连接信息不完整（base=%s key=%s，提供商 %s）"
+                    "—— 请在「设置 → 提供商」检查该模型的接口地址与密钥",
+                    "有" if base else "缺", "有" if key else "缺", pid,
+                )
         except Exception:  # noqa: BLE001 —— 解析失败不得影响插件
             pass
     try:
