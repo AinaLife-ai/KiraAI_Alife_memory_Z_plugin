@@ -998,7 +998,7 @@ class Engine:
         def _tool(row):
             return str((row or {}).get("category") or "") == "tool"
 
-        items = [("m%d" % row["id"], str(row.get("role") or "user"),
+        items = [("m%s" % row["id"], str(row.get("role") or "user"),
                   str(row.get("summary") or row.get("content") or ""))
                  for row in candidates
                  if not _tool(row)
@@ -1024,7 +1024,7 @@ class Engine:
 
         kept, excluded, top, kept_users = [], [], 0.0, 0
         for rnd in rounds:
-            vals = [scores["m%d" % r["id"]] for r in rnd if ("m%d" % r["id"]) in scores]
+            vals = [scores["m%s" % r["id"]] for r in rnd if ("m%s" % r["id"]) in scores]
             if not vals:                       # 全是工具步/无文本 ⇒ 判不了就不动 ✓
                 kept.extend(rnd)
                 continue
@@ -1055,9 +1055,9 @@ class Engine:
             "[记忆·Z] JEV·压缩 预筛：%d 轮 → 保留 %d 轮（%d 条消息，含 %d 条用户消息）"
             "，其余 %d 条直归档（最高分 %.2f）",
             len(rounds), sum(1 for _r in rounds
-                             if any(("m%d" % x["id"]) in scores for x in _r)
-                             and max(scores["m%d" % x["id"]] for x in _r
-                                     if ("m%d" % x["id"]) in scores) >= COMPRESS_KEEP_MIN),
+                             if any(("m%s" % x["id"]) in scores for x in _r)
+                             and max(scores["m%s" % x["id"]] for x in _r
+                                     if ("m%s" % x["id"]) in scores) >= COMPRESS_KEEP_MIN),
             len(kept), kept_users, archived, top)
         return kept, False
     async def _merge_plan_filter(self, batch, cfg):
@@ -1510,7 +1510,12 @@ class Engine:
                 logger.exception("[记忆·Z] 迁移直归档判定失败（按普通压缩继续 ✓）")
             # ★ v2.20.3 JEV 压缩**前置**筛选：只把「值得长期记」的消息送进压缩输入
             #   （整批都没价值 ⇒ 直接跳过这次调用 ✓；必须在 archive_distilled 之前 ✓）
-            candidates, _skip_compress = await self.jev_compress_screen(candidates, cfg)
+            try:                    # ★ 双保险：预筛出任何意外都照常压缩 ✓
+                candidates, _skip_compress = await self.jev_compress_screen(
+                    candidates, cfg)
+            except Exception:
+                logger.debug("[记忆·Z] JEV 预筛异常 ⇒ 照常压缩", exc_info=True)
+                _skip_compress = False
             if _skip_compress:
                 steps.append({"count": 0, "level": level,
                               "note": "JEV 预筛：本批无值得长期记的内容 ⇒ 跳过压缩调用"})

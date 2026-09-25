@@ -712,16 +712,16 @@ class JevCompressScreenCase(unittest.TestCase):
 
     ROWS = [
         # 轮 1：信息在**助手**回复里（用户话很轻）
-        {"id": 1, "sid": "s1", "role": "user", "summary": "用户：你把我那些事记一下"},
-        {"id": 2, "sid": "s1", "role": "assistant",
+        {"id": "m01", "sid": "s1", "role": "user", "summary": "用户：你把我那些事记一下"},
+        {"id": "m02", "sid": "s1", "role": "assistant",
          "summary": "助手：好的我记下了：①花生过敏 ②每周日提醒你给妈妈打电话"},
         # 轮 2：信息在**用户**消息里 + 一条工具步（不判，随轮走）
-        {"id": 3, "sid": "s1", "role": "user", "summary": "用户：我花生过敏，严重会休克"},
-        {"id": 4, "sid": "s1", "role": "assistant", "category": "tool",
+        {"id": "m03", "sid": "s1", "role": "user", "summary": "用户：我花生过敏，严重会休克"},
+        {"id": "m04", "sid": "s1", "role": "assistant", "category": "tool",
          "summary": "[调用工具：memorize(花生过敏)]"},
         # 轮 3：纯闲聊
-        {"id": 5, "sid": "s1", "role": "user", "summary": "用户：哈哈"},
-        {"id": 6, "sid": "s1", "role": "assistant", "summary": "助手：呵"},
+        {"id": "m05", "sid": "s1", "role": "user", "summary": "用户：哈哈"},
+        {"id": "m06", "sid": "s1", "role": "assistant", "summary": "助手：呵"},
     ]
 
     def _engine(self, decisions, store=None):
@@ -733,20 +733,21 @@ class JevCompressScreenCase(unittest.TestCase):
 
     def test_round_kept_by_assistant_side(self):
         """★ 关键：用户话轻（0.27）但助手复述了事实（0.98）⇒ 整轮必须保留 ✓"""
-        eng, st = self._engine(self._D({"m1": 0.27, "m2": 0.98, "m3": 0.96, "m5": 0.17, "m6": 0.04}))
+        eng, st = self._engine(self._D({"mm01": 0.27, "mm02": 0.98, "mm03": 0.96, "mm05": 0.17, "mm06": 0.04}))
         filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
         self.assertFalse(skip)
-        self.assertEqual([r["id"] for r in filtered], [1, 2, 3, 4],
+        self.assertEqual([r["id"] for r in filtered], ["m01", "m02", "m03", "m04"],
                          "轮1(靠助手) + 轮2(靠用户，含工具步) 保留 ✓")
         arc = [c for c in st.calls if c[0] == "archive_distilled"]
-        self.assertEqual([r["id"] for r in arc[0][1][1]], [5, 6], "纯闲聊整轮归档 ✓")
+        self.assertEqual([r["id"] for r in arc[0][1][1]], ["m05", "m06"], "纯闲聊整轮归档 ✓")
 
     def test_all_rounds_low_archives_and_skips(self):
-        eng, st = self._engine(self._D({"m1": 0.20, "m2": 0.10, "m3": 0.30, "m5": 0.05, "m6": 0.02}))
+        eng, st = self._engine(self._D({"mm01": 0.20, "mm02": 0.10, "mm03": 0.30, "mm05": 0.05, "mm06": 0.02}))
         filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
         self.assertTrue(skip, "全不够格 ⇒ 不调大模型 ✓")
         arc = [c for c in st.calls if c[0] == "archive_distilled"]
-        self.assertEqual([r["id"] for r in arc[0][1][1]], [1, 2, 3, 4, 5, 6],
+        self.assertEqual([r["id"] for r in arc[0][1][1]],
+                         ["m01", "m02", "m03", "m04", "m05", "m06"],
                          "全部归档 ✓（工具步 #4 随轮一起走 ✓）")
 
     def test_unavailable_no_archiving(self):
