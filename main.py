@@ -83,7 +83,9 @@ RECALL_TRIGGER_MIN = 0.5
 # JEV 召回筛选：只保留分数达标的候选（实测 相关 0.72~0.81 / 无关 0.02~0.06 ⇒ 0.35 分得很开）
 RECALL_KEEP_MIN = 0.10            # 实测：无关簇 0.03~0.04 / 相关簇 0.15~0.83（有 ±0.06 抖动）
                                   # ⇒ 0.10 既留两倍余量、又不会把抖动到 0.14 的相关项误杀
-JEV_RECALL_MIN_CANDIDATES = 4     # 候选少于 4 条不值得花钱
+JEV_RECALL_MIN_CANDIDATES = 4
+TOOL_POOL_FACTOR = 3      # 主动召回：扩池倍数 ✓
+TOOL_POOL_MAX = 60        # 扩池上限（再多只是浪费 token ✓）     # 候选少于 4 条不值得花钱
 RECALL_KEEP_MIN_COUNT = 2      # 至少留 2 条，避免极端情况一条都不注入
 JEV_BUDGET_CALLS = 3           # 每个会话 60 秒内最多 3 次 JEV 预取（群里 bot 大多不回复，不能每条都烧）
 JEV_BUDGET_WINDOW = 60.0
@@ -1735,6 +1737,29 @@ class AlifeMemoryPlugin(BasePlugin):
                     len(slots), int((time.time() - _t0) * 1000))
         return profiles
 
+    def _tool_expand(self, want: int) -> int:
+        """主动召回的候选池：expand 模式下先多取（×3，封顶 60）再精修截回 ✓
+
+        为什么要扩：精修只在**取回来的那批**里挑 ✓ ⇒ 池太小时，
+        「词法排不进前 N、但语义确实相关」的记忆**根本没机会被看到** ✗
+        （被动召回早就是这么做的：×3 取候选 → 精修 → 截回 ✓）
+
+        安全：未启用 JEV / 决策层未就绪 / 非 expand 模式 ⇒ **原样返回**，
+        即与旧行为逐字一致 ✓（扩池只在"确实有人来精修"时发生 ✓）
+        """
+        try:
+            if str(getattr(self.settings, "tool_refine_mode", "expand")) != "expand":
+                return want
+            if not (bool(getattr(self.settings, "jev_enabled", False))
+                    and bool(getattr(self.settings, "jev_recall", False))):
+                return want
+            dec = getattr(self, "decisions", None)
+            if dec is None or not dec.ready:
+                return want
+            return max(int(want), min(int(want) * TOOL_POOL_FACTOR, TOOL_POOL_MAX))
+        except Exception:                       # noqa: BLE001
+            return want
+
     async def _tool_refine(self, query, rows, cfg, strict=False):
         """主动召回（查档案/看画像）的候选排序：**只排序、不删**。
 
@@ -2088,12 +2113,20 @@ class AlifeMemoryPlugin(BasePlugin):
         rows = await self.store.call("entities", query, ids=ids, limit=5)
         if not rows:
             return self.recall_result(event, {"ok": False, "error": "entity_not_found"})
+        # ★ 2026-09-25：有对话上下文才扩池（否则扩了没人排 ⇒ 输出白白变大 ✗）
+        try:
+            _has_q = bool(" ".join(
+                capture_text(text_of(m)) for m in event_messages(event)).strip())
+        except Exception:                       # noqa: BLE001
+            _has_q = False
+        _want_n = int(cfg.profile_summary_count or 0)
+        _pool_n = self._tool_expand(_want_n) if _has_q else _want_n
         profiles = []
         for row in rows[:3]:
             profile = await self.store.call(
                 "profile",
                 row["id"],
-                cfg.profile_summary_count,
+                _want_n,
                 event.sid,
                 cfg.recall_scope != "session",
                 cfg.merge_pending_hide,
@@ -2112,9 +2145,24 @@ class AlifeMemoryPlugin(BasePlugin):
                         for category, facts in profile.get("categories", {}).items()
                     }
                 profiles.append(profile)
-        # v2.18.74：主动召回（GetProfile）也吃 JEV —— 按当前对话重排事实（limit 会截断 ⇒ 顺序关键）
+        # v2.18.74：主动召回（GetProfile）也吃 JEV —— 按当前对话重排事实
+        # 2026-09-25：先扩池（×3）⇒ 重排后按类别**截回原条数** ✓
+        #   （顺序即筛选：`profile_summary_count` 会截断，谁排前面谁被看到 ✓）
         profiles = await self._profile_refine(event, profiles, self.settings)
-        return self.recall_result(event, {"ok": True, "profiles": profiles})
+        _kept_n = 0
+        if _want_n:
+            for prof in profiles:
+                cats = prof.get("categories") or {}
+                for cat, facts in list(cats.items()):
+                    if len(facts) > _want_n:
+                        cats[cat] = facts[:_want_n]
+                    _kept_n += len(cats[cat])
+        return self.recall_result(
+            event,
+            {"ok": True, "profiles": profiles,
+             **({"refine": {"pool": _pool_n, "kept": _kept_n}}
+                if _pool_n > _kept_n and _kept_n else {})},
+        )
 
     async def correct_name(self, event, entity_id, name, revision, reason):
         try:
@@ -3522,7 +3570,10 @@ class AlifeMemoryPlugin(BasePlugin):
                 start=start,
                 end=end,
                 offset=(page - 1) * count,
-                limit=count,
+                # ★ 2026-09-25：page 1 先扩池（×3）⇒ 让"词法排不进前 N 但语义相关"的
+                #   记忆也有机会被精修看到 ✓ 下面再截回 count ✓（page≥2 是"继续找"，
+                #   保持原样最自然 ✓）
+                limit=self._tool_expand(count) if (page or 1) <= 1 else count,
             )
             vector, model = (
                 await self.embed(q.prompt, self.settings) if prompt else (None, "")
@@ -3549,8 +3600,12 @@ class AlifeMemoryPlugin(BasePlugin):
             raw_items = list(result["items"])  # 先留底：下面会换成紧凑形态
             # v2.18.74：主动召回（查档案）也吃 JEV，并且**在打包前就筛选** ✓
             #   ⇒ 后面的 seen 只标记"保留的那批" ⇒ 筛掉的没进已见，换个词还能搜到（不算丢）✓
+            _pool_n = len(raw_items)
             raw_items = await self._tool_refine(
                 (prompt or keyword or "").strip(), raw_items, self.settings, strict=True)
+            _kept_n = len(raw_items)
+            if _kept_n > count:                  # 截回模型要的条数 ✓（工具承诺过 count ✓）
+                raw_items = raw_items[:count]
             keep_names = await self.store.call("spaced_names")
             ids = sorted({u for r in raw_items for u in r["users"]})
             entities = await self.store.call("entities", ids=ids, limit=200) if ids else []
@@ -3608,6 +3663,9 @@ class AlifeMemoryPlugin(BasePlugin):
             )
             result["excluded_count"] = len(excluded)
             result["already_seen"] = len(seen)
+            if _pool_n > len(raw_items):
+                # 让模型知道"不是没有、是被筛了" ⇒ 不会误判为空而反复换词重搜 ✓
+                result["refine"] = {"pool": _pool_n, "kept": len(raw_items)}
             if not result["items"] and seen:
                 result["hint"] = (
                     "本轮没有新内容：相关记忆此前已经给过。"
@@ -3736,13 +3794,20 @@ class AlifeMemoryPlugin(BasePlugin):
             return self.recall_result(event, {"ok": False, "error": "invalid_offset"})
         key = (event.sid, tuple(user_ids(event)), self.settings.recall_scope)
         seen = self.seen_window.get(key)["facts"]
+        # ★ 2026-09-25：先算查询 —— **有查询才扩池** ✓
+        #   否则扩了没人精修 ⇒ 一次塞 3 倍事实 ✗ 而且会被记成"已见"白烧掉 ✓
+        try:
+            _q = " ".join(
+                capture_text(text_of(m)) for m in event_messages(event)).strip()
+        except Exception:                       # noqa: BLE001
+            _q = ""
         rows = await self.store.call(
             "facts",
             event.sid,
             subject=subject,
             # Facts already delivered are skipped, so each call yields new ones.
             offset=0 if seen else offset,
-            limit=50,
+            limit=(self._tool_expand(50) if _q else 50),
             global_scope=self.settings.recall_scope == "global",
             users=user_ids(event),
             include_shared=True,
@@ -3750,15 +3815,16 @@ class AlifeMemoryPlugin(BasePlugin):
             hide_pending=self.settings.merge_pending_hide,
             importance_first=True,
         )
-        # v2.18.74：主动召回（overview：一批没见过的事实）也吃 JEV。
-        # 这里排序价值最直接：取回的事实会被**标记为已见** ⇒
-        # 顺序决定「模型先看到哪些、哪些被这轮消耗掉」✓ 只排不删 ✓
-        try:
-            _q = " ".join(capture_text(text_of(m)) for m in event_messages(event)).strip()
-        except Exception:
-            _q = ""
+        # v2.18.74：主动召回（overview）也吃 JEV；2026-09-25 起先扩池再精修 ✓
+        # 这里顺序价值最直接：取回的事实会被**标记为已见** ⇒
+        # 顺序决定「模型先看到哪些、哪些被这轮消耗掉」✓
+        _pool_n = len(rows)
         if _q:
             rows = await self._tool_refine(_q, rows, self.settings, strict=True)
+            if len(rows) > 50:                  # 截回原条数（**在标记"已见"之前** ✓）
+                rows = rows[:50]
+        _refine_note = ({"pool": _pool_n, "kept": len(rows)}
+                        if _pool_n > len(rows) else None)
         self.seen_window.remember(key, "", [], [row["id"] for row in rows])
         context = await self.store.call("context", event.sid, user_ids(event))
         totals = await self.store.call(
@@ -3771,6 +3837,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 "active_archives": len(context),
                 "totals": totals,
                 "already_seen": len(seen),
+                **({"refine": _refine_note} if _refine_note else {}),
                 "subjects": sorted({r["subject"] for r in rows}),
                 "facts": pack_facts(
                     await self.store.call("attach_evidence", rows),

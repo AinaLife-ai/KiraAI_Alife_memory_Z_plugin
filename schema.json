@@ -870,6 +870,16 @@
         "description": "人物列表卡片上直接显示的画像要点条数（按重要度取）。默认3。",
         "minimum": 1,
         "maximum": 10
+      },
+      "tool_refine_mode": {
+        "type": "string",
+        "name": "主动召回精修方式",
+        "default": "expand",
+        "description": "主动召回的精修方式。expand（默认）先从更宽的候选里挑（×3）再按相关性筛排，最后截回原条数，让「表面不像、实际相关」的记忆也有机会被看到；inline 只在原条数内精修。JEV 未启用或失败时两者都等于旧行为。",
+        "options": [
+          "expand",
+          "inline"
+        ]
       }
     }
   }

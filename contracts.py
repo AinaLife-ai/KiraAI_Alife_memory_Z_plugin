@@ -429,6 +429,15 @@ class Settings(Strict):
     record_merge_reason_chars: int = Field(default=60, ge=2, le=500)
     record_merge_prompt: str = Field(default=RECORD_MERGE_PROMPT, max_length=8000)
     profile_summary_count: int = Field(default=3, ge=1, le=10)
+    tool_refine_mode: Literal["expand", "inline"] = Field(
+        default="expand",
+        description=(
+            "主动召回（查档案/看画像/overview）的精修方式："
+            "expand=先扩大候选范围（×3）再用 JEV 精修并截回原条数（默认，召回更全）；"
+            "inline=只在原有条数内精修（旧行为）。"
+            "两条路在 JEV 不可用/失败时都完全等于旧行为。"
+        ),
+    )
 
     @model_validator(mode="after")
     def valid_merge_limits(self):
