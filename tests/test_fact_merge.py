@@ -466,7 +466,7 @@ class JevEngineIntegration(unittest.TestCase):
         async def audit_prescreen(self, pairs):
             return list(self._suspicious)
 
-        async def merge_route(self, primary, cands):
+        async def merge_route(self, primary, cands, hints=None):
             # 引擎按**候选自身 id** 查表 ⇒ 桩必须用真实 key（否则全落进"keep"✗）
             keys = [k for k, _t in cands]
             return {keys[0]: "drop", keys[1]: "merge"} if len(keys) >= 2 else {}
@@ -552,7 +552,7 @@ class JevMergePrescreenCase(unittest.TestCase):
                 return None
             return dict(self._scores)
 
-        async def merge_route(self, primary, cands):
+        async def merge_route(self, primary, cands, hints=None):
             return {}
 
     class _Cfg:

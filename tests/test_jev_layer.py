@@ -573,3 +573,50 @@ class MergeInheritCase(unittest.TestCase):
         self.assertEqual(md.route_merge_soft(0.68, 0.77, 0.58), "merge")
         self.assertEqual(md.route_merge_soft(0.94, 0.11, 0.35), "drop")
         self.assertEqual(md.route_merge_soft(None, 0.9, 0.1), "keep")
+
+
+class MergeHintReuseCase(unittest.TestCase):
+    """★ 预筛已问过 same ⇒ 三问时必须**跳过重复提问**（省约 1/3 的 JEV 用量）。
+
+    时机是严格串行的：预筛（大模型之前）→ 大模型 → 三问（大模型之后）→ 落库。
+    这里守住"第三问不重复问 same"，并确认 hint 的分数被真正采纳 ✓
+    """
+
+    def test_hint_skips_same_question_and_is_used(self):
+        seen = []
+
+        def fake_post(payload, timeout):
+            qs = payload.get("questions") or {}
+            seen.append(set(qs))
+            # new 高（有新信息）、dilute 低（不稀释）⇒ 期望 merge ✓
+            ans = {k: {"type": "noul", "noul": 0.9 if k.startswith("new_") else 0.5}
+                   for k in qs}
+            return {"answers": ans, "usage": {"input_tokens": 5}}
+
+        c = md.JevClient("https://x.invalid", "k", "jev-latest")
+        c._post_sync = fake_post                 # type: ignore[assignment]
+        d = md.Decisions(md.JevConfig(enabled=True, base_url="https://x.invalid",
+                                      api_key="k", model="jev-latest"), None, None)
+        d._client = c
+        out = run(d.merge_route("主事实", [("1", "候选")], hints={"1": 0.88}))
+        self.assertEqual(seen[0], {"new_1", "dilute_1"},
+                         "有预筛结果时**不能再问 same**（否则白花 ✗）")
+        # hint(0.88 ⇒ 同一件事) + new 0.5 + dilute 0.5 ⇒ 合并 ✓
+        self.assertEqual(out, {"1": "merge"})
+
+    def test_without_hint_still_asks_same(self):
+        seen = []
+
+        def fake_post(payload, timeout):
+            qs = payload.get("questions") or {}
+            seen.append(set(qs))
+            return {"answers": {k: {"type": "noul", "noul": 0.5} for k in qs},
+                    "usage": {"input_tokens": 5}}
+
+        c = md.JevClient("https://x.invalid", "k", "jev-latest")
+        c._post_sync = fake_post                 # type: ignore[assignment]
+        d = md.Decisions(md.JevConfig(enabled=True, base_url="https://x.invalid",
+                                      api_key="k", model="jev-latest"), None, None)
+        d._client = c
+        run(d.merge_route("主事实", [("1", "候选")]))
+        self.assertEqual(seen[0], {"same_1", "new_1", "dilute_1"}, "没有预筛时三问齐全 ✓")

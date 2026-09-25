@@ -1003,6 +1003,15 @@ class Engine:
             return False
         if not scores or len(scores) != len(items):
             return False                          # 不完整 ⇒ 不跳 ✓
+        # ★ 缓存起来（键 = 主事实+候选文本）⇒ 后置三问**不再重复问 same**（省约 1/3 用量 ✓）
+        cache = getattr(self, "_merge_same_cache", None)
+        if cache is None:
+            cache = self._merge_same_cache = {}
+        for (key, primary, cand), score in zip(items, [scores[k] for k, _p, _c in items]):
+            cache[(primary, cand)] = score
+        if len(cache) > 512:                      # 有界，防内存膨胀
+            for k in list(cache)[:256]:
+                cache.pop(k, None)
         low = [s for s in scores.values() if s is not None and s <= SAME_LOW]
         return len(low) == len(scores)            # **全部**明确不同才跳 ✓
 
@@ -1033,7 +1042,11 @@ class Engine:
                 target = next(r for r in group if r["id"] == verdict["target_id"])
                 cands = [(str(r["id"]), str(r["content"])) for r in group
                          if r["id"] in sources and r["id"] != verdict["target_id"]]
-                route = await decisions.merge_route(str(target["content"]), cands) if cands else None
+                _cache = getattr(self, "_merge_same_cache", {}) or {}
+                _hints = {k: _cache[(str(target["content"]), t)]
+                          for k, t in cands if (str(target["content"]), t) in _cache}
+                route = (await decisions.merge_route(str(target["content"]), cands,
+                                                     hints=_hints)) if cands else None
             except Exception:
                 route = None
             if not route:

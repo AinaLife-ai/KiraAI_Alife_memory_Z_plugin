@@ -633,7 +633,7 @@ class Decisions:
         self.calls += 1
         return out or None
 
-    async def merge_route(self, primary: str, cands, timeout=None):
+    async def merge_route(self, primary: str, cands, timeout=None, hints=None):
         """逐条候选判定 merge/drop/keep。
 
         ★ 必须**一条候选一次调用**（实测：把两条近似候选放进同一次调用会互相干扰，
@@ -646,13 +646,16 @@ class Decisions:
             return None
 
         async def one(key: str, text: str):
-            data = await self._ask(
-                "lang: zh", build_merge_route_single(primary, key, text), "merge",
-                timeout)
+            hint = (hints or {}).get(key)
+            qs = build_merge_route_single(primary, key, text)
+            if hint is not None:
+                # ★ 预筛已经问过 same ⇒ 这里不再重复问（省约 1/3 的 JEV 用量 ✓）
+                qs.pop("same_" + key, None)
+            data = await self._ask("lang: zh", qs, "merge", timeout)
             if not data:
                 return key, None
             a = data.get("answers") or {}
-            same = parse_noul(a, "same_" + key)
+            same = hint if hint is not None else parse_noul(a, "same_" + key)
             new = parse_noul(a, "new_" + key)
             dil = parse_noul(a, "dilute_" + key)
             if same is None or new is None:
