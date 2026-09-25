@@ -34,7 +34,11 @@ from .contracts import (
     dump,
 )
 
-from .mdecide import SAME_LOW   # 合并预筛：同一个「明确无关」阈值 ✓
+from .mdecide import (
+    COMPRESS_KEEP_MIN,
+    COMPRESS_SKIP_BELOW,
+    SAME_LOW,
+)
 
 logger = logging.getLogger("alife_memory_z")
 
@@ -972,6 +976,65 @@ class Engine:
         return value
 
     # ── v2.18.74：JEV 决策（生效）──────────────────────────────
+    async def jev_compress_screen(self, candidates, cfg):
+        """压缩**前置**筛选：逐条用户消息判「有没有值得长期记住的信息」⇒ 只送高价值的进压缩。
+
+        组合规则（方案 v4 §3.1，实测 AUC 1.00 ✓）：
+          · 全批最高分 < COMPRESS_SKIP_BELOW(0.35) ⇒ **整批跳过压缩调用**（省 100% ✓）
+          · 单条 ≥ COMPRESS_KEEP_MIN(0.50)         ⇒ 进入压缩输入 ✓
+          · 0.35~0.50                              ⇒ 待观察（不进输入，记录留着下次再看 ✓）
+
+        助手消息**不单独判** ✗（不承载用户事实），但紧跟保留用户消息之后的助手回复要保留 ✓（上下文）。
+        JEV 未启用/不可用/失败/解析不全 ⇒ 原样返回（= 关闭 JEV 的行为 ✓）
+        返回 (filtered_candidates, skip_all)
+        """
+        decisions = getattr(self, "decisions", None)
+        if decisions is None or not getattr(cfg, "jev_enabled", False):
+            return candidates, False
+        if not getattr(cfg, "jev_compress", False) or not decisions.ready:
+            return candidates, False
+        items = [("u%d" % row["id"], str(row.get("summary") or row.get("content") or ""))
+                 for row in candidates
+                 if str(row.get("role") or "") != "assistant"
+                 and str(row.get("summary") or row.get("content") or "").strip()]
+        if not items:
+            return candidates, False
+        try:
+            scores = await decisions.compress_screen(items)
+        except Exception:
+            logger.debug("[记忆·Z] JEV 压缩预筛失败（照常压缩）", exc_info=True)
+            return candidates, False
+        if not scores or len(scores) != len(items):
+            return candidates, False
+        top = max(scores.values())
+        if top < COMPRESS_SKIP_BELOW:
+            logger.info(
+                "[记忆·Z] JEV·压缩 预筛：本批 %d 条消息最高分仅 %.2f（< %.2f）"
+                " ⇒ 跳过压缩调用（记录留待下次 ✓）",
+                len(items), top, COMPRESS_SKIP_BELOW)
+            return candidates, True
+        filtered, last_kept = [], False
+        for row in candidates:
+            if str(row.get("role") or "") == "assistant":
+                if last_kept:
+                    filtered.append(row)          # 紧跟保留用户消息的助手回复 ⇒ 保留（上下文 ✓）
+                continue
+            score = scores.get("u%d" % row["id"])
+            last_kept = score is not None and score >= COMPRESS_KEEP_MIN
+            if last_kept:
+                filtered.append(row)
+        if not filtered:
+            # 全部落在「待观察」带（0.35~0.50）⇒ 本次没有够格进压缩的内容
+            # ★ 不能兜底返回全部 ✗（那等于把规则废掉）；记录留着下次再看 ✓
+            logger.info(
+                "[记忆·Z] JEV·压缩 预筛：%d 条用户消息都在「待观察」带（最高 %.2f）"
+                " ⇒ 本次不抽（记录留待下次 ✓）", len(items), top)
+            return candidates, True
+        logger.info(
+            "[记忆·Z] JEV·压缩 预筛：%d 条用户消息 → 保留 %d 条进压缩输入（最高分 %.2f）",
+            len(items), sum(1 for r in filtered if str(r.get("role")) != "assistant"), top)
+        return filtered, False
+
     async def _merge_plan_filter(self, batch, cfg):
         """**先审后生成**：JEV 先决定每组的去向 ⇒ 过滤掉不该合/该丢的，再交给大模型。
 
@@ -1420,6 +1483,13 @@ class Engine:
                     continue
             except Exception:
                 logger.exception("[记忆·Z] 迁移直归档判定失败（按普通压缩继续 ✓）")
+            # ★ v2.20.3 JEV 压缩**前置**筛选：只把「值得长期记」的消息送进压缩输入
+            #   （整批都没价值 ⇒ 直接跳过这次调用 ✓；必须在 archive_distilled 之前 ✓）
+            candidates, _skip_compress = await self.jev_compress_screen(candidates, cfg)
+            if _skip_compress:
+                steps.append({"count": 0, "level": level,
+                              "note": "JEV 预筛：本批无值得长期记的内容 ⇒ 跳过压缩调用"})
+                continue
             # Bound complete records in one pass, never truncate evidence or fabricate a level.
             names = await self.name_map(
                 {user for row in candidates for user in row["users"]}

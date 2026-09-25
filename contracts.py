@@ -315,6 +315,7 @@ class Settings(Strict):
     jev_merge: bool = False               # 合并路由（merge / drop→回收站 / keep）
     jev_audit: bool = False               # 审计预筛（只把可疑对喂审计模型）
     jev_importance: bool = False          # 写入时重要度定级（影响上浮/下沉）
+    jev_compress: bool = False            # 压缩前置筛选（只把值得长期记的消息送进压缩）
     # 可选重排模型（KiraAI 里注册的 rerank 模型；留空=不重排，行为与之前一致）
     rerank_model: str = ""
     rerank_enabled: bool = False

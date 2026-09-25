@@ -336,6 +336,12 @@
         "default": false,
         "description": "写入时由 JEV 给事实定重要度（核心/重要/一般/琐碎，对应分数 9/7/5/3）。重要度 ≥8 永不沉；一次性事务会自然下沉。"
       },
+      "jev_compress": {
+        "type": "switch",
+        "name": "JEV 用于压缩前置筛选",
+        "default": false,
+        "description": "压缩前先筛一遍：只把「值得长期记住」的消息送进压缩输入，整批都没价值时直接跳过这次压缩调用（记录留着，下次还会再抽，不丢内容）。"
+      },
       "rerank_model": {
         "type": "model_select",
         "name": "启用模型重排（可选，默认关闭）",

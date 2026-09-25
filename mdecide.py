@@ -360,6 +360,17 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]],
 
 
 # ── 2) 合并路由：三信号 → 代码组合（绝不问"该怎么办"）──
+def build_compress_screen(key: str, text: str) -> dict:
+    """压缩前筛消息：这条消息里有没有值得长期记住的用户信息？（实测 AUC 1.00 ✓）"""
+    return {
+        "m_" + key: q_noul(
+            f"[消息] {text} [/消息]\n这条消息里有没有值得长期记住的用户信息？",
+            "有：用户的持久事实/偏好/身份/关系/约定/长期目标，或明确表达的情绪与态度",
+            "没有：寒暄、客套、一次性事务、纯提问、工具调用或没有信息量的内容",
+        ),
+    }
+
+
 def build_merge_prescreen(primary: str, key: str, text: str) -> dict:
     """合并**预筛**：只问「是不是同一件事」（1 问/候选 ⇒ 最省 ✓）。
 
@@ -447,6 +458,12 @@ def route_merge(same: Optional[float], new: Optional[float], dilute: Optional[fl
 #     为什么不用"同话题"判据：实测同主题不同角度 0.39 / 互不相干 0.36 ⇒ 只差 0.03 ✗
 #     用它会把这个区间的**无关事实也合进来**（正是要避开的稀释 ✗）
 SAME_LOW = 0.12
+# 压缩前置筛选（方案 v4 §3.1，实测 AUC 1.00）：
+#   全批最高 < COMPRESS_SKIP_BELOW ⇒ 整批跳过压缩调用（省 100%）
+#   单条 ≥ COMPRESS_KEEP_MIN      ⇒ 进入压缩输入
+#   中间带                        ⇒ 待观察（不进输入，记录留着下次再看 ✓）
+COMPRESS_SKIP_BELOW = 0.35
+COMPRESS_KEEP_MIN = 0.50
 
 
 def route_merge_soft(same, new, dilute):
@@ -629,6 +646,31 @@ class Decisions:
             score = parse_noul(answers, "same_" + key)
             if score is None:
                 return None          # 有解析不出来的 ⇒ 不冒险，交给大模型 ✓
+            out[key] = score
+        self.calls += 1
+        return out or None
+
+    async def compress_screen(self, items, timeout=None):
+        """压缩前置筛选：对 [(key, 文本)] 一次性问「值不值得长期记」⇒ {key: 分数}。
+
+        失败 / 未启用 ⇒ None（调用方**原样放行** ✓ 绝不误跳）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, text in items:
+            questions.update(build_compress_screen(key, text))
+        data = await self._ask("lang: zh", questions, "compress_screen", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _t in items:
+            score = parse_noul(answers, "m_" + key)
+            if score is None:
+                return None                   # 解析不全 ⇒ 整批放行 ✓
             out[key] = score
         self.calls += 1
         return out or None

@@ -673,3 +673,67 @@ class JevMergePlanCase(unittest.TestCase):
         filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
         self.assertEqual(filtered, self._batch(), "JEV 不可用 ⇒ 原样放行（= 关闭 JEV ✓）")
         self.assertEqual(stats, {})
+
+
+class JevCompressScreenCase(unittest.TestCase):
+    """★ 压缩前置筛选（方案 v4 §3.1）：整批跳过 / 待观察 / 进压缩输入 + 保留助手上下文。"""
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+
+        def __init__(self, scores):
+            self._scores = scores
+            self.log = JevCompressScreenCase._Log()
+
+        async def compress_screen(self, items):
+            return dict(self._scores) if self._scores else None
+
+    class _Cfg:
+        jev_enabled = True
+        jev_compress = True
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    ROWS = [
+        {"id": 1, "role": "user", "summary": "用户：我花生过敏，严重会休克"},
+        {"id": 2, "role": "assistant", "summary": "助手：好的，我记住了"},
+        {"id": 3, "role": "user", "summary": "用户：哈哈"},
+        {"id": 4, "role": "assistant", "summary": "助手：呵"},
+        {"id": 5, "role": "user", "summary": "用户：明天三点的会"},
+    ]
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    def test_high_value_kept_with_context(self):
+        eng = self._engine(self._D({"u1": 0.9, "u3": 0.05, "u5": 0.40}))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertFalse(skip)
+        self.assertEqual([r["id"] for r in filtered], [1, 2],
+                         "高价值用户消息 + 紧随其后的助手回复保留 ✓（上下文不丢）")
+
+    def test_mid_band_is_watch_only(self):
+        eng = self._engine(self._D({"u1": 0.10, "u3": 0.30, "u5": 0.40}))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertTrue(skip, "全在待观察带（0.35~0.50）⇒ 本次不抽 ✓（记录留着下次再看）")
+
+    def test_whole_batch_skip_when_all_low(self):
+        eng = self._engine(self._D({"u1": 0.10, "u3": 0.05, "u5": 0.20}))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertTrue(skip, "最高分 < 0.35 ⇒ 整批跳过压缩调用（省 100% ✓）")
+
+    def test_unavailable_passes_through(self):
+        eng = self._engine(self._D(None))
+        filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
+        self.assertEqual(filtered, self.ROWS, "JEV 不可用 ⇒ 原样（= 关闭 JEV ✓）")
+        self.assertFalse(skip)
