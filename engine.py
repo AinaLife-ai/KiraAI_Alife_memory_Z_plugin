@@ -34,7 +34,7 @@ from .contracts import (
     dump,
 )
 
-from .mdecide import COMPRESS_KEEP_MIN, SAME_LOW  # 用于压缩预筛 / 合并先审的阈值 ✓
+from .mdecide import COMPRESS_KEEP_MIN, SAME_NOT_SAME_MAX  # 用于压缩预筛 / 合并先审的阈值 ✓
 
 logger = logging.getLogger("alife_memory_z")
 
@@ -1129,7 +1129,13 @@ class Engine:
     async def jev_merge_prescreen(self, batch, cfg):
         """合并**预筛**：返回 True 表示「整批候选都明确不是同一件事」⇒ 可跳过大模型合并。
 
-        **保守**：只要有一条落在模糊带（> SAME_LOW），或解析失败/不可用 ⇒ 返回 False
+        ★ 2026-09-25 真机实测：**接线无收益，故保持未接线** ✓
+          线上活路径 `_merge_plan_filter`（四态路由）已经做到「整批都不该合并 ⇒
+          一次大模型都不调」；本预筛唯一会跳的场景，线上本来就轮不到调模型
+          ⇒ 只多花 1 次 JEV 调用、省 0 次大模型（实测 S1~S5：省 0 / 多 1）✗
+          保留实现备查（若将来把「路由」整体换掉，可就地复用 ✓）
+
+        **保守**：只要有一条落在模糊带（> SAME_NOT_SAME_MAX），或解析失败/不可用 ⇒ 返回 False
         （照常调大模型 ✓ 绝不误跳）。省的是那次**大调用**（含来源原文证据 + 生成正文）。
         """
         decisions = getattr(self, "decisions", None)
@@ -1166,7 +1172,7 @@ class Engine:
         if len(cache) > 512:                      # 有界，防内存膨胀
             for k in list(cache)[:256]:
                 cache.pop(k, None)
-        low = [s for s in scores.values() if s is not None and s <= SAME_LOW]
+        low = [s for s in scores.values() if s is not None and s <= SAME_NOT_SAME_MAX]
         return len(low) == len(scores)            # **全部**明确不同才跳 ✓
 
     async def jev_apply_merge_route(self, verdicts, cfg):
@@ -2122,6 +2128,15 @@ class Engine:
                         for row in group:
                             if row["id"] == verdict["target_id"]:
                                 continue
+                            # ★ 2026-09-25：**先解除「待合并」再软删** ✓
+                            #   mark_merge_pending 只作用于 deleted=0 的行 ⇒ 删完再清就清不到 ✗
+                            #   会留下 pending=1 的僵尸标记（已删行不被取用 ⇒ 无实际影响，
+                            #   但恢复出回收站后会被重新扫成待合并 ⇒ 顺手清干净 ✓）
+                            try:
+                                await self.store.call(
+                                    "mark_merge_pending", [row["id"]], 0)
+                            except Exception:
+                                pass
                             await self.store.call(
                                 "edit",
                                 "fact",
