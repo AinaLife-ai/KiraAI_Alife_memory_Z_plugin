@@ -593,3 +593,83 @@ class JevMergePrescreenCase(unittest.TestCase):
         eng = self._engine(self._D({"g0_1": 0.05}))
         self.assertFalse(run(eng.jev_merge_prescreen(self.BATCH, self._Cfg())),
                          "分数不完整 ⇒ 不冒险 ✓")
+
+
+class JevMergePlanCase(unittest.TestCase):
+    """★ 先审后生成：只把「该合/交回大模型」的候选给大模型；该回收的直接合成判定（不调大模型）。
+
+    这也是"正常顺序"：JEV 先审 → 只把批准的发给大模型写正文 ✓
+    """
+
+    class _Log:
+        def write(self, *a, **k):
+            return None
+
+    class _D:
+        ready = True
+
+        def __init__(self, routes):
+            self._routes = routes
+            self.log = JevMergePlanCase._Log()
+
+        async def merge_plan(self, items):
+            return dict(self._routes) if self._routes else None
+
+        async def merge_route(self, primary, cands, hints=None):
+            return {}
+
+    class _Cfg:
+        jev_enabled = True
+        jev_merge = True
+        top_k = 5
+        jev_timeout_ms = 5000
+
+    class _Store:
+        async def call(self, *a, **k):
+            return None
+
+    def _engine(self, decisions):
+        eng = e.Engine(self._Store(), lambda: self._Cfg(), None, None, None)
+        eng.decisions = decisions
+        eng.store = self._Store()
+        return eng
+
+    @staticmethod
+    def _row(i, imp, text):
+        return {"id": i, "importance": imp, "content": text, "summary": text,
+                "subject": "用户", "category": "preference", "sid": "s1", "deleted": 0}
+
+    def _batch(self):
+        # 主事实应由**重要度**决定（9 > 5 > 3）⇒ target 必须是 id=1
+        return [[self._row(1, 9, "用户不吃香菜，觉得像肥皂味"),
+                 self._row(2, 3, "用户讨厌香菜"),
+                 self._row(3, 5, "用户不吃动物内脏"),
+                 self._row(4, 4, "凌晨问如何把录制视频转音频")]]
+
+    def test_target_is_deterministic_by_importance(self):
+        eng = self._engine(self._D({"c0_1": "merge", "c0_2": "keep", "c0_3": "drop"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered[0][0]["id"], 1, "主事实按重要度挑（不靠大模型 ✓）")
+
+    def test_kept_excluded_dropped_synthesised(self):
+        # 候选编号按**重要度排序后**的位置：id3(5)→c0_1、id4(4)→c0_2、id2(3)→c0_3
+        eng = self._engine(self._D({"c0_1": "inherit", "c0_2": "keep", "c0_3": "drop"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual([r["id"] for r in filtered[0]], [1, 3],
+                         "只留 target 与「交回大模型」的候选（keep/drop 不进大模型 ✓）")
+        self.assertEqual(len(drops), 1)
+        self.assertEqual(drops[0][1]["source_ids"], [2], "该回收的合成 drop 判定 ✓")
+        self.assertEqual(stats, {"merge": 0, "drop": 1, "keep": 1, "inherit": 1})
+
+    def test_all_keep_means_no_llm_call(self):
+        eng = self._engine(self._D({"c0_1": "keep", "c0_2": "keep", "c0_3": "keep"}))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered, [], "全「不动」⇒ 过滤后为空 ⇒ 大模型**不会被调用** ✓")
+        self.assertEqual(drops, [])
+        self.assertEqual(stats["keep"], 3)
+
+    def test_unavailable_passes_everything_through(self):
+        eng = self._engine(self._D(None))
+        filtered, drops, stats = run(eng._merge_plan_filter(self._batch(), self._Cfg()))
+        self.assertEqual(filtered, self._batch(), "JEV 不可用 ⇒ 原样放行（= 关闭 JEV ✓）")
+        self.assertEqual(stats, {})

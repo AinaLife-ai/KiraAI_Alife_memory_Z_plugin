@@ -633,6 +633,33 @@ class Decisions:
         self.calls += 1
         return out or None
 
+    async def merge_plan(self, items, timeout=None):
+        """**先审后生成**：对 [(key, 主事实, 候选)] 一次性问 same/new/dilute ⇒ {key: 动作}。
+
+        动作 ∈ merge / drop / keep / inherit（由 route_merge_soft 合成 ✓）
+        失败 / 解析不全 / 未启用 ⇒ None（调用方**原样放行**给大模型 ✓ 绝不误判）
+        """
+        if not items or not self.ready:
+            return None
+        if not self._hit():
+            return None
+        questions = {}
+        for key, primary, cand in items:
+            questions.update(build_merge_route_single(primary, key, cand))
+        data = await self._ask("lang: zh", questions, "merge_plan", timeout)
+        if not data:
+            return None
+        answers = data.get("answers") or {}
+        out = {}
+        for key, _p, _c in items:
+            same = parse_noul(answers, "same_" + key)
+            if same is None:
+                return None                   # 解析不全 ⇒ 不冒险，整批交回大模型 ✓
+            out[key] = route_merge_soft(same, parse_noul(answers, "new_" + key),
+                                        parse_noul(answers, "dilute_" + key) or 0.0)
+        self.calls += 1
+        return out or None
+
     async def merge_route(self, primary: str, cands, timeout=None, hints=None):
         """逐条候选判定 merge/drop/keep。
 
