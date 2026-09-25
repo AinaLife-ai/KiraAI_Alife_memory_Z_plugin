@@ -676,9 +676,9 @@ class JevMergePlanCase(unittest.TestCase):
 
 
 class JevCompressScreenCase(unittest.TestCase):
-    """★ 压缩前置筛选（用户 2026-09-25 定稿，两档）：
-       合格(≥0.5) ⇒ 进压缩输入；不合格 ⇒ **直归档**（等同已压缩，原文仍可按 ID 检索）；
-       全不合格 ⇒ 全部直归档 + 不调大模型（省一次调用）。
+    """★ 压缩前置筛选（用户 2026-09-25 定稿）：
+       按**轮次**判定；**用户侧与助手侧都判**（信息常落在助手回复里 ✓）；
+       轮内任意一条 ≥0.5 ⇒ 整轮保留；否则整轮直归档；全不够格 ⇒ 还不调大模型。
     """
 
     class _Log:
@@ -693,7 +693,9 @@ class JevCompressScreenCase(unittest.TestCase):
             self.log = JevCompressScreenCase._Log()
 
         async def compress_screen(self, items):
-            return dict(self._scores) if self._scores else None
+            if self._scores is None:
+                return None
+            return {k: self._scores[k] for k, _r, _t in items if k in self._scores}
 
     class _Cfg:
         jev_enabled = True
@@ -701,21 +703,25 @@ class JevCompressScreenCase(unittest.TestCase):
         jev_timeout_ms = 5000
 
     class _Store:
-        """记录 store 调用，便于断言"不合格项被封档"。"""
-
         def __init__(self):
             self.calls = []
 
         async def call(self, name, *a, **k):
             self.calls.append((name, a))
-            return 3 if name == "archive_distilled" else None
+            return 2 if name == "archive_distilled" else None
 
     ROWS = [
-        {"id": 1, "sid": "s1", "role": "user", "summary": "用户：我花生过敏，严重会休克"},
-        {"id": 2, "sid": "s1", "role": "assistant", "summary": "助手：好的，我记住了"},
-        {"id": 3, "sid": "s1", "role": "user", "summary": "用户：哈哈"},
-        {"id": 4, "sid": "s1", "role": "assistant", "summary": "助手：呵"},
-        {"id": 5, "sid": "s1", "role": "user", "summary": "用户：明天三点的会"},
+        # 轮 1：信息在**助手**回复里（用户话很轻）
+        {"id": 1, "sid": "s1", "role": "user", "summary": "用户：你把我那些事记一下"},
+        {"id": 2, "sid": "s1", "role": "assistant",
+         "summary": "助手：好的我记下了：①花生过敏 ②每周日提醒你给妈妈打电话"},
+        # 轮 2：信息在**用户**消息里 + 一条工具步（不判，随轮走）
+        {"id": 3, "sid": "s1", "role": "user", "summary": "用户：我花生过敏，严重会休克"},
+        {"id": 4, "sid": "s1", "role": "assistant", "category": "tool",
+         "summary": "[调用工具：memorize(花生过敏)]"},
+        # 轮 3：纯闲聊
+        {"id": 5, "sid": "s1", "role": "user", "summary": "用户：哈哈"},
+        {"id": 6, "sid": "s1", "role": "assistant", "summary": "助手：呵"},
     ]
 
     def _engine(self, decisions, store=None):
@@ -725,26 +731,25 @@ class JevCompressScreenCase(unittest.TestCase):
         eng.store = st
         return eng, st
 
-    def test_qualified_kept_and_rest_archived(self):
-        eng, st = self._engine(self._D({"u1": 0.9, "u3": 0.05, "u5": 0.40}))
+    def test_round_kept_by_assistant_side(self):
+        """★ 关键：用户话轻（0.27）但助手复述了事实（0.98）⇒ 整轮必须保留 ✓"""
+        eng, st = self._engine(self._D({"m1": 0.27, "m2": 0.98, "m3": 0.96, "m5": 0.17, "m6": 0.04}))
         filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
         self.assertFalse(skip)
-        self.assertEqual([r["id"] for r in filtered], [1, 2],
-                         "合格用户消息 + 紧随其后的助手回复保留 ✓（上下文不丢）")
+        self.assertEqual([r["id"] for r in filtered], [1, 2, 3, 4],
+                         "轮1(靠助手) + 轮2(靠用户，含工具步) 保留 ✓")
         arc = [c for c in st.calls if c[0] == "archive_distilled"]
-        self.assertEqual(len(arc), 1, "不合格的必须封档 ✓")
-        self.assertEqual([r["id"] for r in arc[0][1][1]], [3, 4, 5],
-                         "不合格项直归档（active=0 ⇒ 等同已压缩 ✓）")
+        self.assertEqual([r["id"] for r in arc[0][1][1]], [5, 6], "纯闲聊整轮归档 ✓")
 
-    def test_all_unqualified_archives_everything_and_skips(self):
-        eng, st = self._engine(self._D({"u1": 0.10, "u3": 0.05, "u5": 0.44}))
+    def test_all_rounds_low_archives_and_skips(self):
+        eng, st = self._engine(self._D({"m1": 0.20, "m2": 0.10, "m3": 0.30, "m5": 0.05, "m6": 0.02}))
         filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
-        self.assertTrue(skip, "全不合格 ⇒ 不调大模型（省一次调用 ✓）")
+        self.assertTrue(skip, "全不够格 ⇒ 不调大模型 ✓")
         arc = [c for c in st.calls if c[0] == "archive_distilled"]
-        self.assertEqual([r["id"] for r in arc[0][1][1]], [1, 2, 3, 4, 5],
-                         "全部封档 ✓（不能让它们还是活跃记忆 ✓）")
+        self.assertEqual([r["id"] for r in arc[0][1][1]], [1, 2, 3, 4, 5, 6],
+                         "全部归档 ✓（工具步 #4 随轮一起走 ✓）")
 
-    def test_unavailable_passes_through_without_archiving(self):
+    def test_unavailable_no_archiving(self):
         eng, st = self._engine(self._D(None))
         filtered, skip = run(eng.jev_compress_screen(self.ROWS, self._Cfg()))
         self.assertEqual(filtered, self.ROWS, "JEV 不可用 ⇒ 原样（= 关闭 JEV ✓）")

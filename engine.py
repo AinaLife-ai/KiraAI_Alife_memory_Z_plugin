@@ -973,15 +973,20 @@ class Engine:
 
     # ── v2.18.74：JEV 决策（生效）──────────────────────────────
     async def jev_compress_screen(self, candidates, cfg):
-        """压缩**前置**筛选：逐条用户消息判「有没有值得长期记住的信息」⇒ 只送高价值的进压缩。
+        """压缩**前置**筛选：逐条判「值不值得长期记」⇒ 只把够格的送进压缩输入。
 
-        组合规则（方案 v4 §3.1，实测 AUC 1.00 ✓）：
-          · 全批最高分 < COMPRESS_SKIP_BELOW(0.35) ⇒ **整批跳过压缩调用**（省 100% ✓）
-          · 单条 ≥ COMPRESS_KEEP_MIN(0.50)         ⇒ 进入压缩输入 ✓
-          · 0.35~0.50                              ⇒ 待观察（不进输入，记录留着下次再看 ✓）
+        ★ 按**轮次**判定，且**用户侧与助手侧都判**（实测 2026-09-25）：
+          · 为什么也判助手：原本压缩对助手消息也提取 ✓，而信息常落在助手回复里
+            （用户"你把我那些事记一下" 0.27 ✗ ／ 助手"我记下了：①花生过敏②周日提醒…" **0.98** ✓）
+            只判用户侧 ⇒ 这类整轮被连坐归档 ⇒ **信息一起丢** ✗
+          · 轮次规则：轮内**任意一条** ≥ 0.50 ⇒ 整轮保留 ✓；否则整轮直归档 ✓
+            （工具步不单独判，随轮走 ✓；一轮里全是工具步 ⇒ 判不了就不动 ✓）
+          · 一条都没达标的轮 ⇒ 全部直归档 + **不调大模型**（省一次调用 ✓）
 
-        助手消息**不单独判** ✗（不承载用户事实），但紧跟保留用户消息之后的助手回复要保留 ✓（上下文）。
-        JEV 未启用/不可用/失败/解析不全 ⇒ 原样返回（= 关闭 JEV 的行为 ✓）
+        归档 = `archive_distilled`（active=0 ⇒ 等同已压缩；原文仍可按 ID 检索 ✓）
+        且归档后不会再被压缩计划挑中（计划只取 active ✓）⇒ 不会反复被打分 ✓
+
+        JEV 未启用/不可用/失败/解析不全 ⇒ 原样放行，且**不许封档** ✗（判不了就不动 ✓）
         返回 (filtered_candidates, skip_all)
         """
         decisions = getattr(self, "decisions", None)
@@ -989,9 +994,14 @@ class Engine:
             return candidates, False
         if not getattr(cfg, "jev_compress", False) or not decisions.ready:
             return candidates, False
-        items = [("u%d" % row["id"], str(row.get("summary") or row.get("content") or ""))
+
+        def _tool(row):
+            return str((row or {}).get("category") or "") == "tool"
+
+        items = [("m%d" % row["id"], str(row.get("role") or "user"),
+                  str(row.get("summary") or row.get("content") or ""))
                  for row in candidates
-                 if str(row.get("role") or "") != "assistant"
+                 if not _tool(row)
                  and str(row.get("summary") or row.get("content") or "").strip()]
         if not items:
             return candidates, False
@@ -1002,22 +1012,31 @@ class Engine:
             return candidates, False
         if not scores or len(scores) != len(items):
             return candidates, False
-        top = max(scores.values())
-        filtered, last_kept = [], False
+
+        # 按轮切分（遇到用户消息即开新轮；批首的助手消息自成一轮 ✓）
+        rounds = []
         for row in candidates:
-            if str(row.get("role") or "") == "assistant":
-                if last_kept:
-                    filtered.append(row)          # 紧跟保留用户消息的助手回复 ⇒ 保留（上下文 ✓）
+            is_user = str(row.get("role") or "") != "assistant"
+            if is_user or not rounds:
+                rounds.append([row])
+            else:
+                rounds[-1].append(row)
+
+        kept, excluded, top, kept_users = [], [], 0.0, 0
+        for rnd in rounds:
+            vals = [scores["m%d" % r["id"]] for r in rnd if ("m%d" % r["id"]) in scores]
+            if not vals:                       # 全是工具步/无文本 ⇒ 判不了就不动 ✓
+                kept.extend(rnd)
                 continue
-            score = scores.get("u%d" % row["id"])
-            last_kept = score is not None and score >= COMPRESS_KEEP_MIN
-            if last_kept:
-                filtered.append(row)
-        # ★ 用户 2026-09-25 定稿：不够格的消息**直归档**（active=0 ⇒ 等同已压缩 ✓）
-        #   · 不再被压缩计划挑中（计划只取 active ✓）⇒ 不会反复被打分 ✓
-        #   · 原文仍可按 ID 检索 ✓（知识该进事实层的已进 ✓）
-        kept_ids = {r["id"] for r in filtered}
-        excluded = [r for r in candidates if r.get("id") not in kept_ids]
+            best = max(vals)
+            top = max(top, best)
+            if best >= COMPRESS_KEEP_MIN:
+                kept.extend(rnd)
+                kept_users += sum(1 for r in rnd
+                                  if str(r.get("role") or "") != "assistant")
+            else:
+                excluded.extend(rnd)
+
         archived = 0
         if excluded:
             try:
@@ -1025,18 +1044,22 @@ class Engine:
                 archived = await self.store.call("archive_distilled", _sid, excluded) or 0
             except Exception:
                 logger.debug("[记忆·Z] 预筛直归档失败（不影响压缩）", exc_info=True)
-        if not filtered:
+
+        if not kept:
             logger.info(
-                "[记忆·Z] JEV·压缩 预筛：%d 条用户消息都不够格（最高 %.2f < %.2f）"
+                "[记忆·Z] JEV·压缩 预筛：%d 轮都不够格（最高 %.2f < %.2f）"
                 " ⇒ %d 条直归档 + **跳过压缩调用**（省一次 ✓ 原文仍可按 ID 检索 ✓）",
-                len(items), top, COMPRESS_KEEP_MIN, archived)
+                len(rounds), top, COMPRESS_KEEP_MIN, archived)
             return candidates, True
         logger.info(
-            "[记忆·Z] JEV·压缩 预筛：%d 条用户消息 → 保留 %d 条进压缩输入，其余 %d 条直归档（最高分 %.2f）",
-            len(items), sum(1 for r in filtered if str(r.get("role")) != "assistant"),
-            archived, top)
-        return filtered, False
-
+            "[记忆·Z] JEV·压缩 预筛：%d 轮 → 保留 %d 轮（%d 条消息，含 %d 条用户消息）"
+            "，其余 %d 条直归档（最高分 %.2f）",
+            len(rounds), sum(1 for _r in rounds
+                             if any(("m%d" % x["id"]) in scores for x in _r)
+                             and max(scores["m%d" % x["id"]] for x in _r
+                                     if ("m%d" % x["id"]) in scores) >= COMPRESS_KEEP_MIN),
+            len(kept), kept_users, archived, top)
+        return kept, False
     async def _merge_plan_filter(self, batch, cfg):
         """**先审后生成**：JEV 先决定每组的去向 ⇒ 过滤掉不该合/该丢的，再交给大模型。
 

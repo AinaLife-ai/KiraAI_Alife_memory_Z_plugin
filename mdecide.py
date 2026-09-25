@@ -360,8 +360,22 @@ def build_recall_filter(context: str, hits: list[tuple[str, str]],
 
 
 # ── 2) 合并路由：三信号 → 代码组合（绝不问"该怎么办"）──
-def build_compress_screen(key: str, text: str) -> dict:
-    """压缩前筛消息：这条消息里有没有值得长期记住的用户信息？（实测 AUC 1.00 ✓）"""
+def build_compress_screen(key: str, text: str, role: str = "user") -> dict:
+    """压缩前筛消息。**用户侧与助手侧判据不同**（实测 2026-09-25）：
+
+    为什么要分角色：原本压缩**对助手消息也提取** ✓，而信息常常落在助手回复里
+      （例：用户"你把我那些事记一下" 0.27 ✗，助手"我记下了：①花生过敏②每周日提醒…" **0.98** ✓）
+    若只判用户侧，这类整轮会被连坐归档 ⇒ **信息一起丢** ✗
+    """
+    if role == "assistant":
+        return {
+            "m_" + key: q_noul(
+                f"[助手回复] {text} [/助手回复]\n"
+                "这条助手回复里有没有值得长期记住的用户信息，或需要对用户长期遵守的约定/承诺？",
+                "有：复述/确认了用户的持久事实，或做出了要长期遵守的约定、承诺、提醒安排",
+                "没有：寒暄、过程说明、工具结果、一次性答复",
+            ),
+        }
     return {
         "m_" + key: q_noul(
             f"[消息] {text} [/消息]\n这条消息里有没有值得长期记住的用户信息？",
@@ -650,7 +664,7 @@ class Decisions:
         return out or None
 
     async def compress_screen(self, items, timeout=None):
-        """压缩前置筛选：对 [(key, 文本)] 一次性问「值不值得长期记」⇒ {key: 分数}。
+        """压缩前置筛选：对 [(key, 角色, 文本)] 一次性问「值不值得长期记」⇒ {key: 分数}。
 
         失败 / 未启用 ⇒ None（调用方**原样放行** ✓ 绝不误跳）
         """
@@ -659,14 +673,14 @@ class Decisions:
         if not self._hit():
             return None
         questions = {}
-        for key, text in items:
-            questions.update(build_compress_screen(key, text))
+        for key, role, text in items:
+            questions.update(build_compress_screen(key, text, role))
         data = await self._ask("lang: zh", questions, "compress_screen", timeout)
         if not data:
             return None
         answers = data.get("answers") or {}
         out = {}
-        for key, _t in items:
+        for key, _role, _t in items:
             score = parse_noul(answers, "m_" + key)
             if score is None:
                 return None                   # 解析不全 ⇒ 整批放行 ✓
