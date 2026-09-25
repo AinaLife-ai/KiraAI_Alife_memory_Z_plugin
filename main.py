@@ -3100,6 +3100,21 @@ class AlifeMemoryPlugin(BasePlugin):
         return " ".join(mark)
 
     def recall_text_view(self, value):
+        """渲染成紧凑文本；**统一补一句精修附注** ✓（2026-09-25）
+
+        为什么要有这一层：渲染器只认几种"召回形状" ✓ ⇒ 直接往返回值里塞的
+        额外键（如 refine）**会被静默丢掉** ✗ ⇒ 附注等于没写 ✗（我第一版就踩了）。
+        这一层保证：任何形状渲染完，只要带 refine 就补一句 ✓
+        """
+        text = self._recall_text_view_raw(value)
+        if text and isinstance(value, dict):
+            r = value.get("refine")
+            if isinstance(r, dict) and r.get("pool"):
+                text += "\n（从 %s 条候选里精修保留 %s 条；要更多可加大 limit）" % (
+                    r.get("pool"), r.get("kept"))
+        return text
+
+    def _recall_text_view_raw(self, value):
         """把工具返回渲染成**与被动注入同一种紧凑文本** ✓（2026-09-18 用户要求 ✓）
 
         ⚠️ 范围：**只转"召回形状"** ✓ —— 搜索 ✓ 档案(单/复) ✓ 人物与群名 ✓ 画像 ✓ 资料 ✓

@@ -74,3 +74,82 @@ def test_bad_settings_never_raise():
         decisions = None
 
     assert EXPAND(_Broken(), 20) == 20
+
+
+# ── 附注必须**真的到模型手里** ✓ ─────────────────────────────────────────────
+# 2026-09-25 踩到：出口会把结果渲染成紧凑文本，而渲染器只认几种"召回形状" ✗
+# ⇒ 直接往返回值里塞的 refine 键被**静默丢掉** ✗ ⇒ 附注等于没写 ✗
+# （文本路径成功 ⇒ JSON 兜底不触发 ⇒ 表面上"有字段"、实际模型看不到 ✗）
+
+def _render(value, raw="【召回】命中 46 · 本次 1"):
+    """隔离测「附注层」：渲染器本体换成桩 ✓（我的改动就是渲染完再加一句 ✓）"""
+    cls = main.AlifeMemoryPlugin
+    fake = SimpleNamespace(_recall_text_view_raw=lambda v: raw,
+                           settings=SimpleNamespace())
+    return cls.recall_text_view(fake, value)
+
+
+def test_refine_note_reaches_rendered_text():
+    """★ 附注必须真的到模型手里 ✓（渲染器只认已知形状 ⇒ 直接塞键会被静默丢掉 ✗）"""
+    text = _render({"items": [{"i": "a1"}], "refine": {"pool": 60, "kept": 18}})
+    assert "从 60 条候选里精修保留 18 条" in text, text
+
+
+def test_no_note_when_nothing_filtered():
+    assert "精修保留" not in _render({"items": [{"i": "a1"}]})
+
+
+def test_note_ignored_when_render_returns_none():
+    """非召回形状（渲染返回 None ⇒ 走 JSON 兜底）时不许崩、也不许拼出半截文本 ✓"""
+    assert _render({"ok": True, "refine": {"pool": 60, "kept": 3}},
+                   raw=None) is None
+
+
+def test_note_ignored_when_pool_missing():
+    assert "精修保留" not in _render({"items": [], "refine": {"kept": 3}})
+
+
+# ── 集成：开 JEV 且就绪时，工具**真的**用更大的池取候选 ✓ ──────────────────────
+sys.path.insert(0, str(ROOT / "tests"))
+from test_name_refresh import _plugin          # noqa: E402  轻量插件 + 真 store ✓
+
+
+class _NoopEngine:
+    async def enqueue(self, *a, **k):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_search_tool_expands_pool_when_jev_ready(tmp_path):
+    plugin, store = _plugin(tmp_path)
+    plugin.engine = _NoopEngine()
+    sid = "qq:gm:1"
+    for i in range(3):
+        store.capture(sid, "e%d" % i,
+                      [{"role": "user", "content": "关于喵梓的记忆%d" % i,
+                        "time": float(i), "users": []}])
+    limits = []
+    orig = store.call
+
+    async def spy(name, *a, **k):
+        if name == "search":
+            limits.append(k.get("limit"))
+        return await orig(name, *a, **k)
+
+    store.call = spy
+    ev = SimpleNamespace(sid=sid, event_id="evt", messages=[],
+                         session=SimpleNamespace(adapter_name="qq"))
+    await plugin.search_archive(ev, keyword="喵梓", count=5)
+    assert limits[-1] == 5, "JEV 关 ⇒ 不扩池（逐字等于旧行为 ✓）"
+
+    plugin.settings.jev_enabled = True
+    plugin.settings.jev_recall = True
+    plugin.decisions = SimpleNamespace(
+        ready=True, recall_filter=_no_scores, last_trigger=0.0)
+    text = await plugin.search_archive(ev, keyword="喵梓", count=5)
+    assert limits[-1] == 15, "JEV 就绪 ⇒ 池 ×3 ✓（拿到的实际值 %r）" % (limits[-1],)
+    assert "命中" in text
+
+
+async def _no_scores(*a, **k):
+    return []                                   # 决策层桩：不返回分数 ⇒ 保持原序 ✓
