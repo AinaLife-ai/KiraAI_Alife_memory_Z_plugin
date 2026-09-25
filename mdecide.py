@@ -458,11 +458,10 @@ def route_merge(same: Optional[float], new: Optional[float], dilute: Optional[fl
 #     为什么不用"同话题"判据：实测同主题不同角度 0.39 / 互不相干 0.36 ⇒ 只差 0.03 ✗
 #     用它会把这个区间的**无关事实也合进来**（正是要避开的稀释 ✗）
 SAME_LOW = 0.12
-# 压缩前置筛选（方案 v4 §3.1，实测 AUC 1.00）：
-#   全批最高 < COMPRESS_SKIP_BELOW ⇒ 整批跳过压缩调用（省 100%）
-#   单条 ≥ COMPRESS_KEEP_MIN      ⇒ 进入压缩输入
-#   中间带                        ⇒ 待观察（不进输入，记录留着下次再看 ✓）
-COMPRESS_SKIP_BELOW = 0.35
+# 压缩前置筛选（用户 2026-09-25 定稿，两档；实测 AUC 1.00）：
+#   单条 ≥ COMPRESS_KEEP_MIN(0.50) ⇒ 进入压缩输入
+#   其余                          ⇒ **直归档**（active=0 ⇒ 等同已压缩；原文仍可按 ID 检索 ✓）
+#   一条都没到 0.50               ⇒ 全部直归档 + 不调大模型（省一次调用 ✓）
 COMPRESS_KEEP_MIN = 0.50
 
 

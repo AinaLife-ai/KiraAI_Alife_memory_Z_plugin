@@ -34,11 +34,7 @@ from .contracts import (
     dump,
 )
 
-from .mdecide import (
-    COMPRESS_KEEP_MIN,
-    COMPRESS_SKIP_BELOW,
-    SAME_LOW,
-)
+from .mdecide import COMPRESS_KEEP_MIN, SAME_LOW  # 用于压缩预筛 / 合并先审的阈值 ✓
 
 logger = logging.getLogger("alife_memory_z")
 
@@ -1007,12 +1003,6 @@ class Engine:
         if not scores or len(scores) != len(items):
             return candidates, False
         top = max(scores.values())
-        if top < COMPRESS_SKIP_BELOW:
-            logger.info(
-                "[记忆·Z] JEV·压缩 预筛：本批 %d 条消息最高分仅 %.2f（< %.2f）"
-                " ⇒ 跳过压缩调用（记录留待下次 ✓）",
-                len(items), top, COMPRESS_SKIP_BELOW)
-            return candidates, True
         filtered, last_kept = [], False
         for row in candidates:
             if str(row.get("role") or "") == "assistant":
@@ -1023,16 +1013,28 @@ class Engine:
             last_kept = score is not None and score >= COMPRESS_KEEP_MIN
             if last_kept:
                 filtered.append(row)
+        # ★ 用户 2026-09-25 定稿：不够格的消息**直归档**（active=0 ⇒ 等同已压缩 ✓）
+        #   · 不再被压缩计划挑中（计划只取 active ✓）⇒ 不会反复被打分 ✓
+        #   · 原文仍可按 ID 检索 ✓（知识该进事实层的已进 ✓）
+        kept_ids = {r["id"] for r in filtered}
+        excluded = [r for r in candidates if r.get("id") not in kept_ids]
+        archived = 0
+        if excluded:
+            try:
+                _sid = str((candidates[0] or {}).get("sid") or "")
+                archived = await self.store.call("archive_distilled", _sid, excluded) or 0
+            except Exception:
+                logger.debug("[记忆·Z] 预筛直归档失败（不影响压缩）", exc_info=True)
         if not filtered:
-            # 全部落在「待观察」带（0.35~0.50）⇒ 本次没有够格进压缩的内容
-            # ★ 不能兜底返回全部 ✗（那等于把规则废掉）；记录留着下次再看 ✓
             logger.info(
-                "[记忆·Z] JEV·压缩 预筛：%d 条用户消息都在「待观察」带（最高 %.2f）"
-                " ⇒ 本次不抽（记录留待下次 ✓）", len(items), top)
+                "[记忆·Z] JEV·压缩 预筛：%d 条用户消息都不够格（最高 %.2f < %.2f）"
+                " ⇒ %d 条直归档 + **跳过压缩调用**（省一次 ✓ 原文仍可按 ID 检索 ✓）",
+                len(items), top, COMPRESS_KEEP_MIN, archived)
             return candidates, True
         logger.info(
-            "[记忆·Z] JEV·压缩 预筛：%d 条用户消息 → 保留 %d 条进压缩输入（最高分 %.2f）",
-            len(items), sum(1 for r in filtered if str(r.get("role")) != "assistant"), top)
+            "[记忆·Z] JEV·压缩 预筛：%d 条用户消息 → 保留 %d 条进压缩输入，其余 %d 条直归档（最高分 %.2f）",
+            len(items), sum(1 for r in filtered if str(r.get("role")) != "assistant"),
+            archived, top)
         return filtered, False
 
     async def _merge_plan_filter(self, batch, cfg):
