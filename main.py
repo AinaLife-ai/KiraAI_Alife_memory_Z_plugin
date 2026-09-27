@@ -1851,7 +1851,11 @@ class AlifeMemoryPlugin(BasePlugin):
             return rows
         ordered = sorted(scored, key=lambda kv: -(kv[1] or 0))
         if strict:
-            keep = [k for k, s in ordered if (s or 0) >= RECALL_KEEP_MIN]
+            # ★ 2026-09-26：与被动召回保持同一判据（都可配 ✓）
+            #   （此前工具侧硬编码 0.10 ✗ ⇒ 用户调 jev_keep_min 时工具不跟随 ✗）
+            _kmin = float(getattr(cfg, "jev_keep_min", RECALL_KEEP_MIN)
+                          or RECALL_KEEP_MIN)
+            keep = [k for k, s in ordered if (s or 0) >= _kmin]
             floor = min(len(ordered), int(getattr(cfg, "top_k", 5) or 5))
             if len(keep) < floor:
                 keep = [k for k, _s in ordered[:floor]]
