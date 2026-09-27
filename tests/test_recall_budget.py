@@ -230,3 +230,31 @@ async def test_jev_on_never_injects_more_facts_than_off(tmp_path):
     assert n_on <= n_off, (
         "★ 不变量破了：开 JEV 注入 %d 条 > 关着 %d 条 ✗（池 ×3 + 全留 ⇒ 放大）"
         % (n_on, n_off))
+
+
+def test_folded_row_is_kept_when_summary_not_in_recall():
+    """★★ 关键：摘要**本轮不在结果里**时，折叠原文**必须保留** ✓
+
+    为什么（2026-09-26 用户纠正 ✓）：摘要代表不了它 —— 摘要的词面可能完全不命中，
+    而原文恰好是唯一命中的那条 ✗。
+    反例：问「肾上腺素笔是什么牌子」⇒ 原文命中 ✓、父摘要写「讲了健康和应对措施」✗ 不命中
+    ⇒ 若无条件跳过，就等于把**唯一能回答它的那条**筛掉 ✗✗
+    （细节仍可通过行首序号 expand 展开 ✓ 但前提是它得先被召回 ✓）
+    """
+    s = _store()
+    sid = "qq:gm:OLD2"
+    s.capture(sid, "t1", [_msg("肾上腺素笔 原始一", 1.0)])
+    with s.connect() as db:
+        rid = db.execute("SELECT id FROM records WHERE sid=?", (sid,)).fetchone()["id"]
+        db.execute(
+            "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
+            "position,created,search_body,active,deleted,permanent)"
+            " VALUES (?,'%s','assistant',1,0,5,'讲了健康和应对措施','讲了健康和应对措施',"
+            "'[]',9,0,'',1,0,0)" % sid, ("p2",))
+        db.execute("UPDATE records SET active=0 WHERE id=?", (rid,))
+        db.commit()
+        # ★ 只把**子行**放进候选（模拟：摘要没被搜索命中 ⇒ 不在本轮结果里 ✗）
+        rows = [dict(r) for r in db.execute(
+            "SELECT * FROM records WHERE id=?", (rid,)).fetchall()]
+    folded = set(s.folded_covered_ids(rows))
+    assert rid not in folded, "摘要不在结果里 ⇒ 折叠原文必须保留 ✓（否则漏掉唯一命中 ✗）"

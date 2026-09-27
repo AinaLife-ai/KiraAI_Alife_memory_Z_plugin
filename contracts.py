@@ -456,7 +456,7 @@ class Settings(Strict):
     )
     recall_skip_folded: bool = Field(
         default=True,
-        description="跨会话召回时跳过已被压缩摘要代表的旧归档原文，避免同一内容重复注入。",
+        description="跨会话召回时，若某条旧归档原文的摘要本轮也在结果里，则只保留摘要（避免重复注入）；摘要不在时仍保留原文，避免漏掉唯一命中的那条。",
     )
 
     @model_validator(mode="after")
