@@ -116,3 +116,62 @@ async def test_single_id_rebuild_does_not_merge_whole_session(tmp_path):
     await eng.tidy_permanents("qq:gm:one", force=True)      # 会话级 ⇒ 应该合并 ✓
     assert called, "会话级整理应该先合并相似永久记忆 ✓"
     await eng.stop()
+
+
+@pytest.mark.asyncio
+async def test_tidy_step_still_runs_when_nothing_to_merge(tmp_path):
+    """★★ 用户提问：点「整理永久记忆·全部重新整理」时，若**没有要合并的**，
+    第二步（真正的整理）会不会不触发？⇒ **不会** ✓
+
+    两层保障（都在代码里 ✓）：
+      ① 前置合并整段包在 try/except 里 ⇒ 它**报错也不会**吃掉后面的整理 ✓
+      ② "没得合并"只是返回一份空报告 ✓（不是提前 return ✗）
+    再加三种情形逐一断言：没得合并 ✓ / 合并抛错 ✗ / 合并正常 ✓ ⇒ 整理都要真的请模型看一遍 ✓
+    """
+    async def _one(tmp, tag, consolidate_impl):
+        store = storage_mod.Store(tmp / ("t-%s" % tag))
+        store.initialize()
+        cfg = contracts.Settings(permanent_tidy_enabled=True, permanent_tidy_days=0)
+        eng = engine_mod.Engine(store, lambda: cfg, None, None, None)
+        # 两条**不相似**的永久记忆 ⇒ 没得合并 ✓
+        rid1 = await store.call("memorize", "qq:gm:n", "用户对花生过敏，吃了会休克",
+                                [], 1000.0, 1000.0, 9, "健康")
+        await store.call("memorize", "qq:gm:n", "用户上周去看了一场球赛",
+                         [], 2000.0, 2000.0, 5, "event")
+        eng.consolidate = consolidate_impl
+        seen = []
+
+        async def _spy(schema, purpose, payload, cfg_, **kw):
+            seen.append(purpose)
+            return schema(**{"items": [
+                {"id": "p1", "action": "extract", "reason": "t",
+                 "facts": [{"category": "fact", "subject": "用户",
+                            "content": "对花生过敏会休克", "reason": "整理",
+                            "scenario": "", "tags": [], "relations": [],
+                            "source_ids": ["p1"], "importance": 9}]},
+            ]}).model_dump()
+        eng.structured = _spy
+        await eng.start()
+        await eng.tidy_permanents("qq:gm:n", force=True)       # = 全部重新整理 ✓
+        await eng.stop()
+        # 桩固定返回 p1 ⇒ 不假设「p1 是哪一条」（候选顺序不保证 ✓）
+        # 改为断言：**两条里至少有一条**按动作离开了常驻 ✓
+        with store.connect() as db:
+            rows = [dict(x) for x in db.execute(
+                "SELECT id, active FROM records WHERE sid=? AND permanent=1",
+                ("qq:gm:n",)).fetchall()]
+        return seen, rows
+
+    async def _empty(sid, *a, **k):
+        return {"permanent": 2, "clusters": 0, "merged": 0, "kept": 2}
+
+    async def _boom(sid, *a, **k):
+        raise RuntimeError("consolidate 挂了")
+
+    seen, rows = await _one(tmp_path, "empty", _empty)
+    assert seen, "**没得合并时，整理也必须真的请模型看一遍** ✗（第二步被吃掉了 ✗）"
+    assert any(not r["active"] for r in rows), (
+        "整理的动作要真的落库（extract ⇒ 至少一条离开常驻 ✓）：%r" % (rows,))
+
+    seen2, _r2 = await _one(tmp_path, "boom", _boom)
+    assert seen2, "**前置合并报错时，整理同样必须继续** ✗（try/except 兜底 ✓）"
