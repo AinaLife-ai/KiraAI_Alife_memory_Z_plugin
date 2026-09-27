@@ -2401,7 +2401,11 @@ class Engine:
             return 0
         # ★ 2026-09-27（用户方案）：**先合并相似永久记忆** ✓
         #   整理要在更小更干净的集合上判断 ⇒ 提炼/移出更准、输入 token 更少 ✓
-        if getattr(cfg, "permanent_dedupe", False):
+        # ★ 2026-09-27：只有**会话级**整理才顺带合并相似永久记忆 ✓
+        #   单条重提取（ids 指定 = "完全重新提取这一条"）必须**只动这一条** ✗
+        #   （否则按钮语义被悄悄放大 ⇒ 顺手合并了同会话别的记忆 ✗）
+        _whole = not ids
+        if _whole and getattr(cfg, "permanent_dedupe", False):
             try:
                 await self.consolidate(sid)
             except Exception:                       # noqa: BLE001
@@ -2470,7 +2474,7 @@ class Engine:
         )
         # ★ 2026-09-27（用户方案）：整理**之后再合并一次** ✓
         #   tidy 可能拆开/归档某条 ⇒ 集合变了 ⇒ 可能出现新的相似对 ✓
-        if getattr(cfg, "permanent_dedupe", False):
+        if _whole and getattr(cfg, "permanent_dedupe", False):
             try:
                 await self.consolidate(sid)
             except Exception:                       # noqa: BLE001

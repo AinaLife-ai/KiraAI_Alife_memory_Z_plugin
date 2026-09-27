@@ -458,6 +458,22 @@ def is_notice_message(message):
     return bool(getattr(message, "is_notice", False))
 
 
+def edit_skip_revision(edit):
+    """这个编辑要不要**跳过版本比对**？✓（2026-09-27 用户实测）
+
+    跳过 ⇒ 纯删除（`patch == {"deleted": True}` ✓）或 UI 明确确认「以我的版本覆盖」(force ✓)
+    为什么删除要跳过：删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+                    此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+                    ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+    返回 (payload, 是否跳过)；**force 会从 payload 里去掉了 ✗**（store.edit 不认这个参数 ✗）
+    """
+    payload = edit.model_dump()
+    patch = payload.get("patch") or {}
+    forced = bool(payload.pop("force", False))
+    pure_delete = set(patch) == {"deleted"} and bool(patch.get("deleted"))
+    return payload, (forced or pure_delete)
+
+
 def revision(settings):
     return hashlib.sha256(dump(settings.model_dump()).encode()).hexdigest()
 
@@ -1222,7 +1238,10 @@ class AlifeMemoryPlugin(BasePlugin):
         ⇒ 两个传 force 的入口（bot 主动链路 + 工作台「全部重新整理」）直接 **TypeError**
         ⇒ **"无视冷却"全程没生效** ✗（用户实测反馈 ✓）
         """
-        owners = set(await self.store.call("sessions_with_permanents"))
+        # ★ 2026-09-27（用户实测）：整理对「只有 1 条」常驻的会话同样该跑 ✓
+        #   此前复用默认值（要求 >1 条）✗ ⇒ 每会话只有 1 条时列表为空
+        #   ⇒ 点了「整理永久记忆」**一个任务都不入队** ✗（列表里什么都没有 ✓）
+        owners = set(await self.store.call("sessions_with_permanents", 1))
         # ★ 2026-09-19（用户实测）：只有「指定单条(ids)」时才需要把发起会话并进来 ✓
         #   全局整理把它并进来 ✗ ⇒ 若该会话没有永久记忆 ⇒ 白排一个「本次跳过」的任务 ✓
         #   ⇒ 全局整理本来就覆盖"所有**有永久记忆**的会话" ✓ 不会漏 ✓
@@ -4228,7 +4247,15 @@ class AlifeMemoryPlugin(BasePlugin):
                 patch=dict(patch),
                 reason=reason,
             )
-            await self.store.call("edit", **edit.model_dump())
+            # ★ 2026-09-27（用户实测）：**纯删除不参与版本比对** ✓
+            #   删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+            #   此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+            #   ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+            #   UI 明确确认「以我的版本覆盖」时传 force ⇒ 同样跳过比对 ✓
+            _p, _skip = edit_skip_revision(edit)
+            if _skip:
+                _p["revision"] = None
+            await self.store.call("edit", **_p)
             return self.recall_result(event, {"ok": True})
         except ValueError:
             return dump({"ok": False, "error": "invalid_or_conflicting_edit"})
@@ -4636,7 +4663,15 @@ class AlifeMemoryPlugin(BasePlugin):
                         Fact.model_validate(data)
 
                 await asyncio.to_thread(validate_fact)
-            await self.store.call("edit", **edit.model_dump())
+            # ★ 2026-09-27（用户实测）：**纯删除不参与版本比对** ✓
+            #   删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+            #   此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+            #   ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+            #   UI 明确确认「以我的版本覆盖」时传 force ⇒ 同样跳过比对 ✓
+            _p, _skip = edit_skip_revision(edit)
+            if _skip:
+                _p["revision"] = None
+            await self.store.call("edit", **_p)
         except Conflict:
             raise HTTPException(409, "memory changed; reload before saving") from None
         except ValueError:

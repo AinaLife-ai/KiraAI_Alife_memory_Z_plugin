@@ -2638,13 +2638,23 @@ class Store:
                 out.append(sid)
         return out[:limit]
 
-    def sessions_with_permanents(self):
+    def sessions_with_permanents(self, min_count=2):
+        """有常驻记忆的会话列表 ✓
+
+        `min_count=2`（默认）⇒ 只给"同会话里**多于 1 条**"的 ⇒ 给**合并相似**用 ✓
+          （合并至少要有两条才有意义 ✓）
+        `min_count=1` ⇒ 只要有一条常驻就返回 ⇒ 给**整理（tidy）**用 ✓
+          ★ 2026-09-27（用户实测）：`queue_tidy_all` 之前复用默认值 ✗
+            ⇒ 每个会话只有 1 条常驻时 ⇒ 列表空 ⇒ **点了"整理永久记忆"什么都没发生** ✗
+            （任务列表里既不出现"处理中"也不出现结果 ✓ 因为压根没入队 ✗）
+        """
         with self.connect() as db:
             return [
                 row[0]
                 for row in db.execute(
                     "SELECT sid FROM records WHERE permanent=1 AND deleted=0 "
-                    "AND active=1 GROUP BY sid HAVING count(*)>1"
+                    "AND active=1 GROUP BY sid HAVING count(*)>=?",
+                    (max(1, int(min_count)),),
                 )
             ]
 
