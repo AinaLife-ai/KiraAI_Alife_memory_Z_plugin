@@ -2987,6 +2987,30 @@ class Store:
             pass            # 重排只是优化 ✓ 失败就退回原顺序 ✓ 绝不影响检索 ✓
         return out
 
+    def folded_covered_ids(self, rows):
+        """挑出「已被某个**活跃**的更高层级行在时间跨度上覆盖」的折叠行 id ✓
+
+        为什么：压缩后子行 active=0，内容已由父摘要代表 ✓
+              ⇒ 跨会话召回再由原文注入一遍就是**重复** ✗（2026-09-26 用户拍板读法A）
+        只判 active=0 的行 ✓：
+          · 未压缩的原文（active=1）不动 ✓
+          · 父行已消失的孤儿折叠行**不跳过** ✓（它是唯一副本，丢了就真丢了 ✗）
+        """
+        out = []
+        with self.connect() as db:
+            for r in rows or []:
+                if int(r.get("active") or 0) or int(r.get("deleted") or 0):
+                    continue
+                hit = db.execute(
+                    "SELECT 1 FROM records WHERE sid=? AND active=1 AND deleted=0"
+                    " AND level>? AND start<=? AND end>=? LIMIT 1",
+                    (r.get("sid"), r.get("level", 0),
+                     r.get("start", 0), r.get("end", 0)),
+                ).fetchone()
+                if hit:
+                    out.append(str(r.get("id") or ""))
+        return out
+
     def search(
         self,
         sid="",

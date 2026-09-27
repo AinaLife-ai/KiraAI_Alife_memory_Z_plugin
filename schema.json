@@ -880,6 +880,40 @@
           "expand",
           "inline"
         ]
+      },
+      "recall_keep_max": {
+        "type": "integer",
+        "name": "注入事实条数上限",
+        "default": 0,
+        "description": "单次注入事实的条数上限。0=自动：与关闭 JEV 时注入的条数相同（推荐，保证开了 JEV 只会更少更准、不会更多）。"
+      },
+      "recall_budget_mode": {
+        "type": "string",
+        "name": "注入预算模式",
+        "default": "strict",
+        "description": "strict（默认）：开 JEV 时注入条数不超过关闭时的数量；loose：不做条数上限，只按相关度清除（旧行为）。",
+        "options": [
+          "strict",
+          "loose"
+        ]
+      },
+      "jev_keep_min": {
+        "type": "float",
+        "name": "JEV 保留线",
+        "default": 0.1,
+        "description": "JEV 精修的相关度保留线：低于它的记忆会被当作无关清掉。默认 0.10；想更严格可调到 0.15~0.20。"
+      },
+      "jev_pool_factor": {
+        "type": "integer",
+        "name": "JEV 候选池倍数",
+        "default": 3,
+        "description": "JEV 精修前先多取几倍候选（默认 3）。倍数越大越不容易漏，但候选越多、调用越贵；设为 1 等于不扩池。"
+      },
+      "recall_skip_folded": {
+        "type": "switch",
+        "name": "跨会话跳过折叠原文",
+        "default": true,
+        "description": "跨会话召回时，跳过已被压缩摘要代表的旧归档原文，避免同一内容重复注入；从未压缩过的原文不受影响。"
       }
     }
   }
