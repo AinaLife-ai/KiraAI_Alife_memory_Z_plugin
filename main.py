@@ -868,6 +868,9 @@ class AlifeMemoryPlugin(BasePlugin):
         _jev_pool = _factor if (getattr(cfg, "jev_enabled", False)
                                 and getattr(cfg, "jev_recall", False)
                                 and _dec is not None and _dec.ready) else 1
+        # ★ 2026-09-26：记下"本次到底扩没扩池" ⇒ 条数上限**只在这时**才启用 ✓
+        #   关键：**关 JEV 的用户行为必须逐字不变** ✓（上限不能去截轮换槽的 +3 ✗）
+        self._jev_pool_used = _jev_pool
         # ★ 2026-09-26：记「不乘池时本该取到多少条」= 关闭 JEV 时的注入上限 ✓
         #   （逐通道按 min(实际取回, 未乘池的 limit) 累加 ✓ 精确 ✓ 不额外查库 ✓）
         self._fact_budget = 0
@@ -2649,13 +2652,15 @@ class AlifeMemoryPlugin(BasePlugin):
                              getattr(cfg, "jev_pool_factor", 3) or 3)))))
                 _floor2 = int(getattr(cfg, "top_k", 5) or 5)
                 if (str(getattr(cfg, "recall_budget_mode", "strict")) == "strict"
+                        and int(getattr(self, "_jev_pool_used", 1) or 1) > 1
                         and _cap2 > 0 and len(facts) > max(_cap2, _floor2)):
                     facts = facts[:max(_cap2, _floor2)]
             # ★★ 2026-09-26：**注入前的最后一道上限**（不受精修内部分支影响 ✓）
             #   为什么放这里：精修可能因未就绪/超时/异常而**原样返回** ✗，
             #   那样内部的上限就形同虚设 ⇒ 在真正决定注入量的地方再兜一次 ✓
             #   实测踩到：strict 下内部上限没生效、注入仍 33 条 ✗
-            if str(getattr(cfg, "recall_budget_mode", "strict")) == "strict":
+            if (str(getattr(cfg, "recall_budget_mode", "strict")) == "strict"
+                    and int(getattr(self, "_jev_pool_used", 1) or 1) > 1):
                 _capf = int(getattr(cfg, "recall_keep_max", 0) or 0) \
                     or int(getattr(self, "_fact_budget", 0) or 0) \
                     or max(1, len(facts) // min(5, max(1, int(

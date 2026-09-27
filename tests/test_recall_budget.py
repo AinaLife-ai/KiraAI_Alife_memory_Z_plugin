@@ -258,3 +258,42 @@ def test_folded_row_is_kept_when_summary_not_in_recall():
             "SELECT * FROM records WHERE id=?", (rid,)).fetchall()]
     folded = set(s.folded_covered_ids(rows))
     assert rid not in folded, "摘要不在结果里 ⇒ 折叠原文必须保留 ✓（否则漏掉唯一命中 ✗）"
+
+
+@pytest.mark.asyncio
+async def test_jev_off_strict_and_loose_inject_identically(tmp_path):
+    """★★ 关 JEV 时，strict / loose 两种预算模式必须**完全一致** ✓
+
+    用户要求（2026-09-26）：关闭 JEV 时一切正常、行为不变 ✓
+    ⇒ 条数上限只应在「JEV 真的扩池」时启用 ✓
+      否则它会去截**轮换槽的 +3** ✗（那是关 JEV 时本来的行为 ✗）
+    实测踩到：上限最初**没有 JEV 前置条件** ✗（本轮修 ✓）
+    """
+    common = dict(enabled=True, recall_scope="global", audit_enabled=False,
+                  fact_merge_enabled=False, proactive_enabled=False,
+                  permanent_tidy_enabled=False, tidy_rebuild_bot_enabled=False)
+    seeds = ["用户花生过敏的永久记录 %03d" % i for i in range(1, 61)]
+    seeds2 = ["用户还在讲花生过敏相关的事 %03d" % i for i in range(1, 61)]
+
+    views = {}
+    for mode in ("strict", "loose"):
+        p = _boot(tmp_path / mode, **dict(common, recall_budget_mode=mode))
+        await p.initialize()
+        _seed(p.store, "qq:gm:seed", seeds)          # 常驻/主题档
+        _seed(p.store, "qq:gm:seed2", seeds2)        # 关键词命中档（触发轮换槽 ✓）
+        views[mode] = await _inject(p, "你还记得我花生过敏的事吗", "s-" + mode)
+
+    def _norm(lines):
+        # 行首是**每次运行随机**的主体码别名 ✗ ⇒ 比对前剥掉 ✓（不是行为差异 ✓）
+        import re as _re
+        return [_re.sub(r"^\S+\s+", "", l) for l in lines]
+
+    a, b = _norm(_fact_lines(views["strict"])), _norm(_fact_lines(views["loose"]))
+    # ★ 锁"条数相等"这一条就够 ✓：
+    #   上限若在没扩池时也生效 ⇒ strict 会被截少 ⇒ 条数不等 ✗（这正是要防的 ✓）
+    #   条目**成员**可能因"轮换槽每轮挑的批"略有不同（同池不同偏移 ✓）⇒ 不锁成员 ✓
+    assert len(a) == len(b), (
+        "关 JEV 时 strict 与 loose 注入条数不一致 ✗ ⇒ 上限在没扩池时也生效了 ✗\n"
+        "  strict=%d 条 / loose=%d 条\n  只在 strict 里的: %s"
+        % (len(a), len(b), [x for x in a if x not in b][:3]))
+    assert ("｜" in views["strict"]) == ("｜" in views["loose"])
