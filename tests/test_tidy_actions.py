@@ -175,3 +175,36 @@ async def test_tidy_step_still_runs_when_nothing_to_merge(tmp_path):
 
     seen2, _r2 = await _one(tmp_path, "boom", _boom)
     assert seen2, "**前置合并报错时，整理同样必须继续** ✗（try/except 兜底 ✓）"
+
+
+@pytest.mark.asyncio
+async def test_tidy_all_queues_when_session_has_single_permanent(tmp_path):
+    """★★ 用户实测：点了「整理永久记忆」任务列表**什么都没有** ✗
+
+    根因：`queue_tidy_all` 复用了 `sessions_with_permanents()` 的默认口径
+          —— 那个默认是 `HAVING count(*)>1`（给**合并相似**用的 ✓）
+          ⇒ 若每个会话只有**1 条**常驻 ⇒ 列表为空 ⇒ **一个任务都不入队** ✗
+    修：整理改用 `min_count=1` ✓（合并仍保持 ≥2 ✓）
+    """
+    store = storage_mod.Store(tmp_path / "q.db")
+    store.initialize()
+    cfg = contracts.Settings()
+    eng = engine_mod.Engine(store, lambda: cfg, None, None, None)
+    rid = await store.call("memorize", "qq:gm:solo", "用户对花生过敏，吃了会休克",
+                           [], 1000.0, 1000.0, 9, "健康")
+    assert rid
+
+    # 口径本身：只有 1 条 ⇒ 默认（给合并用）应为空 ✓；min_count=1（给整理用）应命中 ✓
+    assert await store.call("sessions_with_permanents") == [], "合并口径仍要求 ≥2 ✓"
+    assert await store.call("sessions_with_permanents", 1) == ["qq:gm:solo"], "整理口径 ≥1 ✓"
+
+    plugin = engine_mod.__dict__.get("AlifeMemoryPlugin")
+    import importlib
+    main_mod = importlib.import_module("alife_tidyA.main")
+    fake = types.SimpleNamespace(store=store, engine=eng)
+    owners = await main_mod.AlifeMemoryPlugin.queue_tidy_all(fake, "", automatic=False, force=True)
+    assert owners == ["qq:gm:solo"], "只有 1 条常驻的会话也必须被排上 ✓"
+    with store.connect() as db:
+        rows = db.execute("SELECT kind, sid, state FROM jobs").fetchall()
+    assert any(r["kind"] == "tidy" and r["sid"] == "qq:gm:solo" for r in rows), (
+        "整理任务必须真的入队 ✓（否则列表里什么都没有 ✗）：%r" % (rows,))

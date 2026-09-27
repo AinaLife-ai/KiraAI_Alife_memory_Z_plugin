@@ -1222,7 +1222,10 @@ class AlifeMemoryPlugin(BasePlugin):
         ⇒ 两个传 force 的入口（bot 主动链路 + 工作台「全部重新整理」）直接 **TypeError**
         ⇒ **"无视冷却"全程没生效** ✗（用户实测反馈 ✓）
         """
-        owners = set(await self.store.call("sessions_with_permanents"))
+        # ★ 2026-09-27（用户实测）：整理对「只有 1 条」常驻的会话同样该跑 ✓
+        #   此前复用默认值（要求 >1 条）✗ ⇒ 每会话只有 1 条时列表为空
+        #   ⇒ 点了「整理永久记忆」**一个任务都不入队** ✗（列表里什么都没有 ✓）
+        owners = set(await self.store.call("sessions_with_permanents", 1))
         # ★ 2026-09-19（用户实测）：只有「指定单条(ids)」时才需要把发起会话并进来 ✓
         #   全局整理把它并进来 ✗ ⇒ 若该会话没有永久记忆 ⇒ 白排一个「本次跳过」的任务 ✓
         #   ⇒ 全局整理本来就覆盖"所有**有永久记忆**的会话" ✓ 不会漏 ✓

@@ -2169,8 +2169,14 @@ $$("[data-job]").forEach(
           if (!mode) return;                       // 取消 ✓
           payload.force = mode === "all";           // 全部重新整理 → 无视冷却 ✓
         }
-        await api("/jobs", payload);
-        toast(payload.force ? "已开始全部重新整理" : "任务已进入后台队列");
+        const res = await api("/jobs", payload);
+        // ★ 2026-09-27：整理/合并是"按会话排队"✓ 若一个会话都没排上 ⇒ 别喊"已开始"✗
+        //   （用户实测：点了却没任何任务 ✗ 容易以为坏了 ✓）
+        if (res && res.sessions === 0) {
+          toast("没有需要处理的会话（这些会话当前没有常驻永久记忆）");
+        } else {
+          toast(payload.force ? "已开始全部重新整理" : "任务已进入后台队列");
+        }
         await poll();
       })),
 );
