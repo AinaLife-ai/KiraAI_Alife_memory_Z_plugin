@@ -543,6 +543,9 @@ class Edit(Strict):
     #   ⇒ **后端本来就允许不给** ✓ 只有这个模型强制必填 ✗ ⇒ 改可选 ✓
     #   语义：给了就做"版本没变才允许改"的冲突检测 ✓ 没给就跳过 ✓
     revision: int | None = Field(default=None, ge=1)
+    # ★ 2026-09-27（用户实测）：UI 明确确认「以我的版本覆盖」时传 force ✓
+    #   纯删除也会在服务端跳过比对 ✓（删的是「删除」本身，不覆盖别人的内容 ✓）
+    force: bool = Field(default=False)
     patch: dict
     reason: Short
 

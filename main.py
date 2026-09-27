@@ -458,6 +458,22 @@ def is_notice_message(message):
     return bool(getattr(message, "is_notice", False))
 
 
+def edit_skip_revision(edit):
+    """这个编辑要不要**跳过版本比对**？✓（2026-09-27 用户实测）
+
+    跳过 ⇒ 纯删除（`patch == {"deleted": True}` ✓）或 UI 明确确认「以我的版本覆盖」(force ✓)
+    为什么删除要跳过：删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+                    此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+                    ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+    返回 (payload, 是否跳过)；**force 会从 payload 里去掉了 ✗**（store.edit 不认这个参数 ✗）
+    """
+    payload = edit.model_dump()
+    patch = payload.get("patch") or {}
+    forced = bool(payload.pop("force", False))
+    pure_delete = set(patch) == {"deleted"} and bool(patch.get("deleted"))
+    return payload, (forced or pure_delete)
+
+
 def revision(settings):
     return hashlib.sha256(dump(settings.model_dump()).encode()).hexdigest()
 
@@ -4231,7 +4247,15 @@ class AlifeMemoryPlugin(BasePlugin):
                 patch=dict(patch),
                 reason=reason,
             )
-            await self.store.call("edit", **edit.model_dump())
+            # ★ 2026-09-27（用户实测）：**纯删除不参与版本比对** ✓
+            #   删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+            #   此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+            #   ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+            #   UI 明确确认「以我的版本覆盖」时传 force ⇒ 同样跳过比对 ✓
+            _p, _skip = edit_skip_revision(edit)
+            if _skip:
+                _p["revision"] = None
+            await self.store.call("edit", **_p)
             return self.recall_result(event, {"ok": True})
         except ValueError:
             return dump({"ok": False, "error": "invalid_or_conflicting_edit"})
@@ -4639,7 +4663,15 @@ class AlifeMemoryPlugin(BasePlugin):
                         Fact.model_validate(data)
 
                 await asyncio.to_thread(validate_fact)
-            await self.store.call("edit", **edit.model_dump())
+            # ★ 2026-09-27（用户实测）：**纯删除不参与版本比对** ✓
+            #   删的是「删除」这件事本身 —— 不覆盖别人的内容 ✓ 且可还原（回收站 ✓）
+            #   此前从「任务明细 → 查看与编辑」进来带的是**快照里的旧版本号** ✗
+            #   ⇒ 想删却被 409 拦住 ✗（用户：「我还得回事实页自己搜着删」✗）
+            #   UI 明确确认「以我的版本覆盖」时传 force ⇒ 同样跳过比对 ✓
+            _p, _skip = edit_skip_revision(edit)
+            if _skip:
+                _p["revision"] = None
+            await self.store.call("edit", **_p)
         except Conflict:
             raise HTTPException(409, "memory changed; reload before saving") from None
         except ValueError:
