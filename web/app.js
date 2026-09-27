@@ -182,8 +182,10 @@ async function api(path, body) {
       // v2.18.12：文案把"发生了什么 / 你的输入还在 / 两条出路"讲清楚 ✓
       // （旧文案说"重新打开最新版本后再保存" ✗ 照做仍会冲突 ✗ → 是错误指引 ✓）
       const err = Error(
-        "设置已在别处被改过（另一个页面保存过，或插件重载过）。" +
-          "你这边有未保存的修改，为避免覆盖那边的改动，我没有保存 —— 你的输入没有丢。",
+        // ★ 2026-09-27：这条 409 是**通用**的（设置/记忆都会走到这里）
+        //   旧文案一开口就说"设置"✗ ⇒ 编辑记忆的人看到会懵 ✓ ⇒ 改成中性表述 ✓
+        "这条内容已在别处被改过（另一个页面保存过，或后台整理/插件重载更新过）。" +
+          "你这边有未保存的修改，为避免覆盖那边的改动，我没有直接保存 —— 你的输入没有丢。",
       );
       err.status = 409;
       throw err;
@@ -1407,13 +1409,30 @@ async function saveEdit(extra) {
         throw Error("关系必须是 JSON 三元组数组");
       }
     }
-    await api("/edit", {
+    const payload = {
       kind: current.kind,
       target: current.row.id,
       revision: current.row.revision,
       patch,
       reason: "WebUI 人工编辑",
-    });
+    };
+    try {
+      await api("/edit", payload);
+    } catch (e) {
+      // ★ 2026-09-27（用户实测）：从「任务明细」进来的 revision 是**快照时的旧版本号** ✗
+      //   ⇒ 必然 409 ✗；而旧文案讲的是"设置被改过" ✗ 且**没有出路按钮** ✗
+      //   服务端已支持 force（明确覆盖 ✓ 不透明传 revision ✓）⇒ 这里补第二条出路 ✓
+      if (e.status !== 409) throw e;
+      if (
+        !confirm(
+          "这条记忆在别处已经改了（可能被整理、合并或压缩更新过）。\n" +
+            "要用你现在的版本覆盖吗？你的输入不会丢。",
+        )
+      ) {
+        return; // 保留编辑器与你的输入 ✓
+      }
+      await api("/edit", { ...payload, force: true });
+    }
   }
   $("#editor").close();
   current = null;
