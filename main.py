@@ -864,10 +864,19 @@ class AlifeMemoryPlugin(BasePlugin):
         #   运行时偶发失败（超时/接口错）仍按原排序注入较大的池 ✓ —— 这是**有意保留**的：
         #   宁可多注入几条上下文，也绝不静默丢掉记忆 ✓
         _dec = getattr(self, "decisions", None)
-        _jev_pool = 3 if (getattr(cfg, "jev_enabled", False)
-                          and getattr(cfg, "jev_recall", False)
-                          and _dec is not None and _dec.ready) else 1
+        _factor = min(5, max(1, int(getattr(cfg, "jev_pool_factor", 3) or 3)))
+        _jev_pool = _factor if (getattr(cfg, "jev_enabled", False)
+                                and getattr(cfg, "jev_recall", False)
+                                and _dec is not None and _dec.ready) else 1
+        # ★ 2026-09-26：记下"本次到底扩没扩池" ⇒ 条数上限**只在这时**才启用 ✓
+        #   关键：**关 JEV 的用户行为必须逐字不变** ✓（上限不能去截轮换槽的 +3 ✗）
+        self._jev_pool_used = _jev_pool
+        # ★ 2026-09-26：记「不乘池时本该取到多少条」= 关闭 JEV 时的注入上限 ✓
+        #   （逐通道按 min(实际取回, 未乘池的 limit) 累加 ✓ 精确 ✓ 不额外查库 ✓）
+        self._fact_budget = 0
+        _bands = []   # (列表, 起, 止, 未乘池上限) ⇒ 末尾按**去重并集**定预算 ✓
         for category in ("commitment", "preference", "profile"):
+            _pinned_before = len(pinned)
             pinned.extend(
                 await self.store.call(
                     "facts",
@@ -885,6 +894,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     **prefer,
                 )
             )
+            _bands.append((pinned, _pinned_before, len(pinned), max(2, cfg.top_k)))
         triggered = []
         # 实体驱动：消息里提到谁，就把「关于这个人」的事实带回来。
         # 用 subject 精确过滤，而不是靠 lexical（那是硬过滤，会漏掉
@@ -907,6 +917,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 )
             )
         entity_hits = len(triggered)
+        _bands.append((triggered, 0, entity_hits, cfg.top_k))
         if keyword_hit:
             # 触发词（记得/之前/上次）：把范围放宽一档，按重要度取本会话事实。
             triggered.extend(
@@ -927,6 +938,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 )
             )
         keyword_hits = len(triggered) - entity_hits
+        _bands.append((triggered, entity_hits, entity_hits + keyword_hits,
+                       cfg.top_k * 2))
         if cfg.fact_recall_min_score and query.strip() and allow_content_match:
             # 内容匹配：消息里出现的词直接命中事实内容。
             # 只按类别/实体召回会漏掉「事实内容里有这个词、但主体和名字都没出现」的情况
@@ -951,6 +964,8 @@ class AlifeMemoryPlugin(BasePlugin):
                 )
             )
         lexical_hits = len(triggered) - entity_hits - keyword_hits
+        _bands.append((triggered, entity_hits + keyword_hits, len(triggered),
+                       cfg.top_k))
         # ★ 2026-09-23（用户拍板）：**只对常驻下沉；命中的另算** ✓
         #   · 常驻（承诺/偏好/画像三类）：按正常阈值 ✓
         #   · 本轮被命中的（实体 / 触发词 / 内容匹配）：**+RELEVANCE_BONUS** ✓
@@ -987,6 +1002,13 @@ class AlifeMemoryPlugin(BasePlugin):
         )
         # v2.18.14：这条注入路径同样要过**媒体闸** ✓
         # 图片/表情/引用壳-only 的事实不许进提示词 ✓（事实池此前没有这道过滤 ✗）
+        # ★ 关 JEV 时的注入量 =「各档未乘池前缀」的**去重并集** ✓
+        #   （不是各档相加 ✗ —— 跨档重复的事实会重复计数，实测 20 vs 实际 13 ✗）
+        _ids = set()
+        for _lst, _a, _b, _off in _bands:
+            for _r in _lst[_a:_b][:_off]:
+                _ids.add(_r.get("id"))
+        self._fact_budget = len(_ids)
         names = await self.store.call("known_names")
         values = [
             row
@@ -1614,6 +1636,8 @@ class AlifeMemoryPlugin(BasePlugin):
                                                          JEV_RECALL_MIN_CANDIDATES))
             return facts, rows, None
         budget = (getattr(cfg, "jev_timeout_ms", 5000) or 5000) / 1000.0
+        # ★ 2026-09-26：保留线可配（默认仍是 0.10；调高 ⇒ 清得更狠 ✓）
+        _kmin = float(getattr(cfg, "jev_keep_min", RECALL_KEEP_MIN) or RECALL_KEEP_MIN)
         t0 = time.time()
         order, trigger, timed_out = None, None, False
         try:
@@ -1630,7 +1654,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     if _trig is not None and _trig >= RECALL_TRIGGER_MIN:
                         trigger = True
                     keep = [k for k, s in sorted(scored, key=lambda kv: -(kv[1] or 0))
-                            if s is not None and s >= RECALL_KEEP_MIN]
+                            if s is not None and s >= _kmin]
                     # 两组各自保底：事实保 min(top_k, 全量)，档案保 2 条
                     if not keep:
                         keep = [k for k, _s in sorted(scored,
@@ -1667,10 +1691,31 @@ class AlifeMemoryPlugin(BasePlugin):
         rows2 = [r for _r, r in sorted(
             [(rank["r%d" % i], r) for i, r in enumerate(rows)
              if ("r%d" % i) in keepset], key=lambda t: t[0])]
+        # ★ 2026-09-26：**条数硬上限** —— 开 JEV 不许比关着时注入更多 ✓
+        #   strict + 上限>0 时按分数截断（facts2 已按相关度排序 ✓）
+        #   上限来源：显式配置 recall_keep_max ⇒ 否则 auto = 关闭 JEV 时的量（self._fact_budget）
+        #   保底优先：截断后仍不少于 top_k 条 ✓，且**判不了就照旧** ✓
+        _cap = int(getattr(cfg, "recall_keep_max", 0) or 0)
+        if not _cap:
+            _cap = int(getattr(self, "_fact_budget", 0) or 0)
+        if not _cap:
+            # 兜底折算：候选是"池倍数"倍取回来的 ⇒ 除以倍数即"关 JEV 时的量" ✓
+            # （计账可能不生效/为 0 ⇒ 这条保证兜得住 ✓；实测踩到过 ✗）
+            _pf = min(5, max(1, int(getattr(cfg, "jev_pool_factor", 3) or 3)))
+            _cap = max(1, len(facts) // _pf)
+        _floor = int(getattr(cfg, "top_k", 5) or 5)
+        _cut = 0
+        if (str(getattr(cfg, "recall_budget_mode", "strict")) == "strict"
+                and _cap > 0 and len(facts2) > max(_cap, _floor)):
+            _keep_n = max(_cap, _floor)
+            _cut = len(facts2) - _keep_n
+            facts2 = facts2[:_keep_n]
         logger.info(
-            "[记忆·Z] JEV·召回（事实 %d→%d / 档案 %d→%d）已按相关度重排并清无关（%d ms%s）",
+            "[记忆·Z] JEV·召回（事实 %d→%d / 档案 %d→%d）已按相关度重排并清无关"
+            "（%d ms%s%s）",
             len(facts), len(facts2), len(rows), len(rows2), used,
-            "，超时" if timed_out else "")
+            "，超时" if timed_out else "",
+            ("，上限 %d（截掉 %d）" % (_cap, _cut)) if _cut else "")
         return (facts2 or facts), (rows2 or rows), trigger
 
     async def _profile_refine(self, event, profiles, cfg):
@@ -1756,7 +1801,10 @@ class AlifeMemoryPlugin(BasePlugin):
             dec = getattr(self, "decisions", None)
             if dec is None or not dec.ready:
                 return want
-            return max(int(want), min(int(want) * TOOL_POOL_FACTOR, TOOL_POOL_MAX))
+            _f = min(5, max(1, int(getattr(
+                self.settings, "jev_pool_factor", TOOL_POOL_FACTOR)
+                or TOOL_POOL_FACTOR)))
+            return max(int(want), min(int(want) * _f, TOOL_POOL_MAX))
         except Exception:                       # noqa: BLE001
             return want
 
@@ -1806,7 +1854,11 @@ class AlifeMemoryPlugin(BasePlugin):
             return rows
         ordered = sorted(scored, key=lambda kv: -(kv[1] or 0))
         if strict:
-            keep = [k for k, s in ordered if (s or 0) >= RECALL_KEEP_MIN]
+            # ★ 2026-09-26：与被动召回保持同一判据（都可配 ✓）
+            #   （此前工具侧硬编码 0.10 ✗ ⇒ 用户调 jev_keep_min 时工具不跟随 ✗）
+            _kmin = float(getattr(cfg, "jev_keep_min", RECALL_KEEP_MIN)
+                          or RECALL_KEEP_MIN)
+            keep = [k for k, s in ordered if (s or 0) >= _kmin]
             floor = min(len(ordered), int(getattr(cfg, "top_k", 5) or 5))
             if len(keep) < floor:
                 keep = [k for k, _s in ordered[:floor]]
@@ -2499,8 +2551,19 @@ class AlifeMemoryPlugin(BasePlugin):
                 **prefer,
             ))
             local_ids = {r["id"] for r in rows}
+            # ★ 2026-09-26（读法A）：跨会话召回**跳过已被摘要代表的折叠原文** ✓
+            #   压缩后子行 active=0、内容已由父摘要代表 ⇒ 再注入原文就是重复 ✗
+            #   未压缩原文 / 父行已消失的孤儿折叠行 ⇒ 照旧召回 ✓（唯一副本不能丢）
+            #   开关：recall_skip_folded（默认开）；失败 ⇒ 照旧 ✓
+            _folded = set()
+            if bool(getattr(cfg, "recall_skip_folded", True)):
+                try:
+                    _folded = set(self.store.folded_covered_ids(matches["items"]))
+                except Exception:                # noqa: BLE001
+                    _folded = set()
             fresh = [
                 r for r in matches["items"]
+                if r["id"] not in _folded
                 # 与既有约定一致：`category='tool'` 的工具步也要排除 ✓（v2.18.19 全链路 ✓）
                 if r["id"] not in local_ids
                 and not is_tool_result(r.get("summary"))
@@ -2580,6 +2643,31 @@ class AlifeMemoryPlugin(BasePlugin):
                     **prefer,
                 )
                 facts = list({f["id"]: f for f in [*extra, *facts]}.values())
+                # ★ 2026-09-26：`extra` 是**精修之后**补进来的 ✗ ⇒ 上限必须在这里再兜一次 ✓
+                #   否则"补一批 top_k"会绕过 recall_keep_max（实测：strict 下仍注入 33 条 ✗）
+                #   顺序保持原样（extra 在前是既有行为 ✓），从**尾部**截断 ✓
+                _cap2 = (int(getattr(cfg, "recall_keep_max", 0) or 0)
+                         or int(getattr(self, "_fact_budget", 0) or 0)
+                         or max(1, len(facts) // min(5, max(1, int(
+                             getattr(cfg, "jev_pool_factor", 3) or 3)))))
+                _floor2 = int(getattr(cfg, "top_k", 5) or 5)
+                if (str(getattr(cfg, "recall_budget_mode", "strict")) == "strict"
+                        and int(getattr(self, "_jev_pool_used", 1) or 1) > 1
+                        and _cap2 > 0 and len(facts) > max(_cap2, _floor2)):
+                    facts = facts[:max(_cap2, _floor2)]
+            # ★★ 2026-09-26：**注入前的最后一道上限**（不受精修内部分支影响 ✓）
+            #   为什么放这里：精修可能因未就绪/超时/异常而**原样返回** ✗，
+            #   那样内部的上限就形同虚设 ⇒ 在真正决定注入量的地方再兜一次 ✓
+            #   实测踩到：strict 下内部上限没生效、注入仍 33 条 ✗
+            if (str(getattr(cfg, "recall_budget_mode", "strict")) == "strict"
+                    and int(getattr(self, "_jev_pool_used", 1) or 1) > 1):
+                _capf = int(getattr(cfg, "recall_keep_max", 0) or 0) \
+                    or int(getattr(self, "_fact_budget", 0) or 0) \
+                    or max(1, len(facts) // min(5, max(1, int(
+                        getattr(cfg, "jev_pool_factor", 3) or 3))))
+                _floorf = int(getattr(cfg, "top_k", 5) or 5)
+                if _capf > 0 and len(facts) > max(_capf, _floorf):
+                    facts = facts[:max(_capf, _floorf)]
         while len(dump(related)) > cfg.context_chars // 4 and related:
             related.pop()
         names = []
@@ -3597,12 +3685,19 @@ class AlifeMemoryPlugin(BasePlugin):
                 "search",
                 # v2.18.64：`include_history` 只给**网页端**用（面板开关）✓
                 # 模型侧的档案检索照旧（历史存档能被搜到 ✓ 冷归档由 include_cold 默认值决定 ✓）
-                **q.model_dump(exclude={"prompt", "include_global", "include_history"}),
+                **q.model_dump(exclude={"prompt", "include_global", "include_history",
+                                        "keyword"}),
+                # ★ 2026-09-26（用户拍板）：只给 keyword 时**不再走 LIKE 硬过滤** ✗
+                #   改为把它当查询文本走 lexical 词法打分 ✓（与被动召回一致 ✓）
+                #   实测（同库同查询）：真相关 2/4 → **4/4** ✓、无关项不增加 ✓
+                #   速度：小库 +14ms（可忽略）；**2517 条库反而更快**（52.4 → 26.7 ms ✓）
+                #   注：prompt 与 keyword 都给时保持原样（prompt 打分 + keyword 过滤 ✓）
+                keyword=("" if (keyword and not prompt) else keyword),
                 scope=self.settings.recall_scope,
                 users=user_ids(event),
                 vector=vector,
                 model=model,
-                lexical=q.prompt if not vector else "",
+                lexical=((q.prompt or keyword) if not vector else ""),
                 expand=self.settings.expand_query,
                 exclude_ids=excluded,
                 # 归档是否参与由设置决定（默认参与，召回更全）；

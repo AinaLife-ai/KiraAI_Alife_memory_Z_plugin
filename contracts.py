@@ -438,6 +438,26 @@ class Settings(Strict):
             "两条路在 JEV 不可用/失败时都完全等于旧行为。"
         ),
     )
+    recall_keep_max: int = Field(
+        default=0,
+        description="单次注入事实的条数上限。0=自动：与关闭 JEV 时注入的条数相同（推荐）。",
+    )
+    recall_budget_mode: Literal["strict", "loose"] = Field(
+        default="strict",
+        description="strict（默认）：开 JEV 时注入条数不超过关闭时的数量；loose：不做条数上限（旧行为）。",
+    )
+    jev_keep_min: float = Field(
+        default=0.10,
+        description="JEV 精修的相关度保留线：低于它的记忆会被当作无关清掉（默认 0.10，可调 0.15~0.20）。",
+    )
+    jev_pool_factor: int = Field(
+        default=3,
+        description="JEV 精修前先多取几倍候选（默认 3）；设为 1 等于不扩池。",
+    )
+    recall_skip_folded: bool = Field(
+        default=True,
+        description="跨会话召回时，若某条旧归档原文的摘要本轮也在结果里，则只保留摘要（避免重复注入）；摘要不在时仍保留原文，避免漏掉唯一命中的那条。",
+    )
 
     @model_validator(mode="after")
     def valid_merge_limits(self):
