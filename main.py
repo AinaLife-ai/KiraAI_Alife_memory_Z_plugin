@@ -3680,12 +3680,19 @@ class AlifeMemoryPlugin(BasePlugin):
                 "search",
                 # v2.18.64：`include_history` 只给**网页端**用（面板开关）✓
                 # 模型侧的档案检索照旧（历史存档能被搜到 ✓ 冷归档由 include_cold 默认值决定 ✓）
-                **q.model_dump(exclude={"prompt", "include_global", "include_history"}),
+                **q.model_dump(exclude={"prompt", "include_global", "include_history",
+                                        "keyword"}),
+                # ★ 2026-09-26（用户拍板）：只给 keyword 时**不再走 LIKE 硬过滤** ✗
+                #   改为把它当查询文本走 lexical 词法打分 ✓（与被动召回一致 ✓）
+                #   实测（同库同查询）：真相关 2/4 → **4/4** ✓、无关项不增加 ✓
+                #   速度：小库 +14ms（可忽略）；**2517 条库反而更快**（52.4 → 26.7 ms ✓）
+                #   注：prompt 与 keyword 都给时保持原样（prompt 打分 + keyword 过滤 ✓）
+                keyword=("" if (keyword and not prompt) else keyword),
                 scope=self.settings.recall_scope,
                 users=user_ids(event),
                 vector=vector,
                 model=model,
-                lexical=q.prompt if not vector else "",
+                lexical=((q.prompt or keyword) if not vector else ""),
                 expand=self.settings.expand_query,
                 exclude_ids=excluded,
                 # 归档是否参与由设置决定（默认参与，召回更全）；
