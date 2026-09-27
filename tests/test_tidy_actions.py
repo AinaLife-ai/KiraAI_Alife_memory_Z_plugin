@@ -78,3 +78,41 @@ async def test_split_keeps_only_constraint(tmp_path):
     assert row["active"], "split ⇒ 约束那段继续常驻 ✓"
     assert "每周日" in (row["summary"] or ""), "只剩 keep_content 那段 ✓"
     assert facts, "split ⇒ 同时提炼出事实 ✓"
+
+
+@pytest.mark.asyncio
+async def test_single_id_rebuild_does_not_merge_whole_session(tmp_path):
+    """★ 面板「完全重新提取这一条」（ids 指定）**只能动这一条** ✓
+
+    2026-09-27：写入链给会话级整理加了"先合并相似永久记忆" ✓
+    但**单条重提取**是"就改这一条"的语义 ✗ ⇒ 不能顺手合并同会话别的记忆 ✗
+    （否则按钮语义被悄悄放大 ✓）
+    """
+    store = storage_mod.Store(tmp_path / "single.db")
+    store.initialize()
+    cfg = contracts.Settings(permanent_tidy_enabled=True, permanent_tidy_days=0)
+    eng = engine_mod.Engine(store, lambda: cfg, None, None, None)
+    rid = await store.call("memorize", "qq:gm:one", "用户对花生过敏，吃了会休克",
+                           [], 1000.0, 1000.0, 9, "健康")
+
+    called = []
+
+    async def _spy(sid, *a, **k):
+        called.append(sid)
+        return {"merged": 0, "permanent": 1}
+    eng.consolidate = _spy
+
+    async def _keep(schema, purpose, payload, cfg_, **kw):
+        return schema(**{"items": [{"id": "p1", "action": "extract", "reason": "t",
+                                    "facts": [{"category": "fact", "subject": "用户",
+                                               "content": "对花生过敏会休克", "reason": "重提取",
+                                               "scenario": "", "tags": [], "relations": [],
+                                               "source_ids": ["p1"], "importance": 9}]}]}).model_dump()
+    eng.structured = _keep
+
+    await eng.start()
+    await eng.tidy_permanents("qq:gm:one", force=True, ids=[rid], rebuild=True)
+    assert not called, "单条重提取不该触发整会话相似合并 ✗（按钮语义被放大 ✗）"
+    await eng.tidy_permanents("qq:gm:one", force=True)      # 会话级 ⇒ 应该合并 ✓
+    assert called, "会话级整理应该先合并相似永久记忆 ✓"
+    await eng.stop()
