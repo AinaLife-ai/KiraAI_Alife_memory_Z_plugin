@@ -226,5 +226,50 @@ class JevCompressScreenCase(unittest.TestCase):
         self.assertFalse(skip)
 
 
+    def test_tool_step_never_scored_but_rides_with_its_round(self):
+        """工具步：不单独判分 ✓ 但**随其所在轮**一起保留/归档 ✓（用户追问的点 ✓）。
+
+        依据：常规捕获时工具步落的是 role="assistant" + category="tool"（main.py:3046/3053）⇒
+              预筛里 `is_user = role != "assistant"` ⇒ 它**不开新轮** ✓；
+              同时 `_tool(row)` 把它排除在打分 items 之外 ✓（原始 tool_calls JSON 不送判定层 ✓）。
+        """
+        seen = {}
+
+        class _Fake:
+            ready = True
+
+            async def compress_screen(self, items, timeout=None):
+                seen["items"] = [str(t)[:16] for _k, _r, t in items]
+                return {k: (0.90 if "花生" in t else 0.05) for k, _r, t in items}
+
+        self.store.capture("qq:gm:9", "turn", [
+            {"role": "user", "content": "帮我记：花生过敏", "users": ["qq:9"], "time": 0.0},
+            {"role": "assistant", "content": '{"tool_calls": [{"id": "1"}]}',
+             "users": ["qq:9"], "time": 1.0, "category": "tool"},
+            {"role": "assistant", "content": "已记住：花生过敏 / 每周日提醒",
+             "users": ["qq:9"], "time": 2.0},
+            {"role": "user", "content": "好", "users": ["qq:9"], "time": 3.0},
+            {"role": "assistant", "content": "嗯", "users": ["qq:9"], "time": 4.0},
+        ])
+        cfg = c.Settings(jev_enabled=True, jev_compress=True)
+        engine = self.engine(cfg, None)
+        engine.decisions = _Fake()
+        cands = run(self.store.call("active", "qq:gm:9"))
+        kept, skip = run(engine.jev_compress_screen(cands, cfg))
+        # ① 工具步不送去打分 ✓
+        self.assertEqual(len(seen["items"]), 4, "5 条里工具步应被排除 ⇒ 只送 4 条 ✓")
+        self.assertFalse(any("tool_calls" in s for s in seen["items"]),
+                         "原始工具 JSON 不许送判定层 ✓")
+        # ② 工具步随它所在的轮一起保留 ✓（有 0.90 那条在同一轮）
+        kept_ids = {r["id"] for r in kept}
+        tool_row = next(r for r in cands if r.get("category") == "tool")
+        self.assertIn(tool_row["id"], kept_ids, "工具步必须跟着它那一轮保留 ✓")
+        # ③ 另一轮（0.05）整轮归档 ✓
+        archived = self.archived_ids("qq:gm:9")
+        self.assertEqual(sorted(archived), sorted(r["id"] for r in cands
+                                                  if r["id"] not in kept_ids))
+        self.assertFalse(skip)
+
+
 if __name__ == "__main__":
     unittest.main()
