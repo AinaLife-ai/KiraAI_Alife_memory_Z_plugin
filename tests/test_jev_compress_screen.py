@@ -271,5 +271,41 @@ class JevCompressScreenCase(unittest.TestCase):
         self.assertFalse(skip)
 
 
+    def test_all_tool_batch_never_calls_judge_and_never_archives(self):
+        """整批都是工具步 ⇒ 没有可打分的行 ⇒ **根本不调判定层** ✓ 原样放行 ✓ 零归档 ✓
+
+        用户关心："开了 JEV 之后，工具步会不会被单独送进压缩？"
+        结构上的答案：JEV 只做两件事 —— 决定「这一批压不压」与「整轮归档还是保留」，
+        它**不切分轮、不参与压缩输入的组织、也不产出任何记录** ⇒ 无法把工具步孤立出去 ✓。
+        本用例钉住其中一条：工具步从来不单独送判定层（整批都是工具步时连调用都不发 ✓）。
+        """
+        msgs = [
+            {"role": "assistant", "content": '{"tool_calls": [1]}', "category": "tool",
+             "summary": "[调用工具：查天气]", "users": ["qq:9"], "time": 0.0},
+            {"role": "assistant", "content": '{"tool_calls": [2]}', "category": "tool",
+             "summary": "[调用工具：查日程]", "users": ["qq:9"], "time": 1.0},
+        ]
+        sid = "qq:gm:9"
+        self.seed(sid, msgs)
+
+        class _Boom:
+            """被调用即失败：本用例里判定层**一次都不该被调用** ✓。"""
+            ready = True
+            calls = 0
+
+            async def compress_screen(self, items, timeout=None):
+                _Boom.calls += 1
+                raise AssertionError("整批都是工具步时不该调判定层（白烧一次）✗")
+
+        cfg = c.Settings(jev_enabled=True, jev_compress=True)
+        engine = self.engine(cfg, _Boom())
+        cands = run(self.store.call("active", sid))
+        kept, skip = run(engine.jev_compress_screen(cands, cfg))
+        self.assertEqual(_Boom.calls, 0, "不许为纯工具批调判定层 ✗")
+        self.assertFalse(skip, "空批应原样放行（交给正常压缩流程 ✓）")
+        self.assertEqual(self.archived_ids(sid), [], "不许归档任何东西 ✓")
+        self.assertEqual(sorted(r["id"] for r in kept), sorted(r["id"] for r in cands))
+
+
 if __name__ == "__main__":
     unittest.main()
