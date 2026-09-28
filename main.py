@@ -544,10 +544,12 @@ class AlifeMemoryPlugin(BasePlugin):
                     _s = getattr(self, "settings", None)
                     _on = lambda k: "✓" if getattr(_s, k, False) else "✗"   # noqa: E731
                     logger.info(
-                        "[记忆·Z] JEV 已启用（模型 %s · 端点 %s）｜开关：召回%s 合并%s 审计%s 重要度%s",
+                        "[记忆·Z] JEV 已启用（模型 %s · 端点 %s）｜开关："
+                        "召回%s 合并%s 审计%s 重要度%s 压缩%s",
                         _c.model, _c.base_url,
                         _on("jev_recall"), _on("jev_merge"),
-                        _on("jev_audit"), _on("jev_importance"))
+                        _on("jev_audit"), _on("jev_importance"),
+                        _on("jev_compress"))
                 else:
                     # ★ 以前这里是**静默**的 ✗ ⇒ 用户开了配置却一行 JEV 日志都没有，无从排查
                     if not getattr(_c, "uuid", "") and not getattr(_c, "api_key", ""):
