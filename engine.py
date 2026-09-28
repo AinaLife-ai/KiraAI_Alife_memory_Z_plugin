@@ -2156,17 +2156,64 @@ class Engine:
                     else ""
                 )
                 try:
-                    # v2.18.74：应用前**重读这一组**拿最新 revision ✗
+                    # v2.18.74：应用前**重读这一组**拿最新 revision ✓
                     # （并发编辑会 bump revision ⇒ edit 报 "record changed;
                     #   reload before saving" ⇒ 整组被跳过、且前端毫无痕迹 ✗）
+                    # ★ v2.21.2：重读结果**按 id 逐条取用** ✗ 不再"条数不等就整块丢弃 ✗"。
+                    #   旧写法：组里任意一条被并发删/撤 ⇒ len 不等 ⇒ 整组退回旧 revision
+                    #   ⇒ 后面必然 Conflict、整组白跑（明细只留一句含糊的"合并失败" ✗）。
+                    #   新写法：消失的成员**直接剔除（对它们零写入 ✓）**，存活 ≥2 继续合 ✓；
+                    #   目标若已消失 ⇒ 整组跳过并如实留痕 ✓（绝不换目标、绝不赌 ✓）。
                     try:
                         _fresh = await self.store.call(
                             "facts_for_merge", ids=[r["id"] for r in group]
                         )
-                        if _fresh and len(_fresh) == len(group):
-                            group = _fresh
                     except Exception:
-                        pass
+                        _fresh = None
+                    if _fresh is not None:
+                        _alive = {r["id"]: r for r in _fresh}
+                        _kept = [r for r in group if r["id"] in _alive]
+                        if len(_kept) != len(group):
+                            logger.info(
+                                "[记忆·Z] 合并前重读：%d 条成员已被并发删除（剔除后继续）",
+                                len(group) - len(_kept),
+                            )
+                        if len(_kept) < 2:
+                            items.append({
+                                "kind": "fact",
+                                "target": _kept[0]["id"] if _kept else "",
+                                "action": "keep",
+                                "note": "未合并：组内仅剩 %d 条（其余已被并发删除）"
+                                % len(_kept),
+                            })
+                            continue
+                        if verdict.get("target_id") not in _alive:
+                            items.append({
+                                "kind": "fact",
+                                "target": _kept[0]["id"],
+                                "action": "keep",
+                                "note": "未合并：目标事实已被并发删除（%s）"
+                                % await self.store.call(
+                                    "short_id", verdict.get("target_id") or ""
+                                ),
+                            })
+                            continue
+                        group = _kept
+                        _src = [
+                            i for i in (verdict.get("source_ids") or [])
+                            if i in _alive
+                        ]
+                        if not _src and verdict.get("action") == "merge":
+                            items.append({
+                                "kind": "fact",
+                                "target": verdict["target_id"],
+                                "action": "keep",
+                                "note": "未合并：待并入的事实已被并发删除",
+                            })
+                            continue
+                        if _src != list(verdict.get("source_ids") or []):
+                            verdict = dict(verdict)
+                            verdict["source_ids"] = _src
                     action = verdict.get("action", "merge")
                     # 跨类别时先把全组统一到目标类别（合并本身要求同主体同类别）
                     unified = str(verdict.get("category") or "").strip()
@@ -2180,8 +2227,31 @@ class Engine:
                                 {"category": unified},
                                 "%s（统一类别：%s）" % (verdict["reason"], unified),
                             )
+                        # ★ v2.21.2：统一类别每写一次 revision 就 +1 ⇒ 下面的写必须用
+                        #   **刚读回的**版本号 ✗
+                        #   旧写法用 `row["revision"] + (1 if unified else 0)` 手工补偿：
+                        #   只要那一步没真的 +1（该行类别本就一致 ⇒ 整个循环被跳过 ✗、
+                        #   或该行写失败被跳过）⇒ **自己撞自己** ⇒ 撤回**静默失败** ✗
+                        #   （明细连一条都不写 ⇒ 面板上看不出"该撤没撤" ✗）。
+                        #   改：撤回前重读一次、用真实版本 ✓；消失的成员直接剔除 ✓。
+                        try:
+                            _again = await self.store.call(
+                                "facts_for_merge", ids=[r["id"] for r in group]
+                            )
+                        except Exception:
+                            _again = None
+                        if _again:
+                            _rev = {r["id"] for r in _again}
+                            _kept2 = [r for r in group if r["id"] in _rev]
+                            if len(_kept2) != len(group):
+                                logger.info(
+                                    "[记忆·Z] 撤回前重读：%d 条成员已被并发删除（剔除）",
+                                    len(group) - len(_kept2),
+                                )
+                            group = _kept2
                     if action == "drop":
                         # 只软删冗余的那几条，保留 target（回收站可还原）
+                        retracted = 0
                         for row in group:
                             if row["id"] == verdict["target_id"]:
                                 continue
@@ -2194,14 +2264,37 @@ class Engine:
                                     "mark_merge_pending", [row["id"]], 0)
                             except Exception:
                                 pass
-                            await self.store.call(
-                                "edit",
-                                "fact",
-                                row["id"],
-                                row["revision"] + (1 if unified else 0),
-                                {"deleted": True},
-                                verdict["reason"],
-                            )
+                            try:
+                                # ★ v2.21.2：用**刚读回的**行版本（不再手工 +1）✗
+                                await self.store.call(
+                                    "edit",
+                                    "fact",
+                                    row["id"],
+                                    row["revision"],
+                                    {"deleted": True},
+                                    verdict["reason"],
+                                )
+                            except Exception as exc:
+                                # ★ v2.21.2：撤回失败**必须留痕** ✗（此前静默 ✗）
+                                detail_retract = failure_detail(exc)
+                                self._merge_retract_failed = (
+                                    getattr(self, "_merge_retract_failed", 0) + 1
+                                )
+                                logger.warning(
+                                    "[记忆·Z] 一条事实未能撤回（%s），明细留痕",
+                                    detail_retract,
+                                )
+                                items.append(
+                                    {
+                                        "kind": "fact",
+                                        "target": row["id"],
+                                        "action": "retract_failed",
+                                        "note": "未撤回（%s）" % detail_retract,
+                                        "before": row["content"],
+                                    }
+                                )
+                                continue
+                            retracted += 1
                             items.append(
                                 {
                                     "kind": "fact",
@@ -2221,7 +2314,7 @@ class Engine:
                         )
                         logger.info(
                             "[记忆·Z] 去重删除 %s 条冗余事实（保留 %s）",
-                            len(group) - 1,
+                            retracted,
                             await self.store.call("short_id", verdict["target_id"]),
                         )
                         continue
@@ -2287,15 +2380,35 @@ class Engine:
                     # A concurrent edit must not leave the group hidden forever.
                     detail_exc = failure_detail(exc)
                     self._merge_failed_groups = getattr(self, "_merge_failed_groups", 0) + 1
+                    # ★ v2.21.2：日志与明细**只说真会做到的事** ✗
+                    #   旧文案两处不实：
+                    #     · "已恢复可见" —— 组内**已被删除**的成员恢复不了
+                    #       （mark_merge_pending 的 SQL 带 `AND deleted=0` ⇒ 改不到它 ✓
+                    #        它本来就该留在撤回态、也不该回到上下文 ✓）
+                    #     · "稍后自动重试" —— 没有定时器 ✗ 只有**再次被召回且仍相似**时
+                    #       才会自动重新判定（召回侧 flag_similar_pairs）✓
+                    try:
+                        _now = await self.store.call(
+                            "facts_for_merge", ids=[r["id"] for r in group]
+                        )
+                        _live = len(_now or [])
+                    except Exception:
+                        _live = len(group)
+                    _gone = max(0, len(group) - _live)
                     logger.warning(
-                        "[记忆·Z] 一组事实合并失败（%s），已恢复可见", detail_exc
+                        "[记忆·Z] 一组事实未合并（%s）：存活 %d 条已解除隐藏；"
+                        "另有 %d 条已被撤回（保持撤回、不回上下文）",
+                        detail_exc, _live, _gone,
                     )
                     # v2.18.74：失败**留痕**（以前只有日志 ⇒ 前端任务栏看不到明细 ✗）
                     items.append({
                         "kind": "fact",
                         "target": group[0]["id"] if group else "",
                         "action": "keep",
-                        "note": "合并失败：%s（已恢复可见，稍后自动重试）" % detail_exc,
+                        "note": "未合并（%s）——存活的 %d 条保持可见并正常参与召回；"
+                                "已被撤回的 %d 条不会回到上下文；"
+                                "它们若再次被召回且仍相似，会自动重新判定"
+                                % (detail_exc, _live, _gone),
                     })
                     await self.store.call(
                         "mark_merge_pending", [row["id"] for row in group], 0
@@ -2668,12 +2781,20 @@ class Engine:
                 job_items = await self.store.call("job_items", job["id"])
                 failed = getattr(self, "_merge_failed_groups", 0)
                 self._merge_failed_groups = 0
+                # ★ v2.21.2：撤回失败也计数（此前静默失败 ⇒ 摘要与明细都看不出来 ✗）
+                retract_failed = getattr(self, "_merge_retract_failed", 0)
+                self._merge_retract_failed = 0
                 detail = "合并 %s 组重复事实（%s 条并入）" % (
                     merged,
                     sum(1 for item in job_items if item["action"] == "merged"),
                 )
                 if failed:
-                    detail += "；%d 组因并发编辑失败，已恢复可见并留痕" % failed
+                    detail += (
+                        "；%d 组因并发写入未合并（存活的已解除隐藏、"
+                        "被撤的保持撤回，明细已留痕）" % failed
+                    )
+                if retract_failed:
+                    detail += "；%d 条未能撤回（并发写入，明细已留痕）" % retract_failed
                 if not failed and await self._quiet_automatic(job, detail):
                     await self.store.call("drop_job", job["id"])
                     continue
