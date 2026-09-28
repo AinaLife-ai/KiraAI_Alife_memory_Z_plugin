@@ -183,6 +183,13 @@ class MergeRaceCase(unittest.TestCase):
             holder["content"],
         )
 
+        # ★ 关键回归守卫：跳过的那一组**不许**把幸存者留在"待合并（隐藏）"态 ✗
+        #   （否则它会被排除在召回之外 ⇒ 事实悄悄消失 ✗）
+        row = self.store.facts_by_ids([holder["survivor"]])[0]
+        self.assertEqual(row.get("merge_pending"), 0, "幸存者必须解除隐藏 ✓")
+        visible = [r["id"] for r in self.store.facts("qq:gm:1", hide_pending=True)]
+        self.assertIn(holder["survivor"], visible, "幸存者必须在召回视图里可见 ✓")
+
     # =====================================================================
     # ③ 目标在模型思考期间被删 ⇒ 整组跳过（不换目标、不赌）+ 如实留痕
     # =====================================================================
@@ -206,6 +213,9 @@ class MergeRaceCase(unittest.TestCase):
         self.assertEqual(self.deleted_ids(), {holder["target"]},
                          "目标消失时不许动任何幸存者（也不许多删 ✓）")
         self.assertEqual(len(self.live_ids()), 2, "两条幸存者必须原样活着 ✓")
+        visible = [r["id"] for r in self.store.facts("qq:gm:1", hide_pending=True)]
+        self.assertEqual(sorted(visible), sorted(self.live_ids()),
+                         "跳过的组不许把幸存者留在隐藏态 ✗")
 
     # =====================================================================
     # ④ drop 判定必须用**刚读回的**版本号（不再手工 +1）
