@@ -367,6 +367,7 @@ const JOB_ACTIONS = {
   correct: "修正",
   merge: "合并",
   retract: "撤回",
+  retract_failed: "未撤回",
   classify: "分类",
   keep: "保留",
   extract: "提炼成事实",
