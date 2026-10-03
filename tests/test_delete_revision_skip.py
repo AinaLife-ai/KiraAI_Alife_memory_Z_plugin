@@ -164,3 +164,22 @@ def test_reextract_button_hidden_outside_record_editor():
         assert fn in src, fn
         seg = src[src.index(fn):][:2600]
         assert "#reextract" in seg, "「%s」里没有收起 #reextract ✓" % fn
+
+
+def test_frontend_p2_robustness():
+    """P2 健壮性（2026-09-29 复查补齐）：
+
+    ① 画像卡片 `f.tags` / `f.sources` 必须兜底 —— healthCard 早就 `(f.tags||[])` ✓
+       两处写法要一致 ✓（同一批字段，一处防一处不防 ⇒ 说明确实可能缺 ✗）
+    ② openProfile 必须**先清空** profileData —— GET /profile 404 时不能把**上一个实体**
+       的旧数据留在 profileData 里 ✗（「改名字」按钮会拿它去开名称弹窗 ✗）
+    ③ 冷归档记录保存摘要要明确提示「正文要用取回」✓（否则用户以为改了正文 ✗）
+    ④ 非 409 的配置保存失败要把状态条写成失败态 ✓
+       （以前会留着上一次的「已保存，配置立即生效」✗ 误导用户 ✓）
+    """
+    src = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert 'esc((f.tags || []).join(" · "))' in src, "画像卡片 tags 未兜底 ✗"
+    assert "${(f.sources || []).length} 个来源" in src, "画像卡片 sources 未兜底 ✗"
+    assert "profileData = null;" in src, "openProfile 未先清空 profileData ✗"
+    assert "冷归档正文要用「取回」" in src, "冷归档保存摘要缺提示 ✗"
+    assert "保存失败：未生效" in src, "配置保存失败态缺失 ✗"

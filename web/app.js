@@ -1135,7 +1135,7 @@ function renderFactCards(list) {
     ? list
         .map(
           (f, i) =>
-            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc(f.tags.join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${f.sources.length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
+            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
         )
         .join("")
     : empty("画像还在形成");
@@ -1452,7 +1452,12 @@ async function saveEdit(extra) {
   $("#editor").close();
   current = null;
   saveDraft();
-  toast("已保存，即时生效");
+  if (current.row && current.row.cold) {
+    // ★ 冷归档正文不在热库 ⇒ 改摘要不会动正文，必须讲清楚 ✗（否则用户以为改了正文 ✓）
+    toast("摘要已保存 ✓ 冷归档正文要用「取回」才会回到热库 ✓");
+  } else {
+    toast("已保存，即时生效");
+  }
   await poll();
   if (tab === "archives") await loadArchives();
   if (tab === "profiles") await loadFacts();
@@ -2113,7 +2118,12 @@ $("#saveConfig").onclick = () =>
       // v2.18.12：版本冲突**不当错误弹窗** ✓ 改为常驻条 + 两条真正可行的出路 ✓
       // （旧文案让人"重新打开最新版本再保存" ✗ 但刷新后草稿会带回旧版本号 →
       //   再点保存**仍然冲突** ✗ 是一句错误指引 ✓）
-      if (e.status !== 409) throw e;
+      if (e.status !== 409) {
+        // ★ 2026-09-29：非 409 失败以前只弹 toast ✗ ⇒ 状态条还留着上一次的
+        //   「已保存，配置立即生效」✗（用户会以为这次也存上了 ✗）⇒ 写明失败态 ✓
+        $("#dirty").textContent = "保存失败：未生效";
+        throw e;
+      }
       $("#conflict").classList.remove("hide");
       $("#dirty").textContent = "未保存：设置已在别处被改过";
     }
@@ -2783,6 +2793,8 @@ function renderVersions(kind, target, revision, versions) {
 let profileData = null;
 
 async function openProfile(entityId) {
+  profileData = null; // ★ 先清空：GET /profile 404 时不能把**上一个实体**的旧数据
+                      //   留在 profileData 里（「改名字」按钮会拿它去开名称弹窗 ✗）
   await ensureNames();                       // ★ 先把名字表补上 ✓ 关系行才显示人名 ✓
   const p = await api("/profile?entity_id=" + encodeURIComponent(entityId));
   profileData = p;
