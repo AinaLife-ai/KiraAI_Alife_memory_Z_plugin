@@ -110,9 +110,17 @@ class JevClient:
 
     def _bad(self) -> None:
         self.fails += 1
-        if self.fails == 3:
+        if self.fails >= 3:
+            # ★ 2026-09-29（实测修）：这里以前是 `== 3` ✗
+            #   ⇒ 首次冷却 300 秒到期后，若服务**仍然不可用**，fails 继续涨（4/5/6…）✗
+            #     而 opened_at 再也不刷新 ⇒ ready 恒为 True ⇒ **熔断再也不会开启** ✗
+            #   ⇒ 后果：此后**每次**符合条件的调用都真去打一次接口 ✗
+            #     超时型故障（服务挂了/DNS 黑洞，最常见）下每次白付 jev_timeout_ms ✗
+            #   改成 `>= 3`：每次失败都让冷却从当前时刻**重新计时** ✓（教科书式熔断 ✓）
+            #   日志仍只在首次失败 3 次时打一条 ✓（避免刷屏 ✗）
             self.opened_at = time.time()
-            logger.warning("JEV 连续失败 3 次，冷却 300 秒（期间自动走原逻辑）")
+            if self.fails == 3:
+                logger.warning("JEV 连续失败 3 次，冷却 300 秒（期间自动走原逻辑）")
 
     # ---------- 同步实现 ----------
     def _post_sync(self, payload: dict, timeout: float) -> Optional[dict]:
