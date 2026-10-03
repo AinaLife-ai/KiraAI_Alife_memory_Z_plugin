@@ -81,3 +81,32 @@ def test_breaker_reopens_after_cooldown_if_still_failing():
     for i in range(3):
         assert _fail(c) is None
         assert not c.ready, "第 %d 次连续失败后必须重新熔断 ✗（否则会一直白打接口 ✗）" % (i + 1)
+
+
+def test_cooldown_left_and_last_error_are_exposed():
+    """面板小灯依赖这两个状态：熔断剩余秒数 + 最近失败原因 ✓"""
+    c = _client()
+    assert c.cooldown_left == 0 and c.last_error == "", "初始应为未熔断、无失败原因 ✓"
+    for _ in range(3):
+        _fail(c)
+    assert c.cooldown_left > 290, "熔断后应给出剩余冷却秒数 ✓（拿到 %s）" % c.cooldown_left
+    assert c.last_error, "应记下最近一次失败原因 ✓"
+    c.opened_at -= 301
+    assert c.cooldown_left == 0, "冷却到期 ⇒ 剩余归零 ✓（半开 ✓）"
+
+
+def test_status_snapshot_shape():
+    """Decisions.status()：只读快照、字段齐全、不抛 ✓（面板 /status 直接用 ✓）"""
+    st = m.Decisions(None).status()
+    for k in ("enabled", "ready", "why", "model", "has_key", "fails", "cooldown_left", "last_error"):
+        assert k in st, "status() 缺字段 %s ✗" % k
+    assert st["enabled"] is False and st["why"] == "未启用"
+
+
+def test_frontend_jev_chip_is_wired():
+    """结构判据：面板必须有 JEV 状态灯 ✓
+    （元素**写在 index.html** ✓ 由 poll() 更新 ✓ —— 不在运行时 createElement 插入 ✗）"""
+    h = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    j = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert 'id="jevTag"' in h, "index.html 缺 #jevTag ✗"
+    assert "next.jev" in j and '"#jevTag"' in j, "app.js 未渲染 JEV 状态灯 ✗"

@@ -487,13 +487,26 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
   （否则 GET /profile 404 时会把**上一个实体**的旧数据留给「改名字」✗）；冷归档记录保存摘要明确提示
   「正文要用**取回**」✓（否则用户以为改了正文 ✗）；配置保存非 409 失败时状态条写
   「保存失败：未生效」✓（以前会留着「已保存，配置立即生效」✗ 误导 ✓）
-- ✅ 新增 `tests/test_delete_revision_skip.py`（11 条 ✓ **默认可跑**、不依赖宿主）：
+- ✅ 新增 `tests/test_delete_revision_skip.py`（11 条 ✓ 与 `tests/test_jev_breaker.py` 7 条 ✓ **默认可跑**、不依赖宿主）：
   纯删除（新鲜 / 过期 revision）✓ force 覆盖 ✓ **反向保护（过期无 force 必须 409）** ✓
   目标不存在仍拒 ✓ 还原 ✓ facts 重要度 / 删除 ✓ + 3 条结构判据（`/edit` 必须能拿到 `reason` ✓
   记录详情必须管 `#delete` ✓ P2 四处兜底在位 ✓）
+- 🐛 **修 JEV 熔断器首次冷却后永不重开**：`_bad()` 里写的是 `if self.fails == 3:` ✗
+  ⇒ 冷却 300 秒到期后若服务**仍不可用**，fails 继续涨但 `opened_at` 再也不刷新 ✗
+  ⇒ `ready` 恒为 True ⇒ **熔断再也不会开启** ✗ ⇒ 此后每次调用都白付 `jev_timeout_ms` ✗
+  · 修：`>= 3`（每次失败都让冷却**重新计时** ✓ 教科书式熔断 ✓）；日志仍只在首个 3 次打一条 ✓
+  · 另把冷却秒数提取为 `JevClient.COOLDOWN` 常量 ✓（ready / cooldown_left / 面板共用一处来源 ✓）
+- ✨ **新增面板「JEV 状态小灯」**：以前 JEV 开没开、是否就绪、是不是正熔断**只能翻日志** ✗
+  · 后端：`JevClient.last_error`（最近失败原因 ✓）+ `cooldown_left`（熔断剩余秒 ✓）+
+    `Decisions.status()`（**只读快照** ✓ 字段：enabled/ready/why/model/has_key/fails/cooldown_left/last_error ✓
+    **绝不发起网络调用** ✗ 也绝不抛 ✗）⇒ `api_status` 暴露为 `status["jev"]` ✓
+  · 前端：状态区 `#jevTag`（**写在 HTML 里** ✓ 与 v2.18.7 对 #capTag/#recallTag 的处理一致 ✓）
+    三态：`JEV 就绪 | <模型>` ✓ / `JEV 熔断中 | 剩余 Ns` ✓ / `JEV 未就绪` ✓；悬停看原因与上次失败 ✓
+  · 真跑：熔断态 ⇒ `ready=False fails=3 cooldown_left=299 why='连续失败 3 次，冷却中（剩余 299 秒）'
+    last_error='connection refused'` ✓
 - 📊 测试（终版，全部真跑）：
-  · 不带宿主：**859 passed / 0 failed / 27 skipped** ✓（改前 848 passed / **23 failed** ✗）
-  · 带宿主：**946 passed / 0 failed** ✓（改前 943 passed / **1 failed** ✗）
+  · 不带宿主：**866 passed / 0 failed / 27 skipped** ✓（改前 848 passed / **23 failed** ✗）
+  · 带宿主：**953 passed / 0 failed** ✓（改前 943 passed / **1 failed** ✗）
   · 反向验证：修复前同一套真 handler 矩阵 **6/7 红** ✗ ⇒ 修复后 **7/7 绿** ✓
 - 📄 详见 `docs/PANEL_EDIT_DELETE_2_21_3.md`
 

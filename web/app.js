@@ -547,6 +547,30 @@ async function poll() {
       const badge = $("#searchIndex");
       if (badge) badge.textContent = labels[next.search_index] || "索引 —";
     }
+    // ★ 2026-09-29：JEV 状态小灯（就绪 / 熔断中剩余秒 / 未就绪原因 ✓）
+    //   后端 /status 的 jev 字段是**只读快照** ✓ 这里只渲染 ✗ 不触发任何调用 ✓
+    const jv = next.jev || {};
+    const jevEl = $("#jevTag");
+    if (jevEl) {
+      if (!jv.enabled) {
+        jevEl.classList.add("hide");
+      } else {
+        jevEl.classList.remove("hide");
+        const cd = Number(jv.cooldown_left || 0);
+        if (jv.ready) {
+          jevEl.textContent = "JEV 就绪" + (jv.model ? " | " + jv.model : "");
+        } else if (cd > 0) {
+          jevEl.textContent = "JEV 熔断中 | 剩余 " + cd + "s";
+        } else {
+          jevEl.textContent = "JEV 未就绪";
+        }
+        jevEl.title = [
+          jv.why || "",
+          jv.last_error ? "上次失败：" + jv.last_error : "",
+          "就绪=可用 ✓ 熔断中=连续失败被冷却（期间一律走原逻辑 ✓）",
+        ].filter(Boolean).join(" ｜ ");
+      }
+    }
     $("#connection").textContent = next.version
       ? conn + " · v" + next.version
       : conn;
