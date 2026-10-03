@@ -1183,6 +1183,10 @@ function renderRecord() {
     r.content +
     "\n\n旧插件来源\n" +
     JSON.stringify(r.legacy_sources || [], null, 2);
+  // ★ 2026-09-29（用户实测）：记录详情此前**不管理** #delete 显隐 ✗
+  //   ⇒ 从「新增记忆」流程后进记录详情，可能没有删除按钮 ✗
+  //   （openFact/任务明细是 remove ✓ newMemory 是 hide ✓ 这里补齐同一套 ✓）
+  $("#delete").classList.remove("hide");
   renderVersions("record", r.id, r.revision, r.versions || []);
   $("#sourceLinks").innerHTML = r.children
     .map(
@@ -1294,6 +1298,11 @@ async function openFact(row) {
   }
   $("#editLabel").textContent = "事实内容";
   $("#editText").value = row.content;
+  // ★ 2026-09-29（用户实测）：#reextract 由 renderRecord **动态创建** ⇒ openFact/newMemory
+  //   此前完全不碰它 ✗ ⇒ 先开过常驻永久记录、再看事实/新增，按钮会残留，
+  //   且它的 onclick 仍是 record 分支的闭包 ⇒ 点了会发错 job ✗（这里统一收起 ✓）
+  const reextractEl = $("#reextract");
+  if (reextractEl) reextractEl.classList.add("hide");
   $("#factFields").classList.remove("hide");
   $("#factFields").innerHTML = [
     "subject",
@@ -1387,6 +1396,11 @@ function newMemory() {
   $("#factFields").classList.add("hide");
   $("#sources").classList.add("hide");
   $("#forget").classList.add("hide");
+  // ★ 2026-09-29（用户实测）：#reextract 由 renderRecord **动态创建** ⇒ openFact/newMemory
+  //   此前完全不碰它 ✗ ⇒ 先开过常驻永久记录、再看事实/新增，按钮会残留，
+  //   且它的 onclick 仍是 record 分支的闭包 ⇒ 点了会发错 job ✗（这里统一收起 ✓）
+  const reextractEl = $("#reextract");
+  if (reextractEl) reextractEl.classList.add("hide");
   $("#delete").classList.add("hide");
   showEditor();
 }
@@ -2861,7 +2875,7 @@ document.addEventListener("click", (ev) => {
     const m = card && card.querySelector(".muted");
     const cur = m ? Number((m.textContent.match(/重要度 (\d+)/) || [])[1] || 5) : 5;
     const next = Math.max(1, Math.min(10, cur + delta));
-    api("/edit", { kind: "fact", target: impId, patch: { importance: next } })
+    api("/edit", { kind: "fact", target: impId, patch: { importance: next }, reason: "WebUI 体检：调整重要度" })
       .then(() => {
         toast("重要度已改为 " + next);
         loadHealth();
@@ -2871,7 +2885,7 @@ document.addEventListener("click", (ev) => {
   }
   const delId = t.getAttribute("data-del");
   if (delId) {
-    api("/edit", { kind: "fact", target: delId, patch: { deleted: true } })
+    api("/edit", { kind: "fact", target: delId, patch: { deleted: true }, reason: "WebUI 体检：删除事实" })
       .then(() => {
         toast("已移入回收站（可恢复）");
         loadHealth();
