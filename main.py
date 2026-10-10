@@ -543,12 +543,15 @@ class AlifeMemoryPlugin(BasePlugin):
             if getattr(self, "engine", None) is not None:
                 self.engine.decisions = self.decisions   # 引擎侧决策留痕用
             # ★ 2026-10-10：把**生效中的链路**打进日志 ✓（排查"配了没生效"只看这一行 ✓）
+            # ★ 2026-10-11（用户反馈）：日志也要**可读名 + 提供商** ✓
+            #   原来打的是 `bb3e39e7…:f451aabc…` 一串 id ✗ 与面板显示的完全不是一回事 ✗
+            label_of = self._model_label_of()      # 与面板同一套 _model_entry_name 规则 ✓
             logger.info(
                 "[记忆·Z] 模型链路：压缩 %s ｜ 审计 %s ｜ JEV %s ｜ 重排 %s",
-                chain_desc(self.settings, "compress_models", "compress_model"),
-                chain_desc(self.settings, "audit_models", "audit_model"),
-                chain_desc(self.settings, "jev_models", "jev_model_name"),
-                chain_desc(self.settings, "rerank_models", "rerank_model"),
+                chain_desc(self.settings, "compress_models", "compress_model", label_of),
+                chain_desc(self.settings, "audit_models", "audit_model", label_of),
+                chain_desc(self.settings, "jev_models", "jev_model_name", label_of),
+                chain_desc(self.settings, "rerank_models", "rerank_model", label_of),
             )
             self._jev_notice = None          # 配置变了 ⇒ 允许重新提示
             self._aux_fp = self._aux_fingerprint(self.settings)
@@ -4560,6 +4563,46 @@ class AlifeMemoryPlugin(BasePlugin):
             ):
                 await self.migrate()
             return {"ok": True, "revision": revision(self.settings)}
+
+    def _model_label_of(self):
+        """返回 `ref -> "可读名 · 提供商"` 的解析函数（日志用 ✓ 与面板同一套规则 ✓）
+
+        ★ 2026-10-11（用户反馈）：日志里原来只有 `bb3e39e7…:f451aabc…` 一串 id，不可读 ✗
+        解析失败一律回落原 ref ✓（不联网 ✓ 不影响日志本身 ✓）
+        """
+        providers = {}
+        try:
+            mgr = getattr(self.ctx, "provider_mgr", None)
+            cfg = getattr(mgr, "kira_config", None) or {}
+            if isinstance(cfg, dict):
+                providers = cfg.get("providers") or {}
+        except Exception:
+            providers = {}
+        cache = {}
+
+        def resolve(ref):
+            key = str(ref or "")
+            if key in cache:
+                return cache[key]
+            label = key
+            try:
+                pid, _, mid = key.partition(":")
+                prov = providers.get(pid) or {}
+                models = (prov.get("model_config") or {}) if isinstance(prov, dict) else {}
+                entry = None
+                for kind in ("llm", "embedding"):
+                    entry = (models.get(kind) or {}).get(mid)
+                    if entry is not None:
+                        break
+                name, _legacy = self._model_entry_name(mid, entry) if mid else (key, [])
+                pname = (prov.get("name") or pid) if isinstance(prov, dict) else pid
+                label = (name + " · " + pname) if pname else name
+            except Exception:
+                label = key
+            cache[key] = label
+            return label
+
+        return resolve
 
     @staticmethod
     def _model_entry_name(mid, entry):

@@ -1784,16 +1784,51 @@ function bindChainCombos() {
   });
 }
 // ★ 2026-10-10（用户反馈"设置里找不到"）：131 项平铺 ⇒ 加**搜索** + **常用置顶**
-const PINNED_KEYS = [
-  "self_fact_max_importance", "jev_prompt_append",
-  "compress_model", "audit_model", "jev_model_name", "rerank_model", "embedding_model",
-];
+// ★ 2026-10-11（用户反馈）：**不要拍脑袋写"常用"** ✗，也**不要挪动设置的原有位置** ✗
+//   ⇒ 改为**记录用户真实搜索过的东西**（localStorage ✓ 只记用户自己敲过的关键词 ✓）
+//      没搜过就只显示一句中性提示 ✓
+const RECENT_SEARCH_KEY = "memoryz.recentSearch";
+function recentSearches() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_SEARCH_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter((x) => typeof x === "string" && x).slice(0, 6) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function rememberSearch(q) {
+  const key = String(q || "").trim();
+  if (!key) return;
+  const list = recentSearches().filter((x) => x !== key);
+  list.unshift(key);
+  try {
+    localStorage.setItem(RECENT_SEARCH_KEY, JSON.stringify(list.slice(0, 6)));
+  } catch (e) {
+    /* 隐私模式/配额满 ⇒ 忽略 ✓ 不影响搜索本身 ✓ */
+  }
+}
 function setupConfigTools() {
   const form = $("#configForm"), search = $("#cfgSearch"), count = $("#cfgCount"), head = $("#cfgHead");
   if (!form || !search) return;
-  const pinned = PINNED_KEYS.map((k) => form.querySelector('[data-field="' + k + '"]')).filter(Boolean);
-  pinned.forEach((el) => { el.style.order = "-1"; });      // 常用项在网格里置顶 ✓
   const fields = () => $$("#configForm label.field");
+  let timer = null;
+  const paintRecent = () => {
+    if (!head) return;
+    const list = recentSearches();
+    head.innerHTML = list.length
+      ? "最近搜索：" +
+        list
+          .map((k) => '<button type="button" class="cfg-recent" data-q="' + esc(k) + '">' + esc(k) + "</button>")
+          .join("")
+      : "输入关键词即可筛选（例如「自我」「JEV」「压缩」）· 搜过的词会记在这里 ✓";
+    head.querySelectorAll(".cfg-recent").forEach((b) => {
+      b.onclick = () => {
+        search.value = b.dataset.q;
+        search.dispatchEvent(new Event("input"));
+        search.focus();
+      };
+    });
+  };
   const update = () => {
     const q = search.value.trim().toLowerCase();
     let shown = 0;
@@ -1804,10 +1839,18 @@ function setupConfigTools() {
       el.classList.toggle("hide", !hit);
       if (hit) shown += 1;
     });
-    if (head) head.classList.toggle("hide", !!q);
     if (count) count.textContent = q ? shown + " / " + fields().length + " 项" : "共 " + fields().length + " 项设置";
+    // ★ 只有"用户真的搜出了结果"才记一笔 ✓（避免把半截输入也记下来 ✗）
+    if (q && shown > 0) {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        rememberSearch(search.value.trim());
+        paintRecent();
+      }, 900);
+    }
   };
   search.oninput = update;                                 // 幂等：每次渲染后重绑即可 ✓
+  paintRecent();
   update();
 }
 function renderConfig(values) {

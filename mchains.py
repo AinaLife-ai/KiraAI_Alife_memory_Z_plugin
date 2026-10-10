@@ -56,11 +56,27 @@ def chain_refs(settings: Any, chain_key: str, legacy_key: str) -> List[str]:
     return out
 
 
-def chain_desc(settings: Any, chain_key: str, legacy_key: str) -> str:
-    """面板/日志用的一句话描述 ✓（不含任何网络调用 ✓）"""
+def chain_desc(settings: Any, chain_key: str, legacy_key: str, name_of=None) -> str:
+    """面板/日志用的一句话描述 ✓（不含任何网络调用 ✓）
+
+    ★ 2026-10-11（用户反馈）：日志里原来打的是 `bb3e39e7…:f451aabc…` 一串 id ✗
+      现在允许传一个 `name_of(ref) -> "可读名 · 提供商"` 的解析器 ✓
+      （调用方用**与面板同一套** `_model_entry_name` 规则构造 ✓ 两处永不打架 ✓）
+    """
     refs = chain_refs(settings, chain_key, legacy_key)
     if not refs:
         return "宿主默认"
     legacy = str(getattr(settings, legacy_key, "") or "").strip()
-    mark = "（最后一档=旧字段兜底 ✓）" if legacy and refs and refs[-1] == legacy else ""
-    return " → ".join(refs) + mark
+    mark = "（末档=旧字段兜底）" if legacy and refs and refs[-1] == legacy else ""
+    shown = []
+    for ref in refs:
+        label = ref
+        if name_of is not None:
+            try:
+                got = name_of(ref)
+                if got:
+                    label = str(got)
+            except Exception:
+                label = ref
+        shown.append(label)
+    return " → ".join(shown) + mark
