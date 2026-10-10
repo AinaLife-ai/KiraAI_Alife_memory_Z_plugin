@@ -815,6 +815,7 @@ class AlifeMemoryPlugin(BasePlugin):
         # ★ 2026-10-11：存量配置**一次性**迁移（只调整"自我认知"那两个键 ✓ 别的一律不碰 ✓）
         #   升级后：总开关 = 关、门槛 = 4 ⇒ **行为与升级前完全一致** ✓（不影响存量用户 ✓）
         await self._migrate_self_fact_settings()
+        await self._migrate_chain_first_link()     # ★ 单模型 ⇒ 显式升级为「组里第 1 档」✓
         self.identity_report = {}
         try:
             if await self.store.call("synthetic_identity"):
@@ -4657,6 +4658,57 @@ class AlifeMemoryPlugin(BasePlugin):
             await self.store.call("set_state", "cfg_migrate_self_fact", "1")
         except Exception as exc:
             logger.info("[记忆·Z] 存量配置迁移跳过（%s）—— 不影响启动 ✓", type(exc).__name__)
+
+    async def _migrate_chain_first_link(self):
+        """存量升级（2.22 之前 → 现在）：把他配的**单模型显式升级成「组里的第 1 档」** ✓
+
+        ★ 2026-10-11（用户提问："老用户自己配的模型，自动帮他们升级成组里的 1 了吗？"）
+          现状核对过：
+            · **功能上**它本来就是第 1 档 ✓（chain_refs 会把旧字段当第 1 档用 ✓）
+            · **存储上** `*_models` 还是空数组 ✗ ⇒ 面板里看得到、但配置里没"写实"
+          本迁移把它**写成显式的第 1 档**：`*_models = [*_model]` ✓
+          ⇒ **行为完全不变**（chain_refs 本来就这么算 ✓），只是"所见即所得" ✓
+
+        安全：只处理"链为空且单模型有值"的情形 ✓；已有链的一律不动 ✓；只跑一次（state 标记 ✓）
+        """
+        try:
+            if str(self.store.get_state("cfg_migrate_chain", "") or "") == "1":
+                return
+            current = self.settings.model_dump()
+            moved = []
+            for chain_key, legacy_key, label in (
+                ("compress_models", "compress_model", "压缩"),
+                ("audit_models", "audit_model", "审计"),
+                ("jev_models", "jev_model_name", "JEV"),
+                ("rerank_models", "rerank_model", "重排"),
+            ):
+                chain = current.get(chain_key) or []
+                legacy = str(current.get(legacy_key) or "").strip()
+                if (not chain) and legacy:
+                    current[chain_key] = [legacy]
+                    moved.append("%s→第1档" % label)
+            if moved:
+                path = get_config_path() / "plugins" / f"{PLUGIN_ID}.json"
+                config = dict(self.plugin_cfg)
+                config["alife"] = current
+                def save():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = path.with_suffix(".alife.tmp")
+                    temporary.write_text(dump(config), encoding="utf-8")
+                    temporary.replace(path)
+                await asyncio.to_thread(save)
+                self.plugin_cfg = config
+                self.ctx.plugin_mgr.plugin_configs[PLUGIN_ID] = config
+                self.settings = Settings(**current)
+                self._build_aux()
+                logger.info(
+                    "[记忆·Z] 存量升级：你原先配的单模型已**显式升级为各自链路的第 1 档** ✓（%s）"
+                    "—— 行为与升级前完全一致，只是现在面板里能直接看到并继续加档 ✓",
+                    "、".join(moved),
+                )
+            await self.store.call("set_state", "cfg_migrate_chain", "1")
+        except Exception as exc:
+            logger.info("[记忆·Z] 链路档位迁移跳过（%s）—— 不影响启动 ✓", type(exc).__name__)
 
     def _self_drop_max(self) -> int:
         """自我认知门槛的**生效值** ✓

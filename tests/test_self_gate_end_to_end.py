@@ -45,6 +45,8 @@ run = asyncio.run
 
 def _plugin(tmp_path, **cfg):
     m.get_data_path = lambda: tmp_path
+    # ★ 迁移会写「宿主全局」的插件配置 ✗ ⇒ 测试必须隔离它，否则会污染同进程里其它用例 ✓
+    m.get_config_path = lambda: tmp_path / "cfg"
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
         plugin_mgr=types.SimpleNamespace(plugin_configs={}),
