@@ -1165,7 +1165,27 @@ def sink_filter(facts, threshold, now=None, bonus=0):
     ]
 
 
-def self_only_last(facts, self_id=""):
+def low_value_self(fact, self_id, drop_max_importance):
+    """★ 2026-10-10：**唯一判据** —— 自我认知类事实且重要度不够 ⇒ 不参与任何召回路径 ✓
+
+    用户诉求：bot 的自述（碎碎念）别污染真内容 ✓ 默认门槛 6 ✓（0 = 关闭 = 旧行为 ✓）
+    使用点（**一处定义、两处使用** ✓）：
+      1) `self_only_last` —— 常驻/打包路径 ✓
+      2) `main.rotation_extras` 的 fact_pool —— **轮换槽**路径 ✓
+         （轮换池是独立 SQL 查询 ✗ 不过 pack_facts ⇒ 必须单独接 ✓
+           这正是"轮换槽要不要也过滤"的答案：**要** ✓）
+    取舍：只挡"召回/被动注入" ✓；面板、画像、主动检索**仍能查到** ✓（不丢记忆 ✓）
+    """
+    if not drop_max_importance or not self_id:
+        return False
+    try:
+        imp = int(fact.get("importance") or 5)
+    except Exception:
+        imp = 5
+    return fact.get("src_user") == self_id and imp <= int(drop_max_importance)
+
+
+def self_only_last(facts, self_id="", drop_max_importance=0):
     """把"最新来源是助手自己"的事实**稳定地排到最后** ✓（2026-09-18，回声防线的排序侧 ✓）
 
     背景：`v2.18.9` 已经在渲染时给这类事实打 `self` 旗标 ✓，但**排序没动** ✗
@@ -1173,7 +1193,16 @@ def self_only_last(facts, self_id=""):
     做法：**只降序、不删除、不隐藏** ✓（主动召回仍能搜到 ✓ 只是不主动占版面 ✓）
     判据与渲染侧的 self 旗标**完全一致**（`src_user == self_id`）✓ 一处定义、两处使用 ✓
     用**稳定分区**（保持原有相对顺序 ✓）所以不会打乱重要度/时间排序的语义 ✓
+
+    ★ 2026-10-10 新增 `drop_max_importance`（用户诉求 ✓）：
+      自我认知类事实（`src_user == self_id`）里**重要度 <= N 的直接不参与召回** ✓
+      —— bot 的自述碎碎念不再污染真内容 ✓
+      取舍：只影响**召回/被动注入** ✓；面板、画像、主动检索**仍能查到** ✓（不丢记忆 ✓）
+      `0` = 关闭 => 与旧行为**逐字节一致** ✓（老用户零变化 ✓）
     """
+    if drop_max_importance and self_id:
+        # ★ 2026-10-10：改调**唯一判据** low_value_self ✓（与轮换池同一函数 ✓ 不会走偏 ✓）
+        facts = [f for f in (facts or []) if not low_value_self(f, self_id, drop_max_importance)]
     if not self_id:
         return list(facts or [])
     others, selves = [], []
@@ -1183,8 +1212,8 @@ def self_only_last(facts, self_id=""):
 
 
 def pack_facts(facts, current_sid="", short=None, view=FACT_VIEW_GROUPED, codes=None,
-               self_id="", links=None):
-    facts = self_only_last(facts, self_id)      # ★ 自述降序（不删不藏）✓
+               self_id="", links=None, self_drop_max=0):
+    facts = self_only_last(facts, self_id, self_drop_max)      # ★ 自述降序 +（可选）低价值自述不召回 ✓
     """事实渲染入口：grouped=分组视图（默认 ✓）/ flat=旧的扁平视图（逐字节不变 ✓）。"""
     if view == FACT_VIEW_FLAT:
         return bot_facts(facts, current_sid, short=short, self_id=self_id)

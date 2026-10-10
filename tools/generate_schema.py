@@ -72,6 +72,9 @@ names = dict(
         "JEV 用于审计预筛",
         "JEV 用于重要度定级",
         "JEV 用于压缩前置筛选",
+            "JEV 附加指令（可编辑）",
+            "自我认知事实召回门槛",
+            "覆盖判定扫描上限",
         "启用模型重排（可选，默认关闭）",
         "重排模型（Rerank）",
         "重排超时（毫秒）",
@@ -151,6 +154,10 @@ names = dict(
             "JEV 保留线",
             "JEV 候选池倍数",
             "跨会话跳过折叠原文",
+            "压缩/合并回退链（≤10，按序回退）",
+            "审计回退链（≤10，按序回退）",
+            "JEV 回退链（≤10，按序回退）",
+            "重排回退链（≤10，按序回退）",
         ],
     )
 )
@@ -180,6 +187,13 @@ for key, p in schema["properties"].items():
         field["item_type"] = "string"
     if "enum" in p:
         field["options"] = p["enum"]
+    # ★ 2026-10-10：回退链 = 官方多选（3.0 原生渲染 ✓ 2.x 退化为文本 ✗ 无妨 ✓）
+    if key.endswith("_models"):
+        field["type"] = "multi_select"
+        field["source"] = "model"
+        field["model_type"] = "llm"
+        field["max_items"] = 10
+        field["hint"] = "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
     if key.endswith("_model"):
         field["type"] = "model_select"
         field["model_type"] = {

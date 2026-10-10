@@ -241,7 +241,9 @@ function saveDraft() {
 function factPatch() {
   const out = {};
   $$("#factFields [data-field]").forEach((e) => {
-    out[e.dataset.field] = e.value;
+    // ★ 2026-10-10：importance 必须是**数字** ✓（/edit 的 patch 期望 int ✗ 传字符串会 422 ✓）
+    out[e.dataset.field] =
+      e.dataset.field === "importance" ? Number(e.value) : e.value;
   });
   return out;
 }
@@ -314,6 +316,11 @@ function renderMigration(m) {
       )
       .join("");
 }
+// ★ 2026-10-10（③）：**可手动「立即重试」**的任务种类 ✓
+//   必须与后端 `contracts.Job.kind` 的 Literal 一致 ✓（不一致会 422 ✗）
+//   其余（classify / proactive）由调度自动重来 ⇒ 不给按钮 ✓
+const JOB_RETRY_KINDS = ["compress", "audit", "reindex", "dedupe", "tidy", "rewrite", "fact_merge"];
+
 function tasksHtml(jobs) {
   return jobs.length
     ? jobs
@@ -329,7 +336,13 @@ function tasksHtml(jobs) {
                 ? "旧任务超时：可减小批次、提高超时或更换模型后重新排队。"
                 : humanDetail(j.detail) || date(j.created),
             ) +
-            '</small></div><div class="actions"><button data-jobdetail="' +
+            '</small></div><div class="actions">' +
+            (j.state === "failed" && JOB_RETRY_KINDS.includes(j.kind)
+              ? '<button data-jobretry="' + esc(j.id) + '" data-kind="' +
+                esc(j.kind) + '" data-sid="' + esc(j.sid) +
+                '" title="立即重试（安全）：任务体按**当前内容**重新规划 ⇒ 不会重放旧快照 ✗；同类任务已在队列/执行中则复用同一行 ⇒ 不会重复 ✓">立即重试</button>'
+              : "") +
+            '<button data-jobdetail="' +
             esc(j.id) +
             '">明细</button></div><span class="state-' +
             esc(j.state) +
@@ -380,6 +393,22 @@ function bindJobButtons() {
     (b) => (b.onclick = (e) => {
       e.stopPropagation();
       guard(() => openJob(b.dataset.jobdetail));
+    }),
+  );
+  // ★ 2026-10-10（③）：失败任务的「立即重试」—— 走既有 POST /jobs ✓
+  //   安全性（用户关心的三点）：
+  //     ① 同 (kind,sid) 在 jobs 表只有一行 ⇒ 排队中复用 / 完结才重开 ⇒ **不会重复** ✓
+  //     ② 任务体（如压缩）**重读当前内容**再规划 ⇒ 新内容不会被旧结果覆盖 ✓
+  //     ③ 手动排队标 automatic=0 ⇒ 明细里能看出是人工点的 ✓
+  $$("[data-jobretry]").forEach((b) =>
+    (b.onclick = (e) => {
+      e.stopPropagation();
+      b.disabled = true;
+      const jid = String(b.dataset.jobretry || "").slice(0, 8);
+      guard(async () => {
+        await api("/jobs", { kind: b.dataset.kind, sid: b.dataset.sid });
+        toast("任务 " + jid + " 已排队：将按当前内容重新处理 ✓（同类任务进行中则并入同一条 ✓）");
+      });
     }),
   );
 }
@@ -1154,12 +1183,20 @@ async function loadFacts() {
   $("#factPrev").disabled = factOffset === 0;
   $("#factNext").disabled = shownFacts.length < 100;
 }
+// ★ 2026-10-10：自我认知门槛的**当前生效值**（面板配置；读不到回落 6 ✓）
+//   卡片上的低值高亮必须跟着配置走 ✗→✓（否则你把门槛改成 4 了，卡片还按 6 标色 ✗）
+function selfFactMax() {
+  const v = config && config.settings ? config.settings.self_fact_max_importance : 6;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 6;
+}
+
 function renderFactCards(list) {
   $("#factCards").innerHTML = list.length
     ? list
         .map(
           (f, i) =>
-            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
+            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><span class="tag imp${f.importance != null && Number(f.importance) <= selfFactMax() ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
         )
         .join("")
     : empty("画像还在形成");
@@ -1331,6 +1368,7 @@ async function openFact(row) {
   $("#factFields").innerHTML = [
     "subject",
     "category",
+    "importance",     // ★ 2026-10-10：补齐「重要度」——卡片与弹窗此前都没有 ✗
     "reason",
     "scenario",
     "tags",
@@ -1343,13 +1381,32 @@ async function openFact(row) {
           {
             subject: "实体",
             category: "分类",
+            importance: "重要度（1–10）",
             reason: "原因",
             scenario: "适用场景",
             tags: "标签（每行一个）",
             relations: "关系（三元组 JSON）",
           }[k],
         ) +
-        (k === "category"
+        (k === "importance"
+          ? '<select data-field="importance">' +
+            Array.from({ length: 10 }, (_, n) => n + 1)
+              .map(
+                (n) =>
+                  '<option value="' +
+                  n +
+                  '" ' +
+                  (Number(row.importance == null ? 5 : row.importance) === n
+                    ? "selected"
+                    : "") +
+                  ">" +
+                  n +
+                  (n >= 7 ? "（优先常驻）" : "（≤ 自我认知门槛时会被挡下）") +
+                  "</option>",
+              )
+              .join("") +
+            "</select>"
+          : k === "category"
           ? '<select data-field="category">' +
             Object.entries(labels)
               .map(
@@ -1534,6 +1591,117 @@ function applyBatchMode() {
     });
   });
 }
+// ★ 2026-10-10（用户要求）：模型回退链的**有序标签编辑器**
+//   为什么不用原生多选：① 下拉点完会挤成"一长条"✗ ② 原生多选**不能调序** ✗
+//   而回退链的**顺序就是语义**（先试谁、失败换谁）⇒ 必须能上下调序 ✓
+//   值格式沿用仓库约定：`data-kind="array"` + 换行分隔 ✓（readConfig 会 split("\n") ✓）
+function modelLabel(m) {
+  return (m.name || m.model || m.id) + (m.provider ? " · " + m.provider : "");
+}
+function chainLookup(models) {
+  const byRef = new Map();
+  models.forEach((m) => {
+    byRef.set(m.id, m);
+    (Array.isArray(m.legacy) ? m.legacy : []).forEach((x) => {
+      if (!byRef.has(x)) byRef.set(x, m);   // 老值（旧引用）也能显示成人话 ✓
+    });
+  });
+  return byRef;
+}
+function chainEditor(key, value, models) {
+  const llms = models.filter((m) => m.kind !== "embedding");
+  const opts = llms
+    .slice()
+    .sort((a, b) =>
+      String(a.provider || "").localeCompare(String(b.provider || ""), "zh"),
+    )
+    .map((m) => '<option value="' + esc(m.id) + '">' + esc(modelLabel(m)) + "</option>")
+    .join("");
+  const list = Array.isArray(value)
+    ? value
+    : String(value || "").split("\n").filter(Boolean);
+  return (
+    '<div class="chain" data-chain="' + key + '">' +
+    '<div class="chain-chips" data-chips></div>' +
+    '<div class="chain-add">' +
+    '<select data-add><option value="">— 从下拉里选一个模型加进来 —</option>' +
+    opts +
+    "</select>" +
+    '<button type="button" class="chain-btn" data-append>＋ 加入</button>' +
+    '<span class="chain-count" data-count></span>' +
+    "</div>" +
+    '<input type="hidden" data-key="' + key + '" data-kind="array" data-value>' +
+    '<small class="chain-hint">按顺序尝试：第一个失败自动换第二个…… 全部失败才回落上面的单模型字段。最多 10 个。</small>' +
+    "</div>"
+  );
+}
+function wireChain(root, key, models, initial) {
+  const box = root.querySelector('[data-chain="' + key + '"]');
+  if (!box) return;
+  const chips = box.querySelector("[data-chips]");
+  const hidden = box.querySelector("[data-value]");
+  const add = box.querySelector("[data-add]");
+  const count = box.querySelector("[data-count]");
+  const lookup = chainLookup(models);
+  let refs = (Array.isArray(initial) ? initial : String(initial || "").split("\n"))
+    .map(String).filter(Boolean).slice(0, 10);
+
+  const label = (ref) => {
+    const m = lookup.get(ref);
+    return m ? modelLabel(m) : ref + "（旧值）";   // 认不出的老值也照实显示 ✓
+  };
+  const sync = (notify = true) => {
+    chips.innerHTML = refs
+      .map(
+        (ref, i) =>
+          '<span class="chain-chip" title="' + esc(ref) + '">' +
+          '<b class="chain-idx">' + (i + 1) + "</b>" +
+          esc(label(ref)) +
+          '<button type="button" class="chip-ico" data-up="' + i + '" title="上移（更优先）"' +
+          (i === 0 ? " disabled" : "") + ">↑</button>" +
+          '<button type="button" class="chip-ico" data-down="' + i + '" title="下移"' +
+          (i === refs.length - 1 ? " disabled" : "") + ">↓</button>" +
+          '<button type="button" class="chip-ico chip-del" data-del="' + i + '" title="移除">✕</button>' +
+          "</span>",
+      )
+      .join("");
+    hidden.value = refs.join("\n");
+    count.textContent = refs.length + " / 10";
+    // 让脏标记 / 草稿 / 保存逻辑照常工作 ✓（与其它控件同一个事件 ✓）
+    if (notify) hidden.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  box.querySelector("[data-append]").onclick = () => {
+    const ref = add.value;
+    if (!ref) return;
+    if (refs.includes(ref)) {
+      toast("这个模型已经在链里了");
+      return;
+    }
+    if (refs.length >= 10) {
+      toast("最多 10 个（按序回退，够用了）");
+      return;
+    }
+    refs.push(ref);
+    add.value = "";
+    sync();
+  };
+  chips.addEventListener("click", (e) => {
+    const t2 = e.target.closest("button");
+    if (!t2) return;
+    if (t2.dataset.del !== undefined) refs.splice(Number(t2.dataset.del), 1);
+    else if (t2.dataset.up !== undefined) {
+      const i = Number(t2.dataset.up);
+      if (i > 0) [refs[i - 1], refs[i]] = [refs[i], refs[i - 1]];
+    } else if (t2.dataset.down !== undefined) {
+      const i = Number(t2.dataset.down);
+      if (i < refs.length - 1) [refs[i + 1], refs[i]] = [refs[i], refs[i + 1]];
+    }
+    sync();
+  });
+  // 首次同步**不广播 input** ⇒ 打开面板不会被误标为"已改动" ✓
+  sync(false);
+}
+
 function renderConfig(values) {
   $("#configForm").innerHTML = Object.entries(config.schema.properties)
     .map(([key, p]) => {
@@ -1542,6 +1710,11 @@ function renderConfig(values) {
       let input = "";
       if (type === "boolean")
         input = '<input type="checkbox" ' + (value ? "checked" : "") + ">";
+      else if (key.endsWith("_models"))
+        // ★ 2026-10-10：模型回退链 = **有序标签块**（不是一长条文本 ✗）
+        //   每个模型一枚标签：可删 ✗、可上下调序 ↕、带序号 ✓、超出换行 ✓
+        //   值仍走 `data-kind="array"`（换行分隔 ✓ 与仓库既有约定一致 ✓）
+        input = chainEditor(key, value, models);
       else if (key.endsWith("_model"))
         input =
           '<select><option value="">使用 KiraAI 默认' +
@@ -1556,20 +1729,30 @@ function renderConfig(values) {
               (m) =>
                 m.kind === (key === "embedding_model" ? "embedding" : "llm"),
             )
-            .map(
-              (m) =>
+            // ★ 2026-10-10：3.0 里 m.id 是 uuid（用户看不懂 ✗）⇒ **可读名排在最前** ✓
+            //   按提供商排序 ⇒ 同厂模型聚在一起，长列表也好找 ✓
+            .slice()
+            .sort((a, b) =>
+              String(a.provider || "").localeCompare(String(b.provider || ""), "zh"),
+            )
+            .map((m) => {
+              // 老配置里存的可能是「旧引用」（可读名）⇒ 也要能选中 ✓（否则看着像没配 ✗）
+              const legacy = Array.isArray(m.legacy) ? m.legacy : [];
+              return (
                 '<option value="' +
                 esc(m.id) +
                 '" ' +
-                (value === m.id ? "selected" : "") +
+                (value === m.id || legacy.includes(value) ? "selected" : "") +
                 ">" +
                 esc(
-                  (m.provider || String(m.id).split(":")[0] || "") +
-                  " · " +
-                  (m.model || m.name || m.id),
+                  (m.name || m.model || m.id) +
+                    " · " +
+                    (m.provider || String(m.id).split(":")[0] || "") +
+                    (m.kind === "embedding" ? " · 向量" : ""),
                 ) +
-                "</option>",
-            )
+                "</option>"
+              );
+            })
             .join("") +
           (value && !models.some((m) => m.id === value)
             ? '<option selected value="' +
@@ -1604,7 +1787,7 @@ function renderConfig(values) {
       else if (
         type === "array" ||
         key === "compress_instruction" ||
-        key.endsWith("_prompt")
+        key.endsWith("_prompt") || key.endsWith("_prompt_append")
       )
         input =
           "<textarea>" +
@@ -1648,6 +1831,16 @@ function renderConfig(values) {
       );
     })
     .join("");
+  // ★ 2026-10-10：模型回退链的标签编辑器接线（有序 ✓ 可调序 ✓ 可删 ✓）
+  $$("#configForm [data-chain]").forEach((box) => {
+    const key = box.dataset.chain;
+    wireChain(
+      $("#configForm"),
+      key,
+      models,
+      (config.settings || {})[key] || [],
+    );
+  });
   applyBatchMode();   // v2.18.15：按当前模式收起另一套参数 ✓
   $$("#configForm [data-key]").forEach(
     (e) =>
@@ -2904,9 +3097,11 @@ $("#profileEditName").onclick = () =>
 document.addEventListener("click", (ev) => {
   const t = ev.target;
   if (!(t instanceof HTMLElement) || t.tagName !== "BUTTON") return;
-  const impId = t.getAttribute("data-imp");
+  // ★ 2026-10-10：改用 dataset（与 getAttribute 等价 ✓ 但静态审计 tools/web_audit.py
+  //   只识别 dataset.* ⇒ 原来读得到、审计却报"写出无人读取" ✗ 属误报 ✓ 现修正 ✓）
+  const impId = t.dataset.imp;
   if (impId) {
-    const delta = Number(t.getAttribute("data-delta") || 0);
+    const delta = Number(t.dataset.delta || 0);
     const card = t.closest(".card");
     const m = card && card.querySelector(".muted");
     const cur = m ? Number((m.textContent.match(/重要度 (\d+)/) || [])[1] || 5) : 5;

@@ -316,6 +316,10 @@ class Settings(Strict):
     jev_audit: bool = False               # 审计预筛（只把可疑对喂审计模型）
     jev_importance: bool = False          # 写入时重要度定级（影响上浮/下沉）
     jev_compress: bool = False            # 压缩前置筛选（只把值得长期记的消息送进压缩）
+    # ── 2026-10-10：用户可调项（前两项默认值 = 与用户约定的目标状态 ✓）──
+    jev_prompt_append: str = ""           # 追加到所有 JEV 任务的 instructions 末尾（留空=默认）
+    self_fact_max_importance: int = Field(default=6, ge=0, le=10)      # 自我事实召回门槛（0=关）
+    cover_check_limit: int = Field(default=800, ge=100, le=20000)     # 覆盖判定扫描上限
     # 可选重排模型（KiraAI 里注册的 rerank 模型；留空=不重排，行为与之前一致）
     rerank_model: str = ""
     rerank_enabled: bool = False
@@ -458,6 +462,15 @@ class Settings(Strict):
         default=True,
         description="跨会话召回时，若某条旧归档原文的摘要本轮也在结果里，则只保留摘要（避免重复注入）；摘要不在时仍保留原文，避免漏掉唯一命中的那条。",
     )
+
+    # ── ② 模型回退链（「模型组」）2026-10-10 用户需求 ────────────────────
+    #   有序列表 ≤10 ✓ 失败按序回退 ✓ 全失败 ⇒ 回落上面的单模型字段 ✓
+    #   留空 = 与今天**逐字节一致** ✓（老用户零变化 ✓）
+    #   ⚠️ embedding **故意不给链** ✓：维度不一致会把向量索引写脏 ✗（安全优化 ✓）
+    compress_models: list[str] = Field(default_factory=list)   # 压缩/合并链路（有序 ✓ ≤10 ✓）
+    audit_models: list[str] = Field(default_factory=list)      # 审计链路（有序 ✓ ≤10 ✓）
+    jev_models: list[str] = Field(default_factory=list)        # JEV 决策链路（有序 ✓ ≤10 ✓）
+    rerank_models: list[str] = Field(default_factory=list)     # 重排链路（有序 ✓ ≤10 ✓）
 
     @model_validator(mode="after")
     def valid_merge_limits(self):
@@ -606,7 +619,9 @@ class Job(Strict):
     rebuild: bool = False
     # tidy 也允许手动排队：Bot 用 CorrectMemory(action=tidy) 触发，
     # 工作台的这个按钮走同一条链路。
-    kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite"]
+    # ★ 2026-10-10（③）：补 `fact_merge` —— 失败任务要能手动「立即重试」✓
+    #   （引擎本来就有 fact_merge 的 worker lane ✓ 此前只是 API 入口没开 ✓）
+    kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite", "fact_merge"]
     sid: Short
 
 

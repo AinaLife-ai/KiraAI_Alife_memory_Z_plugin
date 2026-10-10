@@ -44,7 +44,10 @@ class Reranker:
 
     def __init__(self, model_uuid: str = "", provider_mgr: Any = None,
                  decisions: Any = None, timeout: float = 1.5):
-        self.model_uuid = (model_uuid or "").strip()
+        # ★ 2026-10-10：有序回退链（str=单档=旧行为；list=依次回退）
+        raw = [model_uuid] if isinstance(model_uuid, str) else list(model_uuid or [])
+        self.model_uuids = [str(x or "").strip() for x in raw if str(x or "").strip()]
+        self.model_uuid = self.model_uuids[0] if self.model_uuids else ""
         self.provider_mgr = provider_mgr
         self.decisions = decisions          # mdecide.Decisions（可选，用于兜底）
         self.timeout = max(0.3, float(timeout or 1.5))
@@ -53,15 +56,25 @@ class Reranker:
 
     @property
     def ready(self) -> bool:
-        return bool(self.model_uuid) or bool(self.decisions and self.decisions.ready)
+        return bool(self.model_uuids) or bool(self.decisions and self.decisions.ready)
 
     # ---------- 后端 1：KiraAI 已注册的 rerank 模型 ----------
     async def _provider_rank(self, query: str, items: list[tuple[str, str]],
                              top_n: Optional[int]) -> Optional[list[str]]:
         mgr = self.provider_mgr
-        if mgr is None or not self.model_uuid:
+        if mgr is None or not self.model_uuids:
             return None
-        pid, mid = split_uuid(self.model_uuid)
+        # ★ 2026-10-10：多档依次尝试，任一档成功即返回
+        for _ref in self.model_uuids:
+            _got = await self._provider_rank_one(_ref, query, items, top_n)
+            if _got is not None:
+                return _got
+        return None
+
+    async def _provider_rank_one(self, _ref, query, items, top_n):
+        """单档重排（多档回退由 `_provider_rank` 负责 ✓ 2026-10-10）"""
+        mgr = self.provider_mgr
+        pid, mid = split_uuid(_ref)
         if not pid or not mid:
             return None
         try:

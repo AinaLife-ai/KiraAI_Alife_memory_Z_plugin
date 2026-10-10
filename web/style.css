@@ -1718,3 +1718,32 @@ button.primary:hover::after {
 .dialog .tidy-opt small { color: var(--muted); font-size: 11px; line-height: 1.6; }
 
 .dialog .tidy-opt > span > b { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+/* ★ 2026-10-10：模型回退链（模型组）的标签编辑器 —— 换行排布，不再是"一长条" ✓ */
+.chain { display: flex; flex-direction: column; gap: 8px; }
+.chain-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 34px; }
+.chain-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 4px 8px; border-radius: 999px; background: rgba(127,127,127,.14);
+  border: 1px solid rgba(127,127,127,.25); font-size: 13px; line-height: 1.5;
+}
+.chain-idx {
+  display: inline-block; min-width: 18px; text-align: center; border-radius: 999px;
+  background: rgba(127,127,127,.28); font-size: 11px; padding: 0 5px;
+}
+.chip-ico {
+  border: 0; background: transparent; cursor: pointer; font-size: 13px;
+  padding: 0 3px; opacity: .75; color: inherit;
+}
+.chip-ico:hover { opacity: 1; }
+.chip-ico[disabled] { opacity: .25; cursor: default; }
+.chip-del { color: #d9534f; }
+.chain-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chain-add select { flex: 1 1 260px; max-width: 100%; }
+.chain-btn { padding: 4px 10px; cursor: pointer; }
+.chain-count { font-size: 12px; opacity: .7; }
+.chain-hint { opacity: .65; }
+
+/* ★ 2026-10-10：事实卡片上的「重要度」徽标（②）
+   ≤6 用低饱和色提醒"这条可能被自我认知门槛挡下"，≥7 用正常色 ✓ */
+.tag.imp { background: rgba(120, 170, 255, 0.16); color: #8fb6ff; }
+.tag.imp-low { background: rgba(255, 190, 90, 0.16); color: #e0a95c; }
