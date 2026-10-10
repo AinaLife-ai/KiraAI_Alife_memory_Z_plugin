@@ -428,7 +428,15 @@ class Store:
             if "speaker" not in columns:
                 # 这条是谁说的（显示名）。users 是"可见范围"，不是同义词 ✗
                 db.execute(
-                    "ALTER TABLE records ADD COLUMN speaker TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE records ADD COLUMN speaker TEXT NOT NULL DEFAULT ''"
+                )
+            if "speaker_id" not in columns:
+                # ★ 2026-10-11 修线上事故 ✗→✓：
+                #   这条 ALTER 之前被**错误地塞进上面 speaker 的 db.execute 里**（当第二个参数 ✗），
+                #   而且嵌套在 `if "speaker" not in columns` 里 ⇒ 老库（已有 speaker）**永远进不去** ✗
+                #   ⇒ 存量库根本没加这一列 ⇒ attach_evidence 报 "no such column: speaker_id" ✗
+                #   现在独立成块、独立执行 ✓（幂等 ✓）
+                db.execute(
                     "ALTER TABLE records ADD COLUMN speaker_id TEXT NOT NULL DEFAULT ''"
                 )
             if "rotate_shown" not in columns:
@@ -1159,14 +1167,32 @@ class Store:
         if not sources:
             return facts
         with self.connect() as db:
-            meta = {
-                r[0]: (r[1] or 0, r[2] or "", r[3] or "")
-                for r in db.execute(
-                    "SELECT id,start,users,speaker_id FROM records WHERE id IN"
-                    " (SELECT value FROM json_each(?))",
-                    (dump(sorted(sources)),),
+            try:
+                rows = [
+                    (r["id"], r["start"], r["users"], r["speaker_id"])
+                    for r in db.execute(
+                        "SELECT id,start,users,speaker_id FROM records WHERE id IN"
+                        " (SELECT value FROM json_each(?))",
+                        (dump(sorted(sources)),),
+                    )
+                ]
+            except sqlite3.OperationalError:
+                # ★ 2026-10-11 线上兜底（事故：存量库缺 speaker_id 列 ⇒ 整条记忆链路崩 ✗）
+                #   任何**局部**的结构问题都不该让主流程崩 ✗ ⇒ 退回旧查询 + 一律「未知」✓
+                #   （未知 ⇒ 不判自我 ⇒ 宁可不挡，也不错挡 ✓；列补上后自动恢复正常 ✓）
+                logger.info(
+                    "记录表暂缺 speaker_id 列（老库未迁移）⇒ 本轮按「未知发言人」处理 ✓ "
+                    "（不影响功能 ✓ 下次启动会自动补列 ✓）"
                 )
-            }
+                rows = [
+                    (r["id"], r["start"], r["users"], "")
+                    for r in db.execute(
+                        "SELECT id,start,users FROM records WHERE id IN"
+                        " (SELECT value FROM json_each(?))",
+                        (dump(sorted(sources)),),
+                    )
+                ]
+        meta = {r[0]: (r[1] or 0, r[2] or "", r[3] or "") for r in rows}
         for fact in facts:
             best = None
             for source in fact.get("sources", []):
