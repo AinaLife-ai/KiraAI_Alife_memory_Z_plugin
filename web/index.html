@@ -360,6 +360,12 @@
           <div class="notice">
             保存后立即生效，无需重启。正在执行的旧配置压缩结果会放弃提交，等待下次整理。
           </div>
+          <!-- ★ 2026-10-10（用户反馈"设置里找不到"）：搜索 + 常用置顶 ✓ 静态声明 ✓ -->
+          <div class="cfg-tools">
+            <input type="search" id="cfgSearch" placeholder="搜索设置（名称或键名，如「自我」「JEV」）…">
+            <span class="cfg-count" id="cfgCount"></span>
+          </div>
+          <div class="cfg-head" id="cfgHead">常用：自我认知门槛 · JEV 提示词 · 各链路模型（回退链）</div>
           <div class="panel"><div class="form-grid" id="configForm"></div></div>
           <div class="conflict hide" id="conflict">
             <b>设置已在别处被改过</b>（另一个页面保存过，或插件重载过）。
@@ -517,7 +523,7 @@
     </dialog>
     <div id="toast" class="hide" role="status"></div>
     <script src="/plugin-bridge.js"></script>
-    <script src="graph.js?v=2.22.0"></script>
-    <script src="app.js?v=2.22.0"></script>
+    <script src="graph.js?v=2.22.1"></script>
+    <script src="app.js?v=2.22.1"></script>
   </body>
 </html>

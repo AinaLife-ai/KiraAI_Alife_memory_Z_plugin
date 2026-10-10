@@ -2645,7 +2645,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     and not low_value_self(
                         x,
                         getattr(event, "self_id", ""),
-                        int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
+                        int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
                     )
                 ]
             # ★ 2026-09-18 批次 2：**下沉** ✓
@@ -2967,7 +2967,7 @@ class AlifeMemoryPlugin(BasePlugin):
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
             # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
-            self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
+            self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
                     ),
         }
         if users:
@@ -4094,7 +4094,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
                     # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
-                    self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
+                    self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
                                     ),
                 "next_offset": offset + len(rows),
             },

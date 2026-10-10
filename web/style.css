@@ -1747,3 +1747,90 @@ button.primary:hover::after {
    ≤6 用低饱和色提醒"这条可能被自我认知门槛挡下"，≥7 用正常色 ✓ */
 .tag.imp { background: rgba(120, 170, 255, 0.16); color: #8fb6ff; }
 .tag.imp-low { background: rgba(255, 190, 90, 0.16); color: #e0a95c; }
+
+/* ★ 2026-10-10（用户要求 v2）：模型回退链 = **下拉内编辑**
+   · 框里显示第 1 档（= 回退链第一顺位）✓
+   · 下拉里：已选的带序号 + ✕ 可直接取消 ✓ ↑↓ 调序 ✓ 可搜索 ✓ 自动换行不挤成长条 ✓ */
+.chain-combo { position: relative; }
+.chain-combo > select.chain-hidden { display: none; }
+.chain-box {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.chain-box:hover { border-color: var(--accent); }
+.chain-box.is-open { border-color: var(--accent); box-shadow: var(--shadow); }
+.chain-box-tx { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chain-cnt {
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+.chain-caret { color: var(--muted); font-size: 0.8rem; }
+.chain-menu {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  right: 0;
+  top: calc(100% + 5px);
+  max-height: 330px;
+  overflow: auto;
+  padding: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.chain-search { width: 100%; margin-bottom: 0.35rem; }
+.chain-list { display: flex; flex-direction: column; gap: 2px; }
+.chain-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.38rem 0.5rem;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.chain-item:hover { background: var(--soft); }
+.chain-item.is-on { background: var(--soft); }
+.chain-no {
+  width: 1.15rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+.chain-nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chain-ord { display: flex; gap: 2px; }
+.chain-ord i { font-style: normal; color: var(--muted); padding: 0 2px; }
+.chain-ord i:hover { color: var(--accent); }
+.chain-x { color: var(--muted); padding-left: 0.25rem; }
+.chain-item.is-on .chain-x:hover { color: #d9534f; }
+.chain-hint { padding: 0.35rem 0.5rem 0.1rem; font-size: 0.72rem; color: var(--muted); }
+
+/* 设置页：搜索框 +「常用」置顶（131 项平铺找不到 ⇒ 用户反馈）*/
+.cfg-tools { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.55rem; }
+.cfg-tools input { flex: 1; }
+.cfg-count { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+.cfg-head {
+  grid-column: 1 / -1;
+  margin: 0.15rem 0 0.1rem;
+  font-weight: 600;
+  color: var(--accent);
+}
