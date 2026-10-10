@@ -490,8 +490,16 @@ def compress_summary(steps, cfg=None):
 def audit_summary(counts):
     """后台任务列表里显示审计做了什么：保留/修正/合并/撤回各多少。"""
     if not isinstance(counts, dict):
-        return "本次审计 %s 条事实" % counts
+        # ★ 2026-10-11 修：这里原来是 `"本次审计 %s 条事实" % counts` ✗
+        #   ⇒ counts 为 None 时会打出「本次审计 None 条事实」（看着像出了故障 ✗）
+        #   兜底也要说人话 ✓（异常/老任务里可能是 None 或别的类型 ✓）
+        return "本次审计没有产生统计（%s）" % (
+            "无待审内容" if counts is None else type(counts).__name__
+        )
     scanned = counts.get("scanned", 0)
+    if counts.get("why"):
+        # 空转但有明确原因 ⇒ 直接讲原因 ✓（比"0 条事实"有用得多 ✓）
+        return "本次审计 %d 条：%s" % (scanned, counts["why"])
     if counts.get("screened_skip"):
         # ★ 以前这里会写成「全部保留」，看着像"审过了"，其实是**跳过了模型** ✗ 容易误判
         return "本次审计 %d 条：JEV 预筛判定无可疑 ⇒ 跳过模型调用（保持原样）" % scanned
@@ -1765,7 +1773,13 @@ class Engine:
             recheck_seconds=cfg.audit_recheck_days * 86400,
         )
         if not candidates:
-            return
+            # ★ 2026-10-11 修（用户实测：界面显示「本次审计 None 条事实」✗）：
+            #   原来这里是**裸 return** ⇒ None ⇒ 被 audit_summary 当数字格式化 ✗
+            #   现在给出**人话原因** ✓（和 compress_summary 一个风格：空转要说明为什么 ✓）
+            return {
+                "scanned": 0,
+                "why": "没有待审校的事实（本会话还没有事实，或都已在复查周期内审校过）",
+            }
         # Keep complete evidence, but do not send every fact's large archive in one request.
         selected, evidence_by_id, used = [], {}, 0
         for fact in candidates:
