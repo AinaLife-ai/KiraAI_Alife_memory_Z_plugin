@@ -59,7 +59,9 @@ def _seed(store, content, importance, speakers):
         db.execute(
             "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
             "position,created,search_body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (rid, SID, "user", "L0", now, now, content, content,
+            # ★ role 要与说话人一致：bot 发言 = assistant ✓（否则 assistant_user_id 推断不出来 ✗）
+            (rid, SID, "assistant" if speakers and speakers[0] == BOT else "user",
+             "L0", now, now, content, content,
              json.dumps(speakers), 0, now, content),
         )
         db.execute(
@@ -110,3 +112,38 @@ def test_rotation_pool_attaches_before_filtering():
     i_attach = src.index('fact_pool = await self.store.call("attach_evidence", fact_pool)')
     i_filter = src.index("and not low_value_self(")
     assert i_attach < i_filter, "轮换池没在过滤前 attach ⇒ 门槛会静默空转 ✗"
+
+
+def test_panel_marks_self_and_filtered_like_recall(tmp_path):
+    """★ 面板上的「自我 / 不参与召回」标记必须与**召回判据完全一致** ✓
+
+    用户问题（2026-10-11）："这几条香香的是不是都被门槛挡掉了？"
+    ⇒ 光靠解释不够 ✓ 面板上要**一眼可见** ✓ 且判据不能是另写一份 ✗
+    """
+    p, store = _plugin(tmp_path)
+    _seed(store, "我说话有点啰嗦，要收敛", 3, [BOT])       # 助手自述 + 低重要度 ⇒ 应被挡
+    _seed(store, "哥要求助手用音乐卡片推送", 5, ["u1"])   # 用户说的 ⇒ 不是自我事实 ⇒ 不挡
+    _seed(store, "助手有自己的名字", 8, [BOT])            # 助手自述但 ≥7 ⇒ 不挡
+    rows = run(p.api_facts(sid=SID))
+    assert len(rows) == 3, "应能取到刚造的 3 条事实 ⇒ 实际 %d 条" % len(rows)
+
+    def verdict(fragment):
+        hit = next((r for r in rows if fragment in (r.get("content") or "")), None)
+        assert hit is not None, "没找到含 %r 的事实（实际：%r）" % (fragment, [r.get("content") for r in rows])
+        return (hit.get("self_fact"), hit.get("recall_filtered"))
+
+    assert verdict("啰嗦") == (True, True), "助手自述 + 低重要度 ⇒ 自我 且 不参与召回 ✗"
+    assert verdict("音乐卡片") == (False, False), "用户说的 ⇒ 不是自我事实，不该被挡 ✗"
+    assert verdict("自己的名字") == (True, False), "助手自述但重要度 ≥7 ⇒ 保留 ✗"
+    # 面板标记与召回判据**同源**（同一个 low_value_self）✓
+    for r in rows:
+        assert bool(r["recall_filtered"]) == bool(
+            retrieval.low_value_self(r, BOT, 6)), "面板与召回判据不一致 ✗"
+
+
+def test_assistant_user_id_infers_bot_when_no_event(tmp_path):
+    """面板请求没有事件 ⇒ 要从"助手发言记录"里推断 bot 自己的 id ✓（推断不出就空 ✓）"""
+    p, store = _plugin(tmp_path)
+    assert run(store.call("assistant_user_id")) == "", "没有助手记录时应返回空 ✗"
+    _seed(store, "助手说过一句话", 3, [BOT])
+    assert run(store.call("assistant_user_id")) == BOT, "应从助手发言里推断出 bot 的 id ✗"

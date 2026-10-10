@@ -1848,3 +1848,7 @@ button.primary:hover::after {
   font-size: 0.78rem;
 }
 .cfg-recent:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ★ 2026-10-11（用户问"这几条是不是都被挡了"）：把结论直接标在卡片上 ✓ */
+.self-tag { background: var(--soft); color: var(--accent); }
+.filt-tag { background: rgba(217, 83, 79, 0.12); color: #c9453f; }

@@ -4564,6 +4564,18 @@ class AlifeMemoryPlugin(BasePlugin):
                 await self.migrate()
             return {"ok": True, "revision": revision(self.settings)}
 
+    def _self_id_from(self, event):
+        """取「机器人自己」的 id，并**缓存**下来 ✓
+
+        ★ 2026-10-11：面板（/facts）也要用它来判断"这条事实是不是 bot 自己说的" ✓
+        —— 必须与召回路径**同一个来源、同一个判据** ✓ 否则面板显示的与真正生效的会不一致 ✗
+        （事件里带 self_id；面板请求没有事件 ⇒ 用最近一次见到的 ✓）
+        """
+        sid = str(getattr(event, "self_id", "") or "")
+        if sid:
+            self._self_id = sid
+        return sid or getattr(self, "_self_id", "")
+
     def _model_label_of(self):
         """返回 `ref -> "可读名 · 提供商"` 的解析函数（日志用 ✓ 与面板同一套规则 ✓）
 
@@ -4817,12 +4829,34 @@ class AlifeMemoryPlugin(BasePlugin):
             if n["name"]
         }
         history = await self.store.call("edit_history", "fact", [f["id"] for f in rows])
+        # ★ 2026-10-11（用户问"这几条是不是都被自我门槛挡掉了"）：
+        #   面板必须**能一眼看出**哪些是自我事实、哪些真的会被挡 ✗→✓
+        #   判据与召回路径**完全同一个函数** ✓（low_value_self ✓）⇒ 永不打架 ✓
+        #   注意 `src_user` 不是数据库列 ✗ 它是 attach_evidence 读时算的 ⇒ 先补上 ✓
+        self_id = self._self_id_from(None)
+        if not self_id:
+            # ★ 兜底：面板可能在任何消息之前就被打开 ⇒ 从"助手发言记录"里推断 ✓
+            #   （推断不出就是 "" ⇒ 不标记 ✓ 绝不误判成"不是自我"或"是自我" ✗）
+            try:
+                self_id = await self.store.call("assistant_user_id")
+            except Exception:
+                self_id = ""
+        drop_max = int(getattr(self.settings, "self_fact_max_importance", 6) or 6)
+        try:
+            rows = await self.store.call("attach_evidence", rows)
+        except Exception:
+            pass
         return [
             {
                 **f,
                 "display_name": names.get(f["subject"], ""),
                 "names": names,
                 "edit_history": history.get(f["id"], []),
+                # ★ 2026-10-11：让"这条会不会被自我门槛挡下"在卡片上**一眼可见** ✓
+                #   （判据就是召回路径那个 low_value_self ✓ 不另写一份逻辑 ✗）
+                "self_fact": bool(self_id and str(f.get("src_user") or "") == self_id),
+                "recall_filtered": low_value_self(f, self_id, drop_max),
+                "self_threshold": drop_max,
             }
             for f in rows
         ]
