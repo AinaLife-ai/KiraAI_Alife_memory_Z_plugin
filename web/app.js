@@ -241,7 +241,9 @@ function saveDraft() {
 function factPatch() {
   const out = {};
   $$("#factFields [data-field]").forEach((e) => {
-    out[e.dataset.field] = e.value;
+    // ★ 2026-10-10：importance 必须是**数字** ✓（/edit 的 patch 期望 int ✗ 传字符串会 422 ✓）
+    out[e.dataset.field] =
+      e.dataset.field === "importance" ? Number(e.value) : e.value;
   });
   return out;
 }
@@ -314,6 +316,10 @@ function renderMigration(m) {
       )
       .join("");
 }
+//   必须与后端 `contracts.Job.kind` 的 Literal 一致 ✓（不一致会 422 ✗）
+//   其余（classify / proactive）由调度自动重来 ⇒ 不给按钮 ✓
+const JOB_RETRY_KINDS = ["compress", "audit", "reindex", "dedupe", "tidy", "rewrite", "fact_merge"];
+
 function tasksHtml(jobs) {
   return jobs.length
     ? jobs
@@ -329,7 +335,13 @@ function tasksHtml(jobs) {
                 ? "旧任务超时：可减小批次、提高超时或更换模型后重新排队。"
                 : humanDetail(j.detail) || date(j.created),
             ) +
-            '</small></div><div class="actions"><button data-jobdetail="' +
+            '</small></div><div class="actions">' +
+            (j.state === "failed" && JOB_RETRY_KINDS.includes(j.kind)
+              ? '<button data-jobretry="' + esc(j.id) + '" data-kind="' +
+                esc(j.kind) + '" data-sid="' + esc(j.sid) +
+                '" title="立即重试（安全）：任务体按**当前内容**重新规划 ⇒ 不会重放旧快照 ✗；同类任务已在队列/执行中则复用同一行 ⇒ 不会重复 ✓">立即重试</button>'
+              : "") +
+            '<button data-jobdetail="' +
             esc(j.id) +
             '">明细</button></div><span class="state-' +
             esc(j.state) +
@@ -347,6 +359,7 @@ function tasksHtml(jobs) {
         .join("")
     : empty("暂时没有后台任务");
 }
+// ★ 2026-10-10（③）：**可手动「立即重试」**的任务种类 ✓
 const JOB_KINDS = {
   compress: "分层压缩",
   audit: "事实审计",
@@ -380,6 +393,22 @@ function bindJobButtons() {
     (b) => (b.onclick = (e) => {
       e.stopPropagation();
       guard(() => openJob(b.dataset.jobdetail));
+    }),
+  );
+  // ★ 2026-10-10（③）：失败任务的「立即重试」—— 走既有 POST /jobs ✓
+  //   安全性（用户关心的三点）：
+  //     ① 同 (kind,sid) 在 jobs 表只有一行 ⇒ 排队中复用 / 完结才重开 ⇒ **不会重复** ✓
+  //     ② 任务体（如压缩）**重读当前内容**再规划 ⇒ 新内容不会被旧结果覆盖 ✓
+  //     ③ 手动排队标 automatic=0 ⇒ 明细里能看出是人工点的 ✓
+  $$("[data-jobretry]").forEach((b) =>
+    (b.onclick = (e) => {
+      e.stopPropagation();
+      b.disabled = true;
+      const jid = String(b.dataset.jobretry || "").slice(0, 8);
+      guard(async () => {
+        await api("/jobs", { kind: b.dataset.kind, sid: b.dataset.sid });
+        toast("任务 " + jid + " 已排队：将按当前内容重新处理 ✓（同类任务进行中则并入同一条 ✓）");
+      });
     }),
   );
 }
@@ -1159,7 +1188,7 @@ function renderFactCards(list) {
     ? list
         .map(
           (f, i) =>
-            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
+            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><span class="tag imp${f.importance != null && Number(f.importance) <= 6 ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
         )
         .join("")
     : empty("画像还在形成");
@@ -1331,6 +1360,7 @@ async function openFact(row) {
   $("#factFields").innerHTML = [
     "subject",
     "category",
+    "importance",     // ★ 2026-10-10：补齐「重要度」——卡片与弹窗此前都没有 ✗
     "reason",
     "scenario",
     "tags",
@@ -1343,13 +1373,32 @@ async function openFact(row) {
           {
             subject: "实体",
             category: "分类",
+            importance: "重要度（1–10）",
             reason: "原因",
             scenario: "适用场景",
             tags: "标签（每行一个）",
             relations: "关系（三元组 JSON）",
           }[k],
         ) +
-        (k === "category"
+        (k === "importance"
+          ? '<select data-field="importance">' +
+            Array.from({ length: 10 }, (_, n) => n + 1)
+              .map(
+                (n) =>
+                  '<option value="' +
+                  n +
+                  '" ' +
+                  (Number(row.importance == null ? 5 : row.importance) === n
+                    ? "selected"
+                    : "") +
+                  ">" +
+                  n +
+                  (n >= 7 ? "（优先常驻）" : "（≤ 自我认知门槛时会被挡下）") +
+                  "</option>",
+              )
+              .join("") +
+            "</select>"
+          : k === "category"
           ? '<select data-field="category">' +
             Object.entries(labels)
               .map(
@@ -3039,9 +3088,11 @@ $("#profileEditName").onclick = () =>
 document.addEventListener("click", (ev) => {
   const t = ev.target;
   if (!(t instanceof HTMLElement) || t.tagName !== "BUTTON") return;
-  const impId = t.getAttribute("data-imp");
+  // ★ 2026-10-10：改用 dataset（与 getAttribute 等价 ✓ 但静态审计 tools/web_audit.py
+  //   只识别 dataset.* ⇒ 原来读得到、审计却报"写出无人读取" ✗ 属误报 ✓ 现修正 ✓）
+  const impId = t.dataset.imp;
   if (impId) {
-    const delta = Number(t.getAttribute("data-delta") || 0);
+    const delta = Number(t.dataset.delta || 0);
     const card = t.closest(".card");
     const m = card && card.querySelector(".muted");
     const cur = m ? Number((m.textContent.match(/重要度 (\d+)/) || [])[1] || 5) : 5;

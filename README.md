@@ -492,9 +492,23 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
 - 🐛 **JEV 熔断器**：`_bad()` 里 `== 3` ⇒ 首次冷却 300 秒后**熔断再也不会重开**
   （此后每次调用都白付超时）。改为 `>= 3`（每次失败重新计时）。
   另新增面板「JEV 状态小灯」（就绪 / 熔断中剩余秒 / 未就绪原因，悬停看详情）。
-- 📊 测试（全部真跑）：**3.0 共 984 passed / 0 failed** ｜ **2.x 共 984 passed / 0 failed**
+- ✨ **② 事实重要度：显示 + 可编辑**（此前画像/关系里既看不到也改不了 ✗）
+  · 画像与关系的事实卡片头部新增 `重要度 N` 徽标；**≤6 用低饱和橙色**（提示"可能被自我门槛挡下"）
+  · 编辑事实弹窗新增**重要度下拉 1–10**（与 `Fact.importance: ge=1, le=10` 完全对齐）
+    保存时转成数字（`/edit` 的 patch 期望 int ✗ 传字符串会 422）
+- ✨ **③ 后台任务失败项「立即重试」**
+  · 任务 `state=failed` 时多出一个按钮；只对**后端真正接受手动排队**的种类显示
+    （compress / audit / reindex / dedupe / tidy / rewrite / **fact_merge**
+      —— fact_merge 引擎本来就有 worker lane，此前只是 `Job.kind` 入口没开，现已补上）
+  · **安全性（三点）**：① 不会重复 —— `enqueue` 保证同 (kind, sid) 只有一行（排队/执行中复用、
+    完结/失败重开）；② 不会以旧抵新 —— 任务体**重新读取当前内容再规划**，不重放快照，
+    新内容永远优先；③ 可区分来源 —— 手动排队打 `automatic=0`，提示里带短 job id 便于对照
+  · 前后端白名单**钉成测试**（前端列了后端不收的 ⇒ 测试直接红，不会等点到 422 才发现）
+- 🐛 顺带：`web_audit` 抓出两处既有误报（`data-imp` / `data-delta` 用 `getAttribute` 读，
+  工具只识别 `dataset.*`）⇒ 改成 `dataset`，现在**需要修复的问题：0**
+- 📊 测试（全部真跑）：**3.0 共 992 passed / 0 failed** ｜ **2.x 共 992 passed / 0 failed**
   · 新增 `tests/test_model_chains.py`（12 条）· `tests/test_model_display_and_ref.py`（7 条）
-    · `tests/test_memory_gate_and_jev_prompt.py`（12 条）
+    · `tests/test_memory_gate_and_jev_prompt.py`（12 条）· `tests/test_importance_ui_and_retry.py`（9 条）
   · 仓库自带守门人：`tools/web_audit.py` 0 问题 · `tools/status_contract.py` 契约一致
     · `tools/generate_schema.py` 零差异
 

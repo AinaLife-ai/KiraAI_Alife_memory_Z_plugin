@@ -621,7 +621,9 @@ class Job(Strict):
     rebuild: bool = False
     # tidy 也允许手动排队：Bot 用 CorrectMemory(action=tidy) 触发，
     # 工作台的这个按钮走同一条链路。
-    kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite"]
+    # ★ 2026-10-10（③）：补 `fact_merge` —— 失败任务要能手动「立即重试」✓
+    #   （引擎本来就有 fact_merge 的 worker lane ✓ 此前只是 API 入口没开 ✓）
+    kind: Literal["compress", "audit", "reindex", "dedupe", "tidy", "rewrite", "fact_merge"]
     sid: Short
 
 
