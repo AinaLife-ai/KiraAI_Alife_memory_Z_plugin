@@ -2631,6 +2631,10 @@ class AlifeMemoryPlugin(BasePlugin):
                 #   ⇒ 于是它**也会流进轮换槽** ⇒ 用户看到"轮换槽被动召回到工具步" ✗
                 #   ⇒ 轮换槽（"相关但还没召回过的**记忆**" ✓）把它排除 ✓
                 #   注意：**主召回不动** ✓（工具结果是对话史的一部分 ✓ 该能被想起来 ✓）
+                # ★ 2026-10-10（实测发现 ✗→✓）：**必须先补 src_user** ✗
+                #   轮换池走的是裸 facts 查询 ⇒ 行上没有 src_user（它是 attach_evidence 读时算的 ✓）
+                #   ⇒ 缺这一步，下面的自我门槛会**静默空转**（看着接了、其实永不触发 ✗）
+                fact_pool = await self.store.call("attach_evidence", fact_pool)
                 fact_pool = [
                     x for x in fact_pool
                     if not is_tool_result(x.get("content"))
