@@ -1530,10 +1530,15 @@ async function saveEdit(extra) {
       await api("/edit", { ...payload, force: true });
     }
   }
+  // ★ 2026-10-11（用户实测：保存成功但右下角报 "reading 'row' of null"）✗→✓
+  //   原来顺序是：current = null; … 然后 `if (current.row && …)` ✗
+  //   ⇒ 必抛 TypeError ⇒ **保存后的收尾全被炸掉**：成功提示看不到、poll/列表不刷新 ✗
+  //   （保存本身是成功的 —— API 在更早就调完了 —— 但用户会以为"出错了"✓）
+  const savedRow = current.row;          // ★ 先留一份，再清 current ✓
   $("#editor").close();
   current = null;
   saveDraft();
-  if (current.row && current.row.cold) {
+  if (savedRow && savedRow.cold) {
     // ★ 冷归档正文不在热库 ⇒ 改摘要不会动正文，必须讲清楚 ✗（否则用户以为改了正文 ✓）
     toast("摘要已保存 ✓ 冷归档正文要用「取回」才会回到热库 ✓");
   } else {
@@ -1561,7 +1566,9 @@ function readConfig() {
 }
 async function loadConfig() {
   config = await api("/config");
-  models = (await api("/models")).models;
+  // ★ 2026-10-11（同类隐患排查）：api() 万一带回空/异常 ⇒ `.models` 会抛 ✗
+  //   而这行在**启动路径**上 ⇒ 一抛整个面板就废 ✗ ⇒ 可选链 + 回落空数组 ✓
+  models = (await api("/models"))?.models || [];
   renderConfig(config.settings);
   configDirty = false;
   $("#dirty").textContent = "配置已同步";
@@ -1731,9 +1738,12 @@ function bindChainCombos() {
     const paint = () => {
       hidden.value = refs.join("\n");
       sel.value = refs[0] || "";
-      combo.querySelector(".chain-box-tx").textContent =
+      const boxTx = combo.querySelector(".chain-box-tx");
+      const cntEl = combo.querySelector(".chain-cnt");
+      if (!boxTx || !cntEl) return;            // 结构已被重渲染 ⇒ 直接跳过（不抛 ✓）
+      boxTx.textContent =
         refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）";
-      combo.querySelector(".chain-cnt").textContent = refs.length ? refs.length + " 档" : "";
+      cntEl.textContent = refs.length ? refs.length + " 档" : "";
       list.innerHTML = chainListHtml(refs, models, isEmb, lookup);
       hidden.dispatchEvent(new Event("input", { bubbles: true }));
     };
@@ -2403,7 +2413,12 @@ $("#saveEdit").onclick = () =>
     }
   });
 $("#forget").onclick = () =>
-  guard(() => saveEdit({ active: !current.row.active }));
+  // ★ 2026-10-11（同类隐患排查）：编辑器已关（current=null）时点它会**崩** ✗
+  //   且不能把 undefined 当 false ⇒ 那会**误把这条记忆改成"不过滤"** ✗ ⇒ 直接不做事 ✓
+  guard(() => {
+    if (!current || !current.row) return;
+    return saveEdit({ active: !current.row.active });
+  });
 $("#delete").onclick = () => $("#deleteConfirm").classList.remove("hide");
 $("#cancelDelete").onclick = () => $("#deleteConfirm").classList.add("hide");
 $("#confirmDelete").onclick = () =>
@@ -2498,7 +2513,7 @@ function askTidyMode() {
     d.querySelector("#tidyCancel").onclick = () => done(null);
     d.querySelector("#tidyClose").onclick = () => done(null);
     d.querySelector("#tidyGo").onclick = () =>
-      done(d.querySelector('input[name="tidymode"]:checked').value);
+      done(d.querySelector('input[name="tidymode"]:checked')?.value || "");
     // 选中项高亮 ✓（JS 切 class ✗ 不依赖 :has ✓ 兼容性更稳 ✓）
     const mark = () => d.querySelectorAll(".tidy-opt").forEach((el) => {
       const input = el.querySelector("input");
