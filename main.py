@@ -1126,7 +1126,7 @@ class AlifeMemoryPlugin(BasePlugin):
             if response.tool_calls:
                 raise ValueError("unexpected_tool_call")
             return response.text_response
-        
+
         last_exc = None
         for idx, ref in enumerate(refs, 1):
             try:
@@ -1167,7 +1167,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     purpose, idx, ref, "；".join(chain_errors),
                 )
             return text
-        
+
         # 全链失败 ⇒ 抛最后那个异常类型 ✓（调用方重试逻辑不变 ✓）
         logger.info("[记忆·Z] 模型链路 %s 全部失败：%s", purpose, "；".join(chain_errors))
         raise (last_exc or RuntimeError("model_chain_failed: " + "；".join(chain_errors)))
@@ -1690,7 +1690,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 "jev_prompt_append",
                 "jev_models",
                 "jev_merge", "jev_audit", "jev_importance",
-                "rerank_enabled", "rerank_model", "rerank_timeout_ms")
+                "rerank_enabled", "rerank_model", "rerank_models", "rerank_timeout_ms")
         return tuple(str(getattr(settings, k, "")) for k in keys)
 
     def _ensure_aux(self) -> None:

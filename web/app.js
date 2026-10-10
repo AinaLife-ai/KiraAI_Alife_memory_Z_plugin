@@ -316,6 +316,7 @@ function renderMigration(m) {
       )
       .join("");
 }
+// ★ 2026-10-10（③）：**可手动「立即重试」**的任务种类 ✓
 //   必须与后端 `contracts.Job.kind` 的 Literal 一致 ✓（不一致会 422 ✗）
 //   其余（classify / proactive）由调度自动重来 ⇒ 不给按钮 ✓
 const JOB_RETRY_KINDS = ["compress", "audit", "reindex", "dedupe", "tidy", "rewrite", "fact_merge"];
@@ -359,7 +360,6 @@ function tasksHtml(jobs) {
         .join("")
     : empty("暂时没有后台任务");
 }
-// ★ 2026-10-10（③）：**可手动「立即重试」**的任务种类 ✓
 const JOB_KINDS = {
   compress: "分层压缩",
   audit: "事实审计",
@@ -1183,12 +1183,20 @@ async function loadFacts() {
   $("#factPrev").disabled = factOffset === 0;
   $("#factNext").disabled = shownFacts.length < 100;
 }
+// ★ 2026-10-10：自我认知门槛的**当前生效值**（面板配置；读不到回落 6 ✓）
+//   卡片上的低值高亮必须跟着配置走 ✗→✓（否则你把门槛改成 4 了，卡片还按 6 标色 ✗）
+function selfFactMax() {
+  const v = config && config.settings ? config.settings.self_fact_max_importance : 6;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 6;
+}
+
 function renderFactCards(list) {
   $("#factCards").innerHTML = list.length
     ? list
         .map(
           (f, i) =>
-            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><span class="tag imp${f.importance != null && Number(f.importance) <= 6 ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
+            `<article class="card"><div class="row"><span class="tag">${esc(labels[f.category])}</span><span class="tag imp${f.importance != null && Number(f.importance) <= selfFactMax() ? " imp-low" : ""}" title="重要度（1–10）：越高越优先常驻；bot 自己的事实若 ≤「自我认知事实召回门槛」则不参与召回 ✓">重要度 ${esc(f.importance == null ? "—" : String(f.importance))}</span><strong>${esc(displayLabel(f.subject))}</strong></div><p>${esc(f.content)}</p><small>${esc((f.tags || []).join(" · "))}</small>${f.rewrite_pending ? '<div class="notice">待整理 ' + esc(String(f.rewrite_attempts || 0)) + '/3：这条是「模型输出不可用 → 按时间拼接」的产物。下一轮审计会还原来源、重新合并；也可以点维护面板的「重整理待处理事实」立刻排队。</div>' : ""}${f.relation_warnings?.length ? '<div class="notice">待审校：' + esc(f.relation_warnings.map((w) => w.reason).join("；")) + "。该连线未用于关系召回。</div>" : ""}<p class="muted">${esc(f.reason ? "事实依据：" + f.reason : "")}${esc(f.scenario ? " · 场景：" + f.scenario : "")}</p>${f.edit_history?.length ? '<p class="muted">最近审校：' + esc(f.edit_history[0].reason) + " · " + date(f.edit_history[0].created) + "</p>" : ""}<footer><small>${(f.sources || []).length} 个来源</small><button data-fact="${i}">编辑事实</button></footer></article>`,
         )
         .join("")
     : empty("画像还在形成");
@@ -1635,13 +1643,14 @@ function wireChain(root, key, models, initial) {
   const add = box.querySelector("[data-add]");
   const count = box.querySelector("[data-count]");
   const lookup = chainLookup(models);
-  let refs = (Array.isArray(initial) ? initial : []).map(String).filter(Boolean).slice(0, 10);
+  let refs = (Array.isArray(initial) ? initial : String(initial || "").split("\n"))
+    .map(String).filter(Boolean).slice(0, 10);
 
   const label = (ref) => {
     const m = lookup.get(ref);
     return m ? modelLabel(m) : ref + "（旧值）";   // 认不出的老值也照实显示 ✓
   };
-  const sync = () => {
+  const sync = (notify = true) => {
     chips.innerHTML = refs
       .map(
         (ref, i) =>
@@ -1659,7 +1668,7 @@ function wireChain(root, key, models, initial) {
     hidden.value = refs.join("\n");
     count.textContent = refs.length + " / 10";
     // 让脏标记 / 草稿 / 保存逻辑照常工作 ✓（与其它控件同一个事件 ✓）
-    hidden.dispatchEvent(new Event("input", { bubbles: true }));
+    if (notify) hidden.dispatchEvent(new Event("input", { bubbles: true }));
   };
   box.querySelector("[data-append]").onclick = () => {
     const ref = add.value;
@@ -1689,8 +1698,8 @@ function wireChain(root, key, models, initial) {
     }
     sync();
   });
-  sync();
-  hidden.value = refs.join("\n");   // 首次同步 ✓（避免把初始值当"改动" ✗）
+  // 首次同步**不广播 input** ⇒ 打开面板不会被误标为"已改动" ✓
+  sync(false);
 }
 
 function renderConfig(values) {

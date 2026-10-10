@@ -107,11 +107,11 @@ def _with_prompt_append(payload, extra):
 
 
 class JevClient:
-    COOLDOWN = 300.0                 # ★ 熔断冷却秒数（ready/cooldown_left/面板共用同一来源 ✓）
     """最小原生客户端：同步 urllib 跑在 to_thread 里（零新增依赖，可硬超时）。
 
     ★ 熔断：连续失败 3 次 → 冷却 300 秒内直接返回 None（不再占用时间）。
     """
+    COOLDOWN = 300.0                 # ★ 熔断冷却秒数（ready/cooldown_left/面板共用同一来源 ✓）
 
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 4.0, prompt_append: str = ""):
         self.fallbacks = ()          # ★ 2026-10-10：有序回退链（默认空=只用主档）

@@ -459,7 +459,6 @@ class Settings(Strict):
         description="JEV 精修前先多取几倍候选（默认 3）；设为 1 等于不扩池。",
     )
     recall_skip_folded: bool = Field(
-
         default=True,
         description="跨会话召回时，若某条旧归档原文的摘要本轮也在结果里，则只保留摘要（避免重复注入）；摘要不在时仍保留原文，避免漏掉唯一命中的那条。",
     )
@@ -472,7 +471,6 @@ class Settings(Strict):
     audit_models: list[str] = Field(default_factory=list)      # 审计链路（有序 ✓ ≤10 ✓）
     jev_models: list[str] = Field(default_factory=list)        # JEV 决策链路（有序 ✓ ≤10 ✓）
     rerank_models: list[str] = Field(default_factory=list)     # 重排链路（有序 ✓ ≤10 ✓）
-
 
     @model_validator(mode="after")
     def valid_merge_limits(self):
