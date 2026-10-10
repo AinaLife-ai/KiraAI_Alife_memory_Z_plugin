@@ -82,8 +82,12 @@ def test_new_key_fallbacks_match_schema_defaults():
     fields = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["alife"]["fields"]
     src = (ROOT / "main.py").read_text(encoding="utf-8")
     want = fields["self_fact_max_importance"]["default"]
-    assert want == 6, "schema 默认变了 ⇒ 同步本测试与代码回落值"
-    assert 'getattr(self.settings, "self_fact_max_importance", %d) or %d' % (want, want) in src, \
+    assert want == 4, "schema 默认变了 ⇒ 同步本测试与代码回落值"
+    assert '"self_fact_max_importance", %d' % want in src, \
         "代码回落值（%d）与 schema 默认不一致 ⇒ 升级路径会静默变行为 ✗" % want
+    # ★ 默认必须等效于"不挡"（开关关 ⇒ 0）✓ 升级后行为与旧版一致 ✓
+    assert fields["self_fact_filter_enabled"]["default"] is False, "总开关默认应为关 ✗"
+    assert 'getattr(self.settings, "self_fact_filter_enabled", True)' in src, \
+        "总开关的代码回落值要和 schema 默认一致（关）✗"
     assert 'limit or 800' in (ROOT / "storage.py").read_text(encoding="utf-8"), \
         "cover_check_limit 的回落值要与 schema 默认（800）一致 ✓"

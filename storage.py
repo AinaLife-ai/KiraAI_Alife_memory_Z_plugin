@@ -268,6 +268,10 @@ class Store:
               summary TEXT NOT NULL, content TEXT NOT NULL, users TEXT NOT NULL,
               -- speaker：这条是谁说的（显示名）。users 是"可见范围"，别混用 ✗
               speaker TEXT NOT NULL DEFAULT '',
+              -- ★ 2026-10-11：这条是谁说的（**id**，形如 qq:12345）✓
+              --   为什么必须存 id：判断"是不是机器人自己说的"只能靠 id 比对 ✓
+              --   只存显示名会被重名/改名搞错 ✗，用 users 更是完全错的（那是可见范围 ✗）
+              speaker_id TEXT NOT NULL DEFAULT '',
               -- 轮换槽位的记账：展示过几次 / 被真正用到几次（用于排序与冷却）
               rotate_shown INTEGER NOT NULL DEFAULT 0,
               rotate_used INTEGER NOT NULL DEFAULT 0,
@@ -325,6 +329,9 @@ class Store:
               id TEXT PRIMARY KEY REFERENCES records(id), model TEXT NOT NULL,
               revision INTEGER NOT NULL, vector TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            -- ★ 2026-10-11：字符串型的小状态（目前用来持久化"机器人自己的 id" ✓）
+            --   为什么需要：面板请求**没有事件** ✗ 拿不到 self_id ⇒ 必须能从库里读回来 ✓
+            CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS migration_items (
               source TEXT NOT NULL, source_key TEXT NOT NULL, digest TEXT NOT NULL,
               record_id TEXT REFERENCES records(id), reason TEXT NOT NULL,
@@ -421,7 +428,8 @@ class Store:
             if "speaker" not in columns:
                 # 这条是谁说的（显示名）。users 是"可见范围"，不是同义词 ✗
                 db.execute(
-                    "ALTER TABLE records ADD COLUMN speaker TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE records ADD COLUMN speaker TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE records ADD COLUMN speaker_id TEXT NOT NULL DEFAULT ''"
                 )
             if "rotate_shown" not in columns:
                 db.execute(
@@ -1134,18 +1142,27 @@ class Store:
         return result
 
     def attach_evidence(self, facts):
-        """为每条事实补上「最新一条来源」：src（记录 ID）与 src_user（说话人）。
+        """为每条事实补上「最新一条来源」：src（记录 ID）与 src_user（**这条是谁说的**）。
 
         注入与工具返回只带一个指针，模型据此就能 ReadMemoryArchive 追到原文。
+
+        ★★ 2026-10-11 修正（重要 ✗→✓）：原来 `src_user = records.users[0]` ✗，
+           但 `users` 是**可见范围**（这条记录谁能看到）✗，**不是发言人** ✗
+           ⇒ 拿它当"谁说的"完全错 ✗（私聊里可见范围就是对方
+             ⇒ 会把**用户**当成机器人自己 ✗ —— 这就是"用户的话被标成自我"的根因 ✓）
+
+           现在改用新列 `records.speaker_id`（捕获时写入的**真正发言人 id** ✓）。
+           老记录没有该字段 ⇒ 一律"未知" ⇒ **不判为自我** ✓
+           （宁可不挡，也绝不错挡 ✓ —— 自我门槛宁可保守 ✓）
         """
         sources = {s for f in facts for s in f.get("sources", [])}
         if not sources:
             return facts
         with self.connect() as db:
             meta = {
-                r[0]: (r[1] or 0, json.loads(r[2] or "[]"))
+                r[0]: (r[1] or 0, r[2] or "", r[3] or "")
                 for r in db.execute(
-                    "SELECT id,start,users FROM records WHERE id IN"
+                    "SELECT id,start,users,speaker_id FROM records WHERE id IN"
                     " (SELECT value FROM json_each(?))",
                     (dump(sorted(sources)),),
                 )
@@ -1153,12 +1170,12 @@ class Store:
         for fact in facts:
             best = None
             for source in fact.get("sources", []):
-                start, users = meta.get(source, (0, []))
+                start, _users, speaker_id = meta.get(source, (0, "", ""))
                 if best is None or start >= best[0]:
-                    best = (start, source, users)
+                    best = (start, source, speaker_id)
             if best:
                 fact["src"] = best[1]
-                fact["src_user"] = best[2][0] if best[2] else ""
+                fact["src_user"] = best[2] or ""      # ★ 真正的发言人 id ✓（未知 ⇒ 空 ✓）
         return facts
 
     def observe_name(
@@ -1425,9 +1442,9 @@ class Store:
                 summary = msg.get("summary") or msg["content"]
                 db.execute(
                     """INSERT OR IGNORE INTO records
-                  (id,sid,role,level,start,end,summary,content,users,speaker,
+                  (id,sid,role,level,start,end,summary,content,users,speaker,speaker_id,
                    position,event_key,created,search_body,category)
-                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)""",
+                  VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         uid(),
                         sid,
@@ -1439,6 +1456,9 @@ class Store:
                         dump(msg["users"]),
                         # 这条是谁说的（显示名）：读原文时模型必须能分清谁说了哪句
                         str(msg.get("speaker") or ""),
+                        # ★ 2026-10-11：同一句话的**发言人 id** ✓
+                        #   （判断"是不是机器人自己说的"只能靠 id 比对 ✓ 显示名会被重名/改名搞错 ✗）
+                        str(msg.get("speaker_id") or ""),
                         pos,
                         f"{sid}:{event_key}:{index}",
                         time.time(),
@@ -3424,41 +3444,46 @@ class Store:
                 )
             ]
 
-    def assistant_user_id(self):
-        """推断「机器人自己的 id」：来自**助手发言**的来源记录里最常见的说话人 ✓
+    def backfill_speaker_ids(self, self_id):
+        """存量升级的一次性回填：**只填能确定的** ✓
 
-        ★ 2026-10-11：面板（/facts）需要它来判断"这条事实是不是 bot 自己说的" ✓
-          召回路径有事件（event.self_id ✓），但面板请求没有 ✗ ⇒ 用数据兜底 ✓
-          取不到就返回 "" ✓（此时不标记，绝不误判 ✗）
-
-        ★ 性能：结果基本不变（bot 的 id 不会变）⇒ **缓存** ✓
-          但**空结果不缓存** ✗ —— 否则"还没有助手记录时就永久推断不出" ✗（标记永远不出现 ✗）
+        ★ 2026-10-11：自我判据从"可见范围 users[0]"（错的 ✗）改成"真发言人 id"（对的 ✓）之后，
+          老记录没有 speaker_id ⇒ 一律"未知" ⇒ 不会被误判为自我 ✓（**不错挡** ✓）
+          但那样"机器人自语"也就挡不住了 ⇒ 这里把**能确定的**补上：
+            `role='assistant'` 只可能是**机器人自己**说的话 ✓ ⇒ 填它 ✓
+          用户说的那些**一律留空**（未知）⇒ 永远不会被挡 ✓ —— 宁可不挡，也绝不错挡 ✓
         """
-        cached = getattr(self, "_assistant_uid", "")
-        if cached:
-            return cached
         try:
             with self.connect() as db:
-                row = db.execute(
-                    "SELECT users, count(*) c FROM records"
-                    " WHERE role='assistant' AND users IS NOT NULL AND users != ''"
-                    " AND users != '[]' AND deleted=0"
-                    " GROUP BY users ORDER BY c DESC LIMIT 1"
-                ).fetchone()
+                cur = db.execute(
+                    "UPDATE records SET speaker_id=? WHERE role='assistant'"
+                    " AND (speaker_id IS NULL OR speaker_id='')",
+                    (str(self_id),),
+                )
+                return getattr(cur, "rowcount", 0) or 0
         except Exception:
-            return ""
-        if not row:
-            return ""
+            return 0
+
+    def get_state(self, key, default=""):
+        """读字符串小状态（没有就返回 default ✓）"""
         try:
-            users = row["users"]
-            if isinstance(users, str):
-                users = json.loads(users)
-            found = str((users or [""])[0] or "")
-            if found:
-                self._assistant_uid = found        # ★ 只在非空时缓存 ✓
-            return found
+            with self.connect() as db:
+                row = db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else default
         except Exception:
-            return ""
+            return default
+
+    def set_state(self, key, value):
+        """写字符串小状态（UPSERT ✓）"""
+        try:
+            with self.connect() as db:
+                db.execute(
+                    "INSERT INTO state(key,value) VALUES(?,?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(key), str(value)),
+                )
+        except Exception:
+            pass
 
     def covering_fact(self, sid, content, threshold=0.4, limit=800):
         """该内容是否已被某条事实覆盖（零模型）。

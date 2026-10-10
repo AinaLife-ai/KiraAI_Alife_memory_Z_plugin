@@ -324,6 +324,21 @@ def event_sid(event):
     return getattr(session, "sid", "") or ""
 
 
+def speaker_id_of(message, adapter=""):
+    """这条消息的**发言人 id**（形如 `qq:12345` ✓ 与 user_ids 同一套写法 ✓）
+
+    ★ 2026-10-11：判断"这条是不是机器人自己说的"只能靠 **id** ✓
+      显示名会被重名/改名搞错 ✗；`users` 更是完全错的列（那是"可见范围" ✗）
+    """
+    sender = getattr(message, "sender", None)
+    if sender is None:
+        return ""
+    uid = str(getattr(sender, "user_id", "") or "").strip()
+    if not uid or uid == "unknown":
+        return ""
+    return ("%s:%s" % (adapter, uid)) if adapter and ":" not in uid else uid
+
+
 def speaker_of(message):
     """这条消息是谁发的（显示名；没有昵称就退回账号 id）。
 
@@ -797,6 +812,9 @@ class AlifeMemoryPlugin(BasePlugin):
                 )
         except Exception as exc:
             logger.warning("[记忆·Z] 历史拼接事实回填标记失败（下次启动会重试）：%s", exc)
+        # ★ 2026-10-11：存量配置**一次性**迁移（只调整"自我认知"那两个键 ✓ 别的一律不碰 ✓）
+        #   升级后：总开关 = 关、门槛 = 4 ⇒ **行为与升级前完全一致** ✓（不影响存量用户 ✓）
+        await self._migrate_self_fact_settings()
         self.identity_report = {}
         try:
             if await self.store.call("synthetic_identity"):
@@ -2648,7 +2666,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     and not low_value_self(
                         x,
                         getattr(event, "self_id", ""),
-                        int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
+                        self._self_drop_max(),
                     )
                 ]
             # ★ 2026-09-18 批次 2：**下沉** ✓
@@ -2970,7 +2988,7 @@ class AlifeMemoryPlugin(BasePlugin):
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
             # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
-            self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
+            self_drop_max=self._self_drop_max(),
                     ),
         }
         if users:
@@ -3114,7 +3132,11 @@ class AlifeMemoryPlugin(BasePlugin):
         incoming = []
         # v2.18.14：名字表**按批取一次**（store 侧还有 60 秒缓存 ✓）
         # 别在循环里查 ✗ 那样每条消息一次库查询会把这一批拖慢几百毫秒 ✓
+        await self._remember_self_id(event)      # ★ 记下 bot 自己的 id（含持久化 ✓）
         media_names = await self.store.call("known_names")
+        # ★ 2026-10-11：本批的适配器名（拼"发言人 id"用 ✓ 形如 qq:12345，与 user_ids 一致 ✓）
+        _adapter = getattr(getattr(event, "session", None), "adapter_name", "") or ""
+        _self_id = str(getattr(event, "self_id", "") or "")
         for message in event.messages:
             if is_notice_message(message):
                 continue
@@ -3128,8 +3150,11 @@ class AlifeMemoryPlugin(BasePlugin):
                 "content": content,
                 "time": float(message.timestamp),
                 "users": users,
-                # 这条是谁说的（实体 id）：群聊里模型必须能分清谁说了哪句
+                # 这条是谁说的（显示名）：群聊里模型必须能分清谁说了哪句
                 "speaker": speaker_of(message),
+                # ★ 2026-10-11：同一句话的**发言人 id** ✓
+                #   （自我门槛只能靠 id 比对 ✓ 显示名会被重名/改名搞错 ✗）
+                "speaker_id": speaker_id_of(message, _adapter),
             }
             if media_only(content, media_names):
                 entry["category"] = "media"
@@ -3167,6 +3192,9 @@ class AlifeMemoryPlugin(BasePlugin):
                         **({"category": "tool"} if response.tool_calls else {}),
                         "time": time.time(),
                         "users": users,
+                        # ★ 2026-10-11：Bot 自己说的话 ⇒ 发言人 id = 机器人自己 ✓
+                        #   （自我门槛就靠这一条把"bot 自语"认出来 ✓ 不漏挡 ✓）
+                        "speaker_id": _self_id,
                     }
                 ],
             )
@@ -4097,7 +4125,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
                     # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
-                    self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 6) or 6),
+                    self_drop_max=self._self_drop_max(),
                                     ),
                 "next_offset": offset + len(rows),
             },
@@ -4574,7 +4602,101 @@ class AlifeMemoryPlugin(BasePlugin):
         sid = str(getattr(event, "self_id", "") or "")
         if sid:
             self._self_id = sid
-        return sid or getattr(self, "_self_id", "")
+        if sid:
+            return sid
+        cached = getattr(self, "_self_id", "")
+        if cached:
+            return cached
+        try:
+            return str(self.store.get_state("self_id", "") or "")
+        except Exception:
+            return ""
+
+    async def _migrate_self_fact_settings(self):
+        """存量配置**一次性**迁移（★ 只动"自我认知"这两个键 ✓ 别的一律不碰 ✓）
+
+        背景：v2.22.0~2.22.4 里 `self_fact_max_importance` 默认是 6，且**没有总开关**；
+              现在新增总开关（默认**关**）+ 阈值默认 **4** ✓
+        迁移规则（**保守** ✓）：
+          · 缺 `self_fact_filter_enabled` ⇒ 补 **False（关）** ⇒ 升级后行为**完全不变** ✓
+          · `self_fact_max_importance == 6`（= 当年的默认值 ⇒ 用户没特意改过）
+            ⇒ 改成 **4**（新默认）—— 反正开关是关的 ⇒ **不影响任何行为** ✓
+          · 其它值 ⇒ **原样不动** ✓（用户特意设过 ⇒ 尊重 ✓）
+        安全：原子写 ✓ 只写这两个键 ✓ 跑完记标记（只跑一次 ✓）失败只记日志、绝不影响启动 ✓
+        """
+        try:
+            if str(self.store.get_state("cfg_migrate_self_fact", "") or "") == "1":
+                return
+            current = self.settings.model_dump()
+            changed = []
+            if "self_fact_filter_enabled" not in current:
+                current["self_fact_filter_enabled"] = False
+                changed.append("总开关=关")
+            if current.get("self_fact_max_importance") == 6:
+                current["self_fact_max_importance"] = 4
+                changed.append("门槛 6→4")
+            if changed:
+                path = get_config_path() / "plugins" / f"{PLUGIN_ID}.json"
+                config = dict(self.plugin_cfg)
+                config["alife"] = current
+                def save():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = path.with_suffix(".alife.tmp")
+                    temporary.write_text(dump(config), encoding="utf-8")
+                    temporary.replace(path)
+                await asyncio.to_thread(save)
+                self.plugin_cfg = config
+                self.ctx.plugin_mgr.plugin_configs[PLUGIN_ID] = config
+                self.settings = Settings(**current)
+                self._build_aux()
+                logger.info(
+                    "[记忆·Z] 存量配置迁移 ✓ 只调整了：%s（你特意改过的值一律不动 ✓ "
+                    "且总开关默认关 ⇒ 升级后行为与之前完全一致 ✓）",
+                    "、".join(changed),
+                )
+            await self.store.call("set_state", "cfg_migrate_self_fact", "1")
+        except Exception as exc:
+            logger.info("[记忆·Z] 存量配置迁移跳过（%s）—— 不影响启动 ✓", type(exc).__name__)
+
+    def _self_drop_max(self) -> int:
+        """自我认知门槛的**生效值** ✓
+
+        ★ 开关关闭 ⇒ 返回 0 ⇒ **一条都不挡**（与旧行为完全一致 ✓ 用户随时可关 ✓）
+        ★ 默认：开关**开** + 门槛 **4**（用户 2026-10-11 定的 ✓
+          —— 因为判据修准之后（真发言人 id ✓）才敢默认开 ✓）
+        """
+        if not bool(getattr(self.settings, "self_fact_filter_enabled", True)):
+            return 0
+        try:
+            return max(0, int(getattr(self.settings, "self_fact_max_importance", 4) or 0))
+        except (TypeError, ValueError):
+            return 4
+
+    async def _remember_self_id(self, event):
+        """记下「机器人自己的 id」并**持久化**（面板没有事件时也能读回来 ✓）
+
+        ★ 只在**值变化**时写库 ✓（每次事件都写 = 无谓 IO ✗ 还占事件循环 ✓）
+        """
+        sid = str(getattr(event, "self_id", "") or "")
+        if not sid:
+            return
+        self._self_id = sid
+        try:
+            if str(self.store.get_state("self_id", "") or "") != sid:
+                await self.store.call("set_state", "self_id", sid)
+            # ★ 2026-10-11：存量升级的**一次性迁移** ✓
+            #   把"机器人自己说过的记录"（role='assistant'）补上真正的发言人 id ✓
+            #   用户说的记录**一律留空**（未知）⇒ 永远不会被误判为自我 ✓（宁可不挡也不错挡 ✓）
+            if str(self.store.get_state("speaker_backfill", "") or "") != "1":
+                filled = await self.store.call("backfill_speaker_ids", sid)
+                await self.store.call("set_state", "speaker_backfill", "1")
+                logger.info(
+                    "[记忆·Z] 存量迁移：%d 条「机器人自己说过」的记录已补上发言人 id ✓"
+                    "（用户发言一律留空 = 未知 ⇒ 绝不会被误判为自我 ✓）",
+                    filled,
+                )
+        except Exception:
+            pass
 
     def _model_label_of(self):
         """返回 `ref -> "可读名 · 提供商"` 的解析函数（日志用 ✓ 与面板同一套规则 ✓）
@@ -4833,15 +4955,11 @@ class AlifeMemoryPlugin(BasePlugin):
         #   面板必须**能一眼看出**哪些是自我事实、哪些真的会被挡 ✗→✓
         #   判据与召回路径**完全同一个函数** ✓（low_value_self ✓）⇒ 永不打架 ✓
         #   注意 `src_user` 不是数据库列 ✗ 它是 attach_evidence 读时算的 ⇒ 先补上 ✓
+        # ★ 2026-10-11 修正：self_id 只能来自**事件里记下的真值**（含持久化读回 ✓）
+        #   绝不"推断" ✗ —— 之前用 users[0] 推断，结果把**用户**当成了机器人自己 ✗✗
+        #   （用户实测：周武说的话被标成「自我 / 不参与召回」✗）
         self_id = self._self_id_from(None)
-        if not self_id:
-            # ★ 兜底：面板可能在任何消息之前就被打开 ⇒ 从"助手发言记录"里推断 ✓
-            #   （推断不出就是 "" ⇒ 不标记 ✓ 绝不误判成"不是自我"或"是自我" ✗）
-            try:
-                self_id = await self.store.call("assistant_user_id")
-            except Exception:
-                self_id = ""
-        drop_max = int(getattr(self.settings, "self_fact_max_importance", 6) or 6)
+        drop_max = self._self_drop_max()
         try:
             rows = await self.store.call("attach_evidence", rows)
         except Exception:
