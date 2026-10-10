@@ -7,6 +7,7 @@ import time
 import logging
 from . import identity
 from .storage import Conflict          # 2026-09-18：压缩竞态要单独处理 ✓ 不当失败 ✓
+from .mchains import chain_refs
 from .retrieval import (
     tfield,
     bare_id,
@@ -1417,11 +1418,18 @@ class Engine:
         self, contract, purpose, payload, cfg, retry_timeout=True, forced=False,
         facts_cap=None,
     ):
-        model = (
-            cfg.compress_model
-            if purpose in ("compress", "fact_merge")
-            else cfg.audit_model
-        )
+        # ★ 2026-10-10：模型链路改为**有序回退链** ✓
+        #   · chain_refs 会把新字段（列表）+ 旧字段（最后一档）合成一条链 ✓
+        #   · 没配链 ⇒ 只有旧字段 ⇒ 与旧行为**逐字节一致** ✓
+        models = chain_refs(
+            cfg, "compress_models", "compress_model") if purpose in ("compress", "fact_merge") else chain_refs(
+            cfg, "audit_models", "audit_model")
+        # ★ 2026-10-10：**单档保持字符串** ✗→✓ —— 只有多档才传列表 ✓
+        #   理由：单档必须与旧版**逐字节一致**（类型也不能变 ✗）：
+        #   调用方/测试桩/日志都按字符串处理 ✓ 传列表会连锁出 20+ 个假失败 ✓
+        model = models[0] if len(models) == 1 else (models or None)
+        # 每档限时 = 总超时 / 档数 ⇒ **链越长每档越短** ✓（总耗时仍受外层 wait_for 约束 ✓）
+        link_timeout = (cfg.model_timeout / max(1, len(models))) if len(models) > 1 else None
         instruction = COMMON_INSTRUCTION + build_instruction(
             purpose, cfg, forced=forced, facts_cap=facts_cap
         )
@@ -1443,7 +1451,12 @@ class Engine:
                 schema = strip_schema_titles(contract.model_json_schema())
             try:
                 text = await asyncio.wait_for(
-                    self.model_call(model, purpose, instruction, schema, payload),
+                    # ★ 2026-10-10：**单档不传 link_timeout** ✗→✓
+                    #   （调用形态与旧版逐字节一致 ✓ 否则旧调用方/测试桩会 TypeError ✗）
+                    (self.model_call(model, purpose, instruction, schema, payload,
+                                      link_timeout=link_timeout)
+                     if link_timeout else
+                     self.model_call(model, purpose, instruction, schema, payload)),
                     cfg.model_timeout,
                 )
                 result = parse_output(text, contract).model_dump()

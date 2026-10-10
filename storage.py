@@ -3424,7 +3424,7 @@ class Store:
                 )
             ]
 
-    def covering_fact(self, sid, content, threshold=0.4):
+    def covering_fact(self, sid, content, threshold=0.4, limit=1500):
         """该内容是否已被某条事实覆盖（零模型）。
 
         用于永久记忆的「入闸」：能被事实覆盖的信息没必要再占一个每轮常驻的席位。
@@ -3438,11 +3438,28 @@ class Store:
             rows = [
                 self.row(r)
                 for r in db.execute(
+                    # ★ 2026-10-10 修：原来只有 `LIMIT 400` **没有 ORDER BY** ✗
+                    #   ⇒ 取哪 400 条由 SQLite 自己定 ⇒ **判据不确定** ✗（两次结果可能不同）
+                    #   ⇒ 高价值旧事实可能永远不参与"覆盖"判定 ⇒ 重复照样入库 ✗
+                    #   现在：按「重要度 ↓、新近 ↓」排序 ✓（最可能构成"覆盖"的先看 ✓）
+                    #   上限放宽到 1500 且**可配** ✓（零模型纯内存相似度 ✓ 实测 10ms 级 ✓）
                     "SELECT * FROM facts WHERE deleted=0 AND merge_pending=0"
-                    " AND (sid=? OR sid='global') LIMIT 400",
-                    (sid,),
+                    " AND (sid=? OR sid='global')"
+                    " ORDER BY importance DESC, created DESC LIMIT ?",
+                    (sid, max(1, int(limit or 1500))),
                 )
             ]
+            # ★ 截断必须**可见** ✗→✓：静默截断会让人以为判据没问题，其实是漏判 ✓
+            total = db.execute(
+                "SELECT count(*) FROM facts WHERE deleted=0 AND merge_pending=0"
+                " AND (sid=? OR sid='global')",
+                (sid,),
+            ).fetchone()[0]
+        if total > len(rows):
+            logger.info(
+                "覆盖判定已截断（候选 %d/%d）⇒ 可能放过重复；需要时调大 cover_check_limit ✓",
+                len(rows), total,
+            )
         best, score = None, 0.0
         for row in rows:
             current = similarity(text, row["content"], min_overlap=3)

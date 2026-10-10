@@ -77,6 +77,35 @@ IMPORTANCE_OPTIONS = {
 # ────────────────────────── 客户端 ──────────────────────────
 
 
+def _with_prompt_append(payload, extra):
+    """把用户自定义提示词**追加**到本次请求所有 `instructions` 末尾 ✓
+
+    2026-10-10：用户要求能自己调 JEV 提示词 ✓
+    —— **只碰 instructions 的正文文本** ✓，绝不动 `type` / `criteria` 结构 ✓
+       （那是协议 ✓ 改了直接报错 ✗）
+    —— 五个链路（召回/合并/审计/重要度/压缩）**一处生效** ✓（在 JevClient.call 入口统一处理 ✓）
+    —— 留空 ⇒ 原样返回 ⇒ 与旧行为**逐字节一致** ✓（零回归 ✓）
+    """
+    text = str(extra or "").strip()
+    if not text:
+        return payload
+
+    def walk(node):
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                if k == "instructions" and isinstance(v, str) and v.strip():
+                    out[k] = v.rstrip() + "\n\n【用户附加指令】\n" + text
+                else:
+                    out[k] = walk(v)
+            return out
+        if isinstance(node, list):
+            return [walk(x) for x in node]
+        return node
+
+    return walk(payload)
+
+
 class JevClient:
     COOLDOWN = 300.0                 # ★ 熔断冷却秒数（ready/cooldown_left/面板共用同一来源 ✓）
     """最小原生客户端：同步 urllib 跑在 to_thread 里（零新增依赖，可硬超时）。
@@ -84,7 +113,8 @@ class JevClient:
     ★ 熔断：连续失败 3 次 → 冷却 300 秒内直接返回 None（不再占用时间）。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 4.0):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 4.0, prompt_append: str = ""):
+        self.fallbacks = ()          # ★ 2026-10-10：有序回退链（默认空=只用主档）
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         # ★ 必须走 endpoint_of 规整：OpenAI 类型提供商的 base_url 常带 /v1，
         #   直接拼会变成 …/v1/v1/systemone ✗（实测：解析对了但真机调用失败）
@@ -92,6 +122,8 @@ class JevClient:
         self.api_key = api_key or ""
         self.model = model or DEFAULT_MODEL
         self.timeout = float(timeout)
+        # ★ 2026-10-10：面板可编辑的附加指令（append 到所有 instructions 末尾 ✓ 不改结构 ✓）
+        self.prompt_append = str(prompt_append or "").strip()
         self.fails = 0
         self.opened_at = 0.0
         self.last_error = ""      # ★ 面板状态灯用：最近一次失败原因 ✓（只留 200 字 ✓）
@@ -136,22 +168,48 @@ class JevClient:
 
     # ---------- 同步实现 ----------
     def _post_sync(self, payload: dict, timeout: float) -> Optional[dict]:
-        req = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": "Bearer " + self.api_key,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-        return json.loads(raw)
+        """投递 —— **主档 + 有序回退链**（2026-10-10 用户需求）
+
+        · 主档 = endpoint/api_key/model ⇒ **与旧版逐字节一致**（默认无链时零变化）
+        · 回退档 = `JevConfig.fallbacks`（来自 `jev_models`，有序 ≤10）
+        · 逐档尝试：超时 / 连接失败 / HTTP 错 / 坏 JSON ⇒ 下一档
+        · 全档失败 ⇒ 抛**最后一个**异常 ⇒ `call()` 照旧 `_bad()` / 熔断层
+          （语义、日志、熔断计数全不变 ⇒ 只是多了几次尝试）
+        """
+        links = [(self.endpoint, self.api_key, self.model)] + [
+            lnk for lnk in (getattr(self, "fallbacks", ()) or ())
+            if tuple(lnk) != (self.endpoint, self.api_key, self.model)
+        ]
+        last_exc = None
+        for idx, (url, key, model_name) in enumerate(links, 1):
+            body = dict(payload)
+            if model_name:
+                body["model"] = model_name
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": "Bearer " + (key or ""),
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                return json.loads(raw)
+            except Exception as exc:      # noqa: BLE001 —— 逐档兜住，最后一档才抛
+                last_exc = exc
+                if len(links) > 1:
+                    logger.info("[记忆·Z] JEV 第 %d 档失败（%s）⇒ 换下一档",
+                                idx, type(exc).__name__)
+        raise last_exc if last_exc else RuntimeError("jev_no_endpoint")
 
     # ---------- 对外 ----------
     async def call(self, state: str, questions: dict, timeout: Optional[float] = None) -> Optional[dict]:
         """返回 {"answers": {...}, "usage": {...}}；**任何失败都返回 None**。"""
+        # ★ 2026-10-10：用户附加指令在这里**一处生效**（五个链路全覆盖 ✓ 留空则零变化 ✓）
+        questions = _with_prompt_append(questions, self.prompt_append)
         if not self.ready or not questions:
             return None
         payload = {"model": self.model, "state": state, "questions": questions}
@@ -242,10 +300,10 @@ def _pick(cfg: dict, names) -> str:
 class JevConfig:
     """不可变快照：一次事件只解析一次，避免热路径反复读配置。"""
 
-    __slots__ = ("enabled", "base_url", "api_key", "model", "timeout", "sample", "uuid")
+    __slots__ = ("enabled", "base_url", "api_key", "model", "timeout", "sample", "uuid", "prompt_append", "fallbacks")
 
     def __init__(self, enabled=False, base_url="", api_key="", model="",
-                 timeout=4.0, sample=1.0, uuid=""):
+                 timeout=4.0, sample=1.0, uuid="", prompt_append=""):
         self.enabled = bool(enabled)
         self.base_url = base_url or DEFAULT_BASE_URL
         self.api_key = api_key or ""
@@ -253,13 +311,59 @@ class JevConfig:
         self.timeout = max(0.5, float(timeout or 4.0))
         self.sample = min(1.0, max(0.0, float(sample if sample is not None else 1.0)))
         self.uuid = uuid or ""
+        # ★ 2026-10-10：用户自定义的 JEV 附加指令（留空=默认行为 ✓）
+        self.prompt_append = str(prompt_append or "").strip()[:4000]
 
     @property
     def ready(self) -> bool:
         return bool(self.enabled and self.api_key)
 
     def client(self) -> Optional[JevClient]:
-        return JevClient(self.base_url, self.api_key, self.model, self.timeout) if self.ready else None
+        if not self.ready:
+            return None
+        client = JevClient(self.base_url, self.api_key, self.model, self.timeout,
+                           prompt_append=self.prompt_append)
+        # ★ 2026-10-10：JEV **有序回退链**（≤10）
+        #   挂在实例上而不是改 JevClient 签名 ⇒ 对既有调用方零影响（风险最小）
+        client.fallbacks = tuple(getattr(self, "fallbacks", ()) or ())
+        return client
+
+
+def _resolve_jev_chain(settings, provider_mgr, primary, primary_ref):
+    """把 `jev_models`（有序 ≤10）解析成 [(base_url, api_key, model), ...]
+
+    与主端点**同一套解析**（get_model_info ⇒ provider_config ⇒ base/key）⇒ 不新增概念。
+    跳过：与主端点重复的档；解析不出 base/key 的档（记一条 info，不静默）。
+    """
+    refs = getattr(settings, "jev_models", None) or []
+    if not isinstance(refs, (list, tuple)):
+        return []
+    out, seen = [], {tuple(primary)}
+    for ref in list(refs)[:10]:
+        ref = str(ref or "").strip()
+        if not ref or ref == str(primary_ref or "").strip():
+            continue
+        pid, mid = split_uuid(ref)
+        if not pid or not mid or provider_mgr is None:
+            continue
+        try:
+            info = provider_mgr.get_model_info(pid, mid)
+            conf = (getattr(info, "provider_config", None) or {}) if info else {}
+            if not isinstance(conf, dict):
+                conf = {}
+            base = _pick(conf, _BASE_KEYS)
+            key = _env(_pick(conf, _KEY_KEYS))
+            if not base or not key:
+                logger.info("[记忆·Z] JEV 回退链跳过 %s（缺接口地址/密钥）", ref)
+                continue
+            link = (base, key, mid)
+            if link in seen:
+                continue
+            seen.add(link)
+            out.append(link)
+        except Exception:      # noqa: BLE001
+            continue
+    return out
 
 
 def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
@@ -309,11 +413,17 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
         sample = float(get("jev_sample", 1.0))
     except (TypeError, ValueError):
         sample = 1.0
-    return JevConfig(
+    config = JevConfig(
         enabled=bool(get("jev_enabled", False)),
         base_url=base, api_key=key, model=model,
         timeout=timeout, sample=sample, uuid=uuid,
+        prompt_append=get("jev_prompt_append", ""),
     )
+    # ★ 2026-10-10：JEV **有序回退链**（≤10；解析不到的档自动跳过）
+    config.fallbacks = tuple(
+        _resolve_jev_chain(settings, provider_mgr, (base, key, model), uuid)
+    )
+    return config
 
 # ────────────────── 问题构造（★两个实测踩过的坑，必须遵守）──────────────────
 #   坑1：候选/事实必须**自包含**放进 instructions —— 非生成模型没有指代消解，

@@ -567,7 +567,10 @@ def test_model_options_show_provider_name():
     别再显示内部 id 一串字符 ✗ —— 用户会弄混（真实反馈）。前端要有回退，后端故障时不至于空白 ✗
     """
     app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
-    assert "m.provider" in app and "m.model || m.name || m.id" in app, "选项文本必须用显示名并带回退"
+    # 2026-10-10：标签顺序改为「可读名 · 提供商」（3.0 的 id 是 uuid ✗ 必须让用户看懂 ✓）
+    assert "m.provider" in app, "选项文本必须带提供商显示名 ✗"
+    assert ("m.name || m.model || m.id" in app) or ("m.model || m.name || m.id" in app), (
+        "选项文本必须用显示名并带回退 ✗")
     assert "esc(m.id)" not in app.split("m.provider")[1][:600], "不许再直接显示内部 id ✗"
     main = (ROOT / "main.py").read_text(encoding="utf-8")
     assert 'provider.get("name") or pid' in main, "后端必须带提供商显示名（缺了回退到 pid）"

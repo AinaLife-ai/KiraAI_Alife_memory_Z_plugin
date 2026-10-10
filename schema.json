@@ -342,6 +342,28 @@
         "default": false,
         "description": "压缩前先筛一遍：只把「值得长期记住」的消息送进压缩输入，整批都没价值时直接跳过这次压缩调用（记录留着，下次还会再抽，不丢内容）。"
       },
+      "jev_prompt_append": {
+        "type": "string",
+        "name": "JEV 附加指令（可编辑）",
+        "default": "",
+        "description": "追加到所有 JEV 任务（召回/合并/审计/重要度/压缩）的 instructions 末尾。留空=默认行为；只改正文文本，不改判定结构。"
+      },
+      "self_fact_max_importance": {
+        "type": "integer",
+        "name": "自我认知事实召回门槛",
+        "default": 6,
+        "description": "bot 自己产出的事实（来源=自己）中重要度 ≤ 此值的不参与召回/被动注入。0=关闭（=旧行为）。面板、画像、主动检索仍能查到，不丢记忆。",
+        "minimum": 0,
+        "maximum": 10
+      },
+      "cover_check_limit": {
+        "type": "integer",
+        "name": "覆盖判定扫描上限",
+        "default": 1500,
+        "description": "永久记忆入库前的「覆盖判定」扫描上限：按重要度/新近排序比对这么多条事实。越大越不容易放过重复，零模型、只费一点 CPU。",
+        "minimum": 100,
+        "maximum": 20000
+      },
       "rerank_model": {
         "type": "model_select",
         "name": "启用模型重排（可选，默认关闭）",
@@ -914,6 +936,50 @@
         "name": "跨会话跳过折叠原文",
         "default": true,
         "description": "跨会话召回时，若某条旧原文的摘要本轮也在结果里，就只保留摘要（避免重复注入）；摘要不在结果里时仍保留原文，避免漏掉唯一命中的那条。想要原文细节可用行首序号展开。"
+      },
+      "compress_models": {
+        "type": "multi_select",
+        "name": "压缩/合并回退链（≤10，按序回退）",
+        "default": [],
+        "description": "压缩/合并链路的有序回退链（最多 10 个）。按顺序尝试；某个失败（异常/超时）自动换下一个；全失败再回落上面的「压缩与合并模型」，最后才用宿主默认模型。留空=只用单模型字段（与旧版一致）。",
+        "item_type": "string",
+        "source": "model",
+        "model_type": "llm",
+        "max_items": 10,
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
+      },
+      "audit_models": {
+        "type": "multi_select",
+        "name": "审计回退链（≤10，按序回退）",
+        "default": [],
+        "description": "审计链路的有序回退链（最多 10 个）。语义同上：按序尝试，全失败回落「审计模型」→宿主默认。留空=只用单模型字段。",
+        "item_type": "string",
+        "source": "model",
+        "model_type": "llm",
+        "max_items": 10,
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
+      },
+      "jev_models": {
+        "type": "multi_select",
+        "name": "JEV 回退链（≤10，按序回退）",
+        "default": [],
+        "description": "JEV 决策链路的有序回退链（最多 10 个）。按序尝试；全失败回落「JEV 决策模型」→宿主默认。留空=只用单模型字段。",
+        "item_type": "string",
+        "source": "model",
+        "model_type": "llm",
+        "max_items": 10,
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
+      },
+      "rerank_models": {
+        "type": "multi_select",
+        "name": "重排回退链（≤10，按序回退）",
+        "default": [],
+        "description": "重排链路的有序回退链（最多 10 个）。按序尝试；全失败回落「启用模型重排」字段→JEV/宿主默认。留空=只用单模型字段。",
+        "item_type": "string",
+        "source": "model",
+        "model_type": "llm",
+        "max_items": 10,
+        "hint": "按顺序点击 = 回退优先级（最多 10 个）。某个模型失败会自动换下一个；全部失败才回落上面的单模型字段。面板里可上下调序。"
       }
     }
   }

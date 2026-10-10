@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import random
 import time
@@ -43,6 +44,7 @@ from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime, source_roots
+from .mchains import chain_refs
 from .retrieval import (
     strip_at_ids,
     tfield,
@@ -72,6 +74,7 @@ from .retrieval import (
     short_day,
     is_tool_result,
     is_tool_step,
+    low_value_self,          # ★ 2026-10-10：自我认知门槛（两处同一判据 ✓）
 )
 from .setting_help import HELP
 from .config_migrate import migrate as migrate_config
@@ -528,8 +531,11 @@ class AlifeMemoryPlugin(BasePlugin):
             except Exception:
                 log_path = None
             self.decisions = Decisions(self.settings, mgr, log_path)
+            # ★ 2026-10-10：重排也支持有序回退链（单档保持字符串 ⇒ 与旧版一致）
+            _rr = chain_refs(self.settings, "rerank_models", "rerank_model")
+            _rmodel = _rr[0] if len(_rr) == 1 else (_rr or "")
             self.reranker = Reranker(
-                getattr(self.settings, "rerank_model", "") or "",
+                _rmodel,
                 mgr,
                 self.decisions,
                 (getattr(self.settings, "rerank_timeout_ms", 1500) or 1500) / 1000.0,
@@ -1035,18 +1041,51 @@ class AlifeMemoryPlugin(BasePlugin):
         ]
         return values
 
-    async def model_call(self, model, purpose, instruction, schema, payload):
-        client = (
-            self.ctx.get_llm_client(model)
-            if model
-            else (
-                self.ctx.get_default_fast_llm_client()
-                if purpose == "compress"
-                else self.ctx.get_default_llm_client()
+    def _llm_client(self, ref):
+        """按 `provider_id:model_id` 引用取模型客户端 —— **双世代唯一入口** ✓
+
+        3.0：`get_llm_client(model_uuid="provider:model_id", llm_type=None)` ✓
+             （官方内置插件一律写 `model_uuid=`，见 core/plugin/builtin_plugins/sticker/main.py:110 ✓）
+        2.x：`get_llm_client(model)` —— **只有位置参数**，没有 `model_uuid` 关键字 ✗
+
+        ⇒ 用 `inspect.signature` **看一眼参数名** ✓（不试调 ✗ 无副作用 ✓），结果缓存 ✓
+          （热路径上不再反复判世代 ✓ "不冗余" ✓）
+        """
+        ctx = self.ctx
+        want_kw = getattr(self, "_llm_ref_kw", None)
+        if want_kw is None:
+            try:
+                want_kw = "model_uuid" in inspect.signature(ctx.get_llm_client).parameters
+            except (TypeError, ValueError):
+                want_kw = False
+            self._llm_ref_kw = want_kw
+        if want_kw:
+            return ctx.get_llm_client(model_uuid=ref)
+        return ctx.get_llm_client(ref)
+
+    async def model_call(self, model, purpose, instruction, schema, payload, link_timeout=None):
+        # ★ 2026-10-10：**有序回退链** ✓
+        #   `model` 允许两种形态：
+        #     · 字符串 = 单个模型引用 ⇒ **与旧行为逐字节一致** ✓（异常类型/时点都不变 ✓）
+        #     · 列表   = 回退链 ⇒ 逐个尝试；取客户端失败 / 超时 / 连接失败 / 意外工具调用 /
+        #                 空响应 ⇒ **按序换下一档** ✓；全部失败才抛（语义：单档时抛原始异常类型 ✓）
+        #   调用方（engine）用 `link_timeout` 给每档限时 ⇒ 链越长每档越短 ✓
+        #   **不会出现 10 档 × 全超时** 的雪崩 ✓
+        refs = ([model] if isinstance(model, str) else
+                [str(r).strip() for r in (model or []) if str(r or "").strip()])
+        chain_errors = []
+        client = None
+        if len(refs) <= 1:
+            # 单模型（含空值=宿主默认）：保持旧路径 ✓ 一次取到就往下走 ✓
+            client = (
+                self._llm_client(refs[0]) if refs else (
+                    self.ctx.get_default_fast_llm_client()
+                    if purpose == "compress"
+                    else self.ctx.get_default_llm_client()
+                )
             )
-        )
-        if client is None:
-            raise ValueError("model_not_configured")
+            if client is None:
+                raise ValueError("model_not_configured")
         cfg = self.settings
         # 人设是很多用户的大头（数千字），按用途开关，不无脑塞进每一次调用。
         wants_persona = (
@@ -1076,16 +1115,62 @@ class AlifeMemoryPlugin(BasePlugin):
             ]
         )
         # Host providers do not uniformly expose response_format; validation remains mandatory.
-        try:
-            response = await client.chat(req)
-        except APITimeoutError:
-            raise TimeoutError() from None
-        except APIConnectionError:
-            raise ConnectionError() from None
-        if response.tool_calls:
-            raise ValueError("unexpected_tool_call")
-        return response.text_response
-
+        # ★ 2026-10-10：多档回退在这里生效 ✓（单档 = 旧路径 ✓ 异常类型不变 ✓）
+        if len(refs) <= 1:
+            try:
+                response = await client.chat(req)
+            except APITimeoutError:
+                raise TimeoutError() from None
+            except APIConnectionError:
+                raise ConnectionError() from None
+            if response.tool_calls:
+                raise ValueError("unexpected_tool_call")
+            return response.text_response
+        
+        last_exc = None
+        for idx, ref in enumerate(refs, 1):
+            try:
+                client = self._llm_client(ref)
+            except Exception as exc:
+                client = None
+                chain_errors.append("第%d档 %s 取客户端失败(%s)" % (idx, ref, type(exc).__name__))
+            if client is None:
+                if not chain_errors or not chain_errors[-1].startswith("第%d档" % idx):
+                    chain_errors.append("第%d档 %s 无客户端" % (idx, ref))
+                continue
+            try:
+                call = client.chat(req)
+                response = (await asyncio.wait_for(call, link_timeout)
+                            if link_timeout else await call)
+            except (APITimeoutError, asyncio.TimeoutError):
+                chain_errors.append("第%d档 %s 超时" % (idx, ref))
+                last_exc = TimeoutError()
+                continue
+            except APIConnectionError:
+                chain_errors.append("第%d档 %s 连接失败" % (idx, ref))
+                last_exc = ConnectionError()
+                continue
+            except Exception as exc:
+                chain_errors.append("第%d档 %s 异常(%s)" % (idx, ref, type(exc).__name__))
+                last_exc = exc
+                continue
+            if response.tool_calls:
+                chain_errors.append("第%d档 %s 意外工具调用" % (idx, ref))
+                continue
+            text = response.text_response
+            if not (text or "").strip():
+                chain_errors.append("第%d档 %s 空响应" % (idx, ref))
+                continue
+            if idx > 1:
+                logger.info(
+                    "[记忆·Z] 模型链路 %s 已回退到第 %d 档：%s ✓（前面失败的：%s）",
+                    purpose, idx, ref, "；".join(chain_errors),
+                )
+            return text
+        
+        # 全链失败 ⇒ 抛最后那个异常类型 ✓（调用方重试逻辑不变 ✓）
+        logger.info("[记忆·Z] 模型链路 %s 全部失败：%s", purpose, "；".join(chain_errors))
+        raise (last_exc or RuntimeError("model_chain_failed: " + "；".join(chain_errors)))
     async def embed(self, text, cfg):
         if not cfg.semantic_enabled:
             return None, ""
@@ -1600,6 +1685,10 @@ class AlifeMemoryPlugin(BasePlugin):
         """JEV/重排相关配置指纹：变了就重建决策层（与在哪改的无关）。"""
         keys = ("jev_enabled", "jev_model", "jev_base_url", "jev_api_key",
                 "jev_model_name", "jev_timeout_ms", "jev_sample", "jev_recall",
+                # ★ 2026-10-10：附加指令也要进指纹 ✗→✓
+                #   （否则用户改了提示词，已建好的 JEV 决策层不会重建 ⇒ 改了像没改 ✗）
+                "jev_prompt_append",
+                "jev_models",
                 "jev_merge", "jev_audit", "jev_importance",
                 "rerank_enabled", "rerank_model", "rerank_timeout_ms")
         return tuple(str(getattr(settings, k, "")) for k in keys)
@@ -2538,6 +2627,14 @@ class AlifeMemoryPlugin(BasePlugin):
                     x for x in fact_pool
                     if not is_tool_result(x.get("content"))
                     and not media_only(x.get("content") or "", keep_names)
+                    # ★ 2026-10-10：**轮换槽也过自我认知门槛** ✓（用户点名问的就是这里 ✓）
+                    #   轮换池是独立 SQL 查询 ✗ **不过 pack_facts** ⇒ 必须单独接上 ✓
+                    #   判据与 self_only_last 是**同一个函数** ✓（一处定义 ✓ 永不走偏 ✓）
+                    and not low_value_self(
+                        x,
+                        getattr(event, "self_id", ""),
+                        int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
+                    )
                 ]
             # ★ 2026-09-18 批次 2：**下沉** ✓
             #   只影响这一轮"常驻"的取用 ✓ —— 分数低（且重要度 ≤7）的先让位 ✓
@@ -2857,6 +2954,8 @@ class AlifeMemoryPlugin(BasePlugin):
             codes=fact_shorts,
             # v2.18.9 回声防线：让渲染器能给"来源是助手自己"的事实打 self ✓
             self_id=getattr(event, "self_id", ""),
+            # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
+            self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
                     ),
         }
         if users:
@@ -3843,7 +3942,10 @@ class AlifeMemoryPlugin(BasePlugin):
         )
         # 入闸：能被既有事实覆盖的信息，不再占一个每轮常驻的席位
         if cfg.memorize_cover_check:
-            covered = await self.store.call("covering_fact", value.sid, value.content)
+            covered = await self.store.call(
+                "covering_fact", value.sid, value.content,
+                limit=int(getattr(cfg, "cover_check_limit", 1500) or 1500),
+            )
             if covered:
                 fact = covered["fact"]
                 return self.recall_result(
@@ -3979,6 +4081,8 @@ class AlifeMemoryPlugin(BasePlugin):
                     ),
                     # v2.18.9 回声防线：与感知块一致 ✓
                     self_id=getattr(event, "self_id", ""),
+                    # ★ 2026-10-10：自我认知事实的重要度门槛（默认 6 / 0=关）—— 低价值 bot 自述不进召回
+                    self_drop_max=int(getattr(self.settings, "self_fact_max_importance", 0) or 0),
                                     ),
                 "next_offset": offset + len(rows),
             },
@@ -4445,6 +4549,23 @@ class AlifeMemoryPlugin(BasePlugin):
                 await self.migrate()
             return {"ok": True, "revision": revision(self.settings)}
 
+    @staticmethod
+    def _model_entry_name(mid, entry):
+        """解析「模型显示名」—— **双世代同一个函数** ✓
+
+        3.0（`model_config_version=2`）：key 是 uuid ✗ 一串哈希用户看不懂 ✗
+            可读名在 `entry["model_name"]` ✓，旧引用在 `entry["legacy_ids"]` ✓
+        2.x / v1：key **本身就是可读名** ✓ ⇒ 原样返回 ✓（行为与今天完全一致 ✓ 零回归 ✓）
+
+        返回 `(显示名, 旧引用列表)` ✓
+        """
+        if isinstance(entry, dict):
+            name = str(entry.get("model_name") or "").strip()
+            if name:
+                legacy = [str(x) for x in (entry.get("legacy_ids") or []) if x]
+                return name, legacy
+        return str(mid), []
+
     @register.api(method="GET", path="/models", auth=True)
     async def api_models(self):
         result = []
@@ -4455,14 +4576,19 @@ class AlifeMemoryPlugin(BasePlugin):
         providers = (kira_config.get("providers") or {}) if isinstance(kira_config, dict) else {}
         for pid, provider in providers.items():
             for kind in ("llm", "embedding"):
-                for mid in provider.get("model_config", {}).get(kind, {}):
+                for mid, entry in provider.get("model_config", {}).get(kind, {}).items():
+                    # ★ 2026-10-10：显示名与内部 id **分开** ✓
+                    #   3.0 的 key 是 uuid ✗（用户看到一串哈希 ✗ 截图实证）；
+                    #   可读名在 entry["model_name"] ✓，旧引用在 entry["legacy_ids"] ✓
+                    display, legacy = self._model_entry_name(mid, entry)
                     result.append({
-                        "id": f"{pid}:{mid}",
-                        "name": mid,
-                        "model": mid,
+                        "id": f"{pid}:{mid}",      # ★ 传参用这个（= 3.0 的 model_uuid 格式 ✓）
+                        "name": display,           # ★ 显示用这个（人类可读 ✓）
+                        "model": display,
                         # v2.18.1：带上"用户在 KiraAI 里看到的提供商名字"，前端别再显示内部 id ✗
                         "provider": provider.get("name") or pid,
                         "kind": kind,
+                        "legacy": legacy,          # ★ 老配置里存的旧名 ⇒ 前端仍能回显 ✓
                     })
         return {"models": result}
 
