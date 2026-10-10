@@ -348,11 +348,17 @@
         "default": "",
         "description": "追加到所有 JEV 任务（召回/合并/审计/重要度/压缩）的 instructions 末尾。留空=默认行为；只改正文文本，不改判定结构。"
       },
+      "self_fact_filter_enabled": {
+        "type": "switch",
+        "name": "自我认知过滤总开关",
+        "default": false,
+        "description": "自我认知过滤总开关：开=机器人自己说的、重要度不超过门槛的事实不参与召回；关=一条都不挡（与旧行为一致）。判据看谁说的，用户说的话永不挡。"
+      },
       "self_fact_max_importance": {
         "type": "integer",
         "name": "自我认知事实召回门槛",
-        "default": 6,
-        "description": "bot 自己产出的事实（来源=自己）中重要度 ≤ 此值的不参与召回/被动注入。0=关闭（=旧行为）。面板、画像、主动检索仍能查到，不丢记忆。",
+        "default": 4,
+        "description": "自我事实的召回门槛（配合上面的总开关）：重要度 ≤ 此值的自我事实不参与召回/被动注入。0=等效关闭。面板、画像、主动检索仍能查到，不丢记忆。",
         "minimum": 0,
         "maximum": 10
       },

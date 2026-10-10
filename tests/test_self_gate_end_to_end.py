@@ -1,15 +1,20 @@
-"""⑤ 自我认知门槛 **端到端**：从"来源记录"到"真被挡下"的完整链路 ✓
+"""⑤ 自我认知门槛 **端到端**：不漏挡、也不错挡（2026-10-11 大修后重写 ✓）
 
-为什么必须有这个测试（2026-10-10 实测发现的坑 ✗→✓）
-- `src_user` **不是数据库列** ✗ —— 它是 `storage.attach_evidence()` 在**读取时**
-  从事实的 `sources`（来源记录）里算出来的（`records.users[0]` = 说话人 ✓）
-- 所以任何"拿裸查询结果直接过滤自我事实"的代码都是**静默空转** ✗
-  （看着接了、其实 `src_user` 是 None ⇒ 永不触发 ✗）
-- 本轮就抓到过一处：**轮换池**（独立 SQL ✗ 不过 pack_facts ✗）⇒ 已在过滤前补
-  `attach_evidence` ✓（main.py 轮换槽那段）
+背景（两次踩坑，值得留档）
+- 坑①：`src_user` 原来取 `records.users[0]` ✗ —— 但 `users` 是**可见范围**（谁能看到），
+  **不是发言人** ✗ ⇒ 私聊里可见范围就是对方 ⇒ 把**用户**当成了机器人自己 ✗
+  （用户实测截图：周武说的话被标成「自我 / 不参与召回」✗）
+- 坑②：面板请求没有事件 ⇒ 我一度"从 users[0] 推断 bot id" ✗ ⇒ 推断出的是用户 ✗✗
+- 修法：
+  · 记录里**真存发言人 id**（新列 `records.speaker_id` ✓ 捕获时写入 ✓）
+  · `src_user` = 该列 ✓；老记录没有 ⇒ 空 = **未知** ⇒ 不判自我 ✓（宁可不挡，不错挡 ✓）
+  · 面板只用**事件里缓存/持久化**的 self_id ✓ 不猜 ✓
 """
+import json
 import os
 import sys
+import time
+import types
 from pathlib import Path
 
 import pytest
@@ -24,9 +29,6 @@ if str(ROOT) not in sys.path:
 
 import asyncio
 import importlib
-import json
-import time
-import types
 
 pkg = types.ModuleType("alife_selfgate")
 pkg.__path__ = [str(ROOT)]
@@ -36,33 +38,34 @@ storage = importlib.import_module("alife_selfgate.storage")
 retrieval = importlib.import_module("alife_selfgate.retrieval")
 
 SID = "qq:gm:e2e"
-BOT = "bot-self-id"
+BOT = "qq:9999"          # 机器人自己的 id（形如 adapter:id ✓）
+USER = "qq:1001"         # 用户
 run = asyncio.run
 
 
-def _plugin(tmp_path):
+def _plugin(tmp_path, **cfg):
     m.get_data_path = lambda: tmp_path
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp_path,
         plugin_mgr=types.SimpleNamespace(plugin_configs={}),
     )
-    p = m.AlifeMemoryPlugin(ctx, {"alife": {"probability": 0.0, "audit_enabled": False}})
+    settings = {"alife": {"probability": 0.0, "audit_enabled": False}}
+    settings["alife"].update(cfg)
+    p = m.AlifeMemoryPlugin(ctx, settings)
     run(p.initialize())
     return p, p.store
 
 
-def _seed(store, content, importance, speakers):
-    """造一条**真记录** + 一条指向它的事实（和真实捕获路径同形 ✓）。"""
+def _seed(store, content, importance, speaker_id, speaker_name="某人"):
+    """造一条**真记录**（含真正的发言人 id ✓）+ 一条指向它的事实 ✓"""
     rid = "rec-" + str(abs(hash(content)) % 10**8)
     now = time.time()
     with store.connect() as db:
         db.execute(
             "INSERT INTO records(id,sid,role,level,start,end,summary,content,users,"
-            "position,created,search_body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            # ★ role 要与说话人一致：bot 发言 = assistant ✓（否则 assistant_user_id 推断不出来 ✗）
-            (rid, SID, "assistant" if speakers and speakers[0] == BOT else "user",
-             "L0", now, now, content, content,
-             json.dumps(speakers), 0, now, content),
+            "speaker,speaker_id,position,created,search_body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, SID, "assistant" if speaker_id == BOT else "user", "L0", now, now,
+             content, content, json.dumps([USER]), speaker_name, speaker_id, 0, now, content),
         )
         db.execute(
             "INSERT INTO facts(id,sid,category,subject,content,reason,scenario,tags,"
@@ -74,76 +77,92 @@ def _seed(store, content, importance, speakers):
     return rid
 
 
-def txt_of(x):
-    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
-
-
-def test_src_user_comes_from_source_record(tmp_path):
-    """① attach_evidence 能把「来源记录的说话人」算成 src_user ✓"""
-    p, store = _plugin(tmp_path)
-    _seed(store, "我说话有点啰嗦", 3, [BOT])
+def _facts(store):
     rows = [dict(r) for r in run(store.call("facts", sid=SID, limit=50))]
-    assert rows, "事实没写进去 ✗"
-    assert rows[0].get("src_user") is None, "裸查询不该有 src_user（它是读时算的 ✓）"
-    rows = run(store.call("attach_evidence", rows))
-    assert rows[0]["src_user"] == BOT, "attach_evidence 没算出发言人 ✗"
+    return run(store.call("attach_evidence", rows))
 
 
-def test_gate_fires_only_after_evidence(tmp_path):
-    """② 补了 src_user ⇒ 门槛真触发；不补 ⇒ 静默不触发（本轮修的就是它 ✗）"""
+def test_src_user_is_the_true_speaker_not_visibility(tmp_path):
+    """★ 坑①回归：src_user 必须是**真正的发言人**，不能拿"可见范围"充数 ✗"""
     p, store = _plugin(tmp_path)
-    _seed(store, "我说话有点啰嗦", 3, [BOT])
-    _seed(store, "萤火喜欢甜口蛋糕", 8, ["u1"])
-    raw = [dict(r) for r in run(store.call("facts", sid=SID, limit=50))]
-    assert all(retrieval.low_value_self(r, BOT, 6) is False for r in raw), "裸行不该被判自我（src_user 还没算 ✓）"
-    ev = run(store.call("attach_evidence", raw))
-    dropped = [r for r in ev if retrieval.low_value_self(r, BOT, 6)]
-    assert len(dropped) == 1 and dropped[0]["content"].startswith("我说话"), "门槛算错了 ✗"
-    packed = retrieval.pack_facts(ev, current_sid=SID, self_id=BOT, self_drop_max=6)
-    txt = txt_of(packed)
-    assert "啰嗦" not in txt and "甜口蛋糕" in txt, "打包时门槛没生效 ✗"
-    assert "啰嗦" in txt_of(retrieval.pack_facts(ev, current_sid=SID, self_id=BOT, self_drop_max=0)), \
-        "门槛=0 时应与旧行为一致（不挡）✗"
+    _seed(store, "用户说的话", 8, USER, "周武")
+    row = _facts(store)[0]
+    assert row["src_user"] == USER, "用户说的话 ⇒ src_user 应是用户 id ✗（可见范围里只有用户 ⇒ 以前会误判成自己 ✗）"
+    assert row["src_user"] != BOT
 
 
-def test_rotation_pool_attaches_before_filtering():
-    """③ 结构判据：轮换池必须在过滤**之前** attach ✗→✓（否则静默空转 ✗）"""
-    src = (ROOT / "main.py").read_text(encoding="utf-8")
-    i_attach = src.index('fact_pool = await self.store.call("attach_evidence", fact_pool)')
-    i_filter = src.index("and not low_value_self(")
-    assert i_attach < i_filter, "轮换池没在过滤前 attach ⇒ 门槛会静默空转 ✗"
+def test_no_missed_filtering_for_bot_self_talk(tmp_path):
+    """★ 不漏挡：机器人自己说的 + 重要度 ≤ 门槛 ⇒ **必须**被挡 ✓"""
+    p, store = _plugin(tmp_path, self_fact_filter_enabled=True)   # 显式打开（默认关 ✓）
+    _seed(store, "我把记忆更新了一下（自述）", 3, BOT, "香里")
+    row = _facts(store)[0]
+    assert retrieval.low_value_self(row, BOT, 4) is True, "机器人自述 + 3 ≤ 4 ⇒ 应被挡 ✗"
 
 
-def test_panel_marks_self_and_filtered_like_recall(tmp_path):
-    """★ 面板上的「自我 / 不参与召回」标记必须与**召回判据完全一致** ✓
+def test_no_false_filtering_for_user_words(tmp_path):
+    """★ 不错挡：**用户说的**（哪怕内容关于机器人）+ 低重要度 ⇒ **绝不能**被挡 ✓
+    注意：这里**开关是开的** ✓ —— 也就是说"开着重也不误伤用户"才是真本事 ✓"""
+    p, store = _plugin(tmp_path, self_fact_filter_enabled=True)
+    _seed(store, "哥要求你以后用音乐卡片推送", 3, USER, "周武")
+    row = _facts(store)[0]
+    assert retrieval.low_value_self(row, BOT, 4) is False, "用户说的话不该被当自我事实挡掉 ✗（实测踩过 ✓）"
 
-    用户问题（2026-10-11）："这几条香香的是不是都被门槛挡掉了？"
-    ⇒ 光靠解释不够 ✓ 面板上要**一眼可见** ✓ 且判据不能是另写一份 ✗
-    """
+
+def test_old_records_without_speaker_id_are_never_filtered(tmp_path):
+    """老记录没有 speaker_id ⇒ 未知 ⇒ **不判自我** ✓（宁可不挡，也不错挡 ✓）"""
     p, store = _plugin(tmp_path)
-    _seed(store, "我说话有点啰嗦，要收敛", 3, [BOT])       # 助手自述 + 低重要度 ⇒ 应被挡
-    _seed(store, "哥要求助手用音乐卡片推送", 5, ["u1"])   # 用户说的 ⇒ 不是自我事实 ⇒ 不挡
-    _seed(store, "助手有自己的名字", 8, [BOT])            # 助手自述但 ≥7 ⇒ 不挡
+    _seed(store, "老数据（没有发言人 id）", 2, "", "")
+    row = _facts(store)[0]
+    assert row["src_user"] == "", "没有 speaker_id 时应为空（未知）✗"
+    assert retrieval.low_value_self(row, BOT, 4) is False, "未知不能判成自我 ✗"
+
+
+def test_switch_off_means_nothing_filtered(tmp_path):
+    """开关关掉 ⇒ 一条都不挡（与旧行为一致 ✓）"""
+    p, store = _plugin(tmp_path)
+    _seed(store, "机器人自述", 3, BOT, "香里")
+    row = _facts(store)[0]
+    assert retrieval.low_value_self(row, BOT, 0) is False, "门槛传 0 = 关闭 ⇒ 不该挡 ✓"
+
+
+def test_panel_markers_match_recall_exactly(tmp_path):
+    """面板标记必须与召回判据**逐条一致** ✓（同一函数 ✓ 不另写逻辑 ✗）"""
+    p, store = _plugin(tmp_path, self_fact_filter_enabled=True)
+    _seed(store, "机器人自述的话", 3, BOT, "香里")
+    _seed(store, "用户说的话", 3, USER, "周武")
+    # ★ 真实部署里 bot 的 id 必然已知（事件里记下 / 持久化读回 ✓）
+    #   面板**不猜** ✗ ⇒ 测试必须如实模拟这一步 ✓
+    run(store.call("set_state", "self_id", BOT))
     rows = run(p.api_facts(sid=SID))
-    assert len(rows) == 3, "应能取到刚造的 3 条事实 ⇒ 实际 %d 条" % len(rows)
-
-    def verdict(fragment):
-        hit = next((r for r in rows if fragment in (r.get("content") or "")), None)
-        assert hit is not None, "没找到含 %r 的事实（实际：%r）" % (fragment, [r.get("content") for r in rows])
-        return (hit.get("self_fact"), hit.get("recall_filtered"))
-
-    assert verdict("啰嗦") == (True, True), "助手自述 + 低重要度 ⇒ 自我 且 不参与召回 ✗"
-    assert verdict("音乐卡片") == (False, False), "用户说的 ⇒ 不是自我事实，不该被挡 ✗"
-    assert verdict("自己的名字") == (True, False), "助手自述但重要度 ≥7 ⇒ 保留 ✗"
-    # 面板标记与召回判据**同源**（同一个 low_value_self）✓
+    assert len(rows) == 2
     for r in rows:
         assert bool(r["recall_filtered"]) == bool(
-            retrieval.low_value_self(r, BOT, 6)), "面板与召回判据不一致 ✗"
+            retrieval.low_value_self(r, BOT, 4)), "面板标记与召回判据不一致 ✗"
+    got = {("自动" if r["self_fact"] else "用户"): r["recall_filtered"] for r in rows}
+    assert got["自动"] is True and got["用户"] is False, "自我/用户 的判定反了 ✗"
 
 
-def test_assistant_user_id_infers_bot_when_no_event(tmp_path):
-    """面板请求没有事件 ⇒ 要从"助手发言记录"里推断 bot 自己的 id ✓（推断不出就空 ✓）"""
-    p, store = _plugin(tmp_path)
-    assert run(store.call("assistant_user_id")) == "", "没有助手记录时应返回空 ✗"
-    _seed(store, "助手说过一句话", 3, [BOT])
-    assert run(store.call("assistant_user_id")) == BOT, "应从助手发言里推断出 bot 的 id ✗"
+def test_default_is_off_so_upgrade_changes_nothing(tmp_path):
+    """★ 默认**关**（用户 2026-10-11 定）：一条都不挡 ⇒ 升级后与旧行为完全一致 ✓"""
+    p, store = _plugin(tmp_path)                      # 全默认
+    assert p._self_drop_max() == 0, "默认必须等效于「不挡」（返回 0）✗"
+    _seed(store, "机器人自述", 3, BOT, "香里")
+    row = _facts(store)[0]
+    assert retrieval.low_value_self(row, BOT, p._self_drop_max()) is False
+
+
+def test_config_migration_is_one_time_and_conservative(tmp_path):
+    """★ 存量配置迁移：只动"当年的默认值"，用户特意设过的**绝不碰** ✓ 且只跑一次 ✓"""
+    p, store = _plugin(tmp_path, self_fact_max_importance=6)   # 模拟老配置（旧默认 6 + 没有总开关）
+    run(p._migrate_self_fact_settings())
+    assert p.settings.self_fact_max_importance == 4, "旧默认 6 ⇒ 应迁移到 4 ✗"
+    assert p.settings.self_fact_filter_enabled is False, "应补上总开关=关 ✗"
+    assert str(run(store.call("get_state", "cfg_migrate_self_fact", ""))) == "1", "迁移应记标记（只跑一次）✗"
+    # 用户特意设过的值 ⇒ 不动 ✓
+    # （配置路径是**宿主全局**的 ⇒ 不能靠不同 tmp_path 隔离 ✗
+    #   改成：重置迁移标记 + 把值改成 8 ⇒ 再跑一次迁移 ⇒ 必须原样保留 ✓）
+    from contracts import Settings as _S
+    run(store.call("set_state", "cfg_migrate_self_fact", ""))
+    p.settings = _S(**{**p.settings.model_dump(), "self_fact_max_importance": 8})
+    run(p._migrate_self_fact_settings())
+    assert p.settings.self_fact_max_importance == 8, "用户设过的值不能被迁移改掉 ✗"

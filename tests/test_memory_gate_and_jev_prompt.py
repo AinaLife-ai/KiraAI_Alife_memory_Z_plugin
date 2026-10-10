@@ -159,8 +159,8 @@ def test_jev_config_accepts_prompt_append():
 # ─────────────────────────── 结构与前端接线 ───────────────────────────
 def test_schema_and_readme_and_panel_are_in_sync():
     fields = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["alife"]["fields"]
-    for key, default in (("jev_prompt_append", ""), ("self_fact_max_importance", 6),
-                         ("cover_check_limit", 800)):
+    for key, default in (("jev_prompt_append", ""), ("self_fact_max_importance", 4),
+                         ("cover_check_limit", 800), ("self_fact_filter_enabled", False)):
         assert key in fields, "schema 缺 %s ✗" % key
         assert fields[key]["default"] == default, "%s 默认值应为 %r ✗" % (key, default)
         assert fields[key].get("name"), "%s 缺显示名 ✗（框架字段需要 name ✓）" % key
