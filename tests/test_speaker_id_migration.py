@@ -40,6 +40,7 @@ run = asyncio.run
 
 def _boot(tmp):
     m.get_data_path = lambda: tmp
+    m.get_config_path = lambda: tmp / "cfg"   # ★ 测试隔离 ✓
     ctx = types.SimpleNamespace(
         get_plugin_data_dir=lambda: tmp,
         plugin_mgr=types.SimpleNamespace(plugin_configs={}),
