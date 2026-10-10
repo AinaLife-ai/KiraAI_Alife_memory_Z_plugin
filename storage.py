@@ -3424,6 +3424,42 @@ class Store:
                 )
             ]
 
+    def assistant_user_id(self):
+        """推断「机器人自己的 id」：来自**助手发言**的来源记录里最常见的说话人 ✓
+
+        ★ 2026-10-11：面板（/facts）需要它来判断"这条事实是不是 bot 自己说的" ✓
+          召回路径有事件（event.self_id ✓），但面板请求没有 ✗ ⇒ 用数据兜底 ✓
+          取不到就返回 "" ✓（此时不标记，绝不误判 ✗）
+
+        ★ 性能：结果基本不变（bot 的 id 不会变）⇒ **缓存** ✓
+          但**空结果不缓存** ✗ —— 否则"还没有助手记录时就永久推断不出" ✗（标记永远不出现 ✗）
+        """
+        cached = getattr(self, "_assistant_uid", "")
+        if cached:
+            return cached
+        try:
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT users, count(*) c FROM records"
+                    " WHERE role='assistant' AND users IS NOT NULL AND users != ''"
+                    " AND users != '[]' AND deleted=0"
+                    " GROUP BY users ORDER BY c DESC LIMIT 1"
+                ).fetchone()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+        try:
+            users = row["users"]
+            if isinstance(users, str):
+                users = json.loads(users)
+            found = str((users or [""])[0] or "")
+            if found:
+                self._assistant_uid = found        # ★ 只在非空时缓存 ✓
+            return found
+        except Exception:
+            return ""
+
     def covering_fact(self, sid, content, threshold=0.4, limit=800):
         """该内容是否已被某条事实覆盖（零模型）。
 
