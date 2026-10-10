@@ -359,7 +359,7 @@
       "cover_check_limit": {
         "type": "integer",
         "name": "覆盖判定扫描上限",
-        "default": 1500,
+        "default": 800,
         "description": "永久记忆入库前的「覆盖判定」扫描上限：按重要度/新近排序比对这么多条事实。越大越不容易放过重复，零模型、只费一点 CPU。",
         "minimum": 100,
         "maximum": 20000

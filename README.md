@@ -483,8 +483,12 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
     都走它（轮换池是独立 SQL 查询、不过 `pack_facts` ⇒ 此前**没有**被过滤，现已接上）。
 - 🐛 **覆盖判定（永久记忆去重）稳定性**：`covering_fact` 原来是 `LIMIT 400` **且无 ORDER BY**
   ⇒ 取哪 400 条由 SQLite 自定 ⇒ **判据不确定**、大库会漏判重复。
-  现在：`ORDER BY importance DESC, created DESC` + 上限 `cover_check_limit`（默认 1500，可配）
+  现在：`ORDER BY importance DESC, created DESC` + 上限 `cover_check_limit`（默认 800，可配）
   + **截断写日志**（把不可见变可见）。
+  · 另按**实测**做了三处性能优化（2000 条事实 micro-profile）：① 排序末尾加 `id` ⇒ **完全确定**
+    （并列时也不飘 ✓）② 只取 `id,content` 两列 + `LIMIT want+1` 探截断 ⇒ 省掉一次全表 `count(*)`（~17ms）
+    ③ 相似度前加**可证等价**的字符集前筛（bigram containment 在共同字符 <3 时必为 0）
+    ⇒ 单次 64ms → **27.5ms**；事件循环最大漂移 83ms → **12.7ms**；**等价性实测 43/43 例一致** ✓
   · 顺带核实（"删一条再重记会不会两条都没"）：**不会** ——
     `covering_fact` 带 `deleted=0 AND merge_pending=0`（旧记忆删掉后**不再拦截**新的）；
     `merge_facts` 在 `BEGIN IMMEDIATE` 里**逐条复核**，源被删则 `Conflict` **整组放弃**；

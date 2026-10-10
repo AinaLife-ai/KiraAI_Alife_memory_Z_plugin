@@ -319,7 +319,7 @@ class Settings(Strict):
     # ── 2026-10-10：用户可调项（前两项默认值 = 与用户约定的目标状态 ✓）──
     jev_prompt_append: str = ""           # 追加到所有 JEV 任务的 instructions 末尾（留空=默认）
     self_fact_max_importance: int = Field(default=6, ge=0, le=10)      # 自我事实召回门槛（0=关）
-    cover_check_limit: int = Field(default=1500, ge=100, le=20000)     # 覆盖判定扫描上限
+    cover_check_limit: int = Field(default=800, ge=100, le=20000)     # 覆盖判定扫描上限
     # 可选重排模型（KiraAI 里注册的 rerank 模型；留空=不重排，行为与之前一致）
     rerank_model: str = ""
     rerank_enabled: bool = False
