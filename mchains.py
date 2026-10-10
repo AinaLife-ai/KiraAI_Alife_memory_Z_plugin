@@ -32,6 +32,11 @@ def chain_refs(settings: Any, chain_key: str, legacy_key: str) -> List[str]:
     """
     out: List[str] = []
     raw = getattr(settings, chain_key, None) or []
+    # ★ 2026-10-10 升级路径：兼容「换行分隔字符串」这种历史形态 ✓
+    #   （手工改过配置、或早期版本写进去过）
+    #   必须与前端 chainRefsOf 的处理**完全一致**（否则面板显示与后端执行会不一样 ✗）
+    if isinstance(raw, str):
+        raw = raw.split("\n")
     if isinstance(raw, (list, tuple)):
         for item in raw:
             ref = str(item or "").strip()
@@ -40,10 +45,14 @@ def chain_refs(settings: Any, chain_key: str, legacy_key: str) -> List[str]:
             if len(out) >= CHAIN_MAX:
                 break
     legacy = str(getattr(settings, legacy_key, "") or "").strip()
+    # ★ 2026-10-10 升级路径：legacy 也可能是「换行串」（历史/草稿写入过）✓
+    #   不拆的话会在链尾多出一条 "A\nB" 垃圾档 ✗ ⇒ 与 chain_key 同样拆分 ✓
+    legacy_items = [x.strip() for x in legacy.split("\n")] if legacy else []
     # ★ 旧字段兜底 ⇒ 但**总档数也 ≤10** ✓（用户要求"每种模型最多 10 组" ✓
     #   链已经满 10 档时不再追加 ⇒ 总数恒定 ≤10 ✓ 便于面板显示"n / 10" ✓）
-    if legacy and legacy not in out and len(out) < CHAIN_MAX:
-        out.append(legacy)
+    for one in legacy_items:
+        if one and one not in out and len(out) < CHAIN_MAX:
+            out.append(one)
     return out
 
 

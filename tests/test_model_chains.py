@@ -198,14 +198,36 @@ def test_jev_single_endpoint_semantics_unchanged(monkeypatch):
 
 # ---------------- 前端：有序标签块（不是"一长条" ✓）----------------
 def test_frontend_chain_editor_is_ordered_and_wraps():
+    """结构判据（★ 2026-10-10 v2.22.1 按用户要求重做后更新 ✓ 意图不变）
+
+    用户明确的要求：**就在「选默认模型」的下拉里编** ✓
+      · 收起态（框里）显示**第 1 档** ✓（回退链第一顺位）
+      · 下拉里：已选的带**序号** + **✕ 可直接取消** ✓ ↑↓ 调序 ✓
+      · 不再单独占一格、也不再是框外一排标签（原来会挤成"一长条" ✗）
+    ⇒ 所以"不挤成长条"这条的保证方式改了：
+      框内文本**单行省略号**（.chain-box-tx）+ 下拉列表**竖排**（.chain-list column）✓
+    """
     js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
-    assert "function chainEditor" in js and "function wireChain" in js, "缺有序编辑器 ✗"
+    # ① 控件存在于"默认模型"那个字段上（不是独立的 *_models 格）
+    assert "function chainCombo(" in js and "function bindChainCombos(" in js, "缺回退链控件 ✗"
+    assert 'if (key.endsWith("_models")) return "";' in js, "回退链不该再单独占一格 ✗"
+    assert "chainCombo(key, value, models)" in js, "它必须挂在 *_model 字段上 ✓"
+    # ② 有序 + 可删（顺序即语义）
     assert "data-up" in js and "data-down" in js, "必须能上下调序（顺序即语义 ✗）"
+    assert 'class="chain-x"' in js or "chain-x" in js, "必须有 ✕ 可直接取消 ✓"
+    assert 'class="chain-no"' in js, "已选项必须显示序号 ✓"
+    # ③ 值格式与仓库约定一致（换行数组，readConfig 会 split）
     assert 'data-kind="array"' in js, "值格式要和仓库既有约定一致（换行数组 ✓）"
-    assert "chain-chips" in js and "flex-wrap: wrap" in css, (
-        "标签必须**换行排布** ✓（否则又是一长条 ✗ —— 用户明确要求 ✗）")
-    assert "slice(0, 10)" in js or ">= 10" in js, "必须限制最多 10 个 ✓"
+    assert "plainModelSelect(key, refs[0]" in js or "plainModelSelect(modelKey, refs[0]" in js, \
+        "同一份值还要写回单模型字段（= 第 1 档 ✓ 兼容旧逻辑）"
+    # ④ "不挤成一长条"的新保证：框内单行省略 + 列表竖排
+    assert "text-overflow: ellipsis" in css and ".chain-box-tx" in css, "框内必须单行省略 ✓"
+    assert ".chain-list { display: flex; flex-direction: column;" in css, "下拉列表必须竖排 ✓"
+    # ⑤ 上限 10 档（与后端 CHAIN_MAX 一致）
+    assert ">= 10" in js and "slice(0, 10)" in js, "必须限制最多 10 档 ✓"
+    # ⑥ 设置可达性（用户反馈"131 项找不到"）
+    assert "cfgSearch" in js and "PINNED_KEYS" in js, "设置页必须有搜索 + 常用置顶 ✓"
 
 
 def test_schema_declares_chain_fields_as_multi_select():
