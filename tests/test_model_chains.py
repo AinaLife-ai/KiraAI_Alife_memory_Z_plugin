@@ -227,7 +227,12 @@ def test_frontend_chain_editor_is_ordered_and_wraps():
     # ⑤ 上限 10 档（与后端 CHAIN_MAX 一致）
     assert ">= 10" in js and "slice(0, 10)" in js, "必须限制最多 10 档 ✓"
     # ⑥ 设置可达性（用户反馈"131 项找不到"）
-    assert "cfgSearch" in js and "PINNED_KEYS" in js, "设置页必须有搜索 + 常用置顶 ✓"
+    # ⑥ 设置可达性（用户反馈"131 项找不到"）——★ 按用户意见改为：
+    #    **搜索** ✓ + **记录用户真实搜索**（localStorage）✓
+    #    不再"拍脑袋写常用"✗、也不再挪动设置的原有位置 ✗
+    assert "cfgSearch" in js, "设置页必须有搜索 ✓"
+    assert "RECENT_SEARCH_KEY" in js and "recentSearches" in js, "要记录用户真实搜索过什么 ✓"
+    assert "PINNED_KEYS" not in js and "el.style.order" not in js, "不要挪动设置原有位置 ✗"
 
 
 def test_schema_declares_chain_fields_as_multi_select():
