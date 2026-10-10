@@ -506,7 +506,7 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
   · 前后端白名单**钉成测试**（前端列了后端不收的 ⇒ 测试直接红，不会等点到 422 才发现）
 - 🐛 顺带：`web_audit` 抓出两处既有误报（`data-imp` / `data-delta` 用 `getAttribute` 读，
   工具只识别 `dataset.*`）⇒ 改成 `dataset`，现在**需要修复的问题：0**
-- 📊 测试（全部真跑）：**3.0 共 992 passed / 0 failed** ｜ **2.x 共 992 passed / 0 failed**
+- 📊 测试（全部真跑）：**3.0 共 993 passed / 0 failed** ｜ **2.x 共 993 passed / 0 failed**
   · 新增 `tests/test_model_chains.py`（12 条）· `tests/test_model_display_and_ref.py`（7 条）
     · `tests/test_memory_gate_and_jev_prompt.py`（12 条）· `tests/test_importance_ui_and_retry.py`（9 条）
   · 仓库自带守门人：`tools/web_audit.py` 0 问题 · `tools/status_contract.py` 契约一致

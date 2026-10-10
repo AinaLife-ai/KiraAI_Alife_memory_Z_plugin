@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, List
+from typing import Any, List
 
 CHAIN_MAX = 10                      # ★ 用户要求：每种模型最多 10 组 ✓
 
@@ -55,14 +55,3 @@ def chain_desc(settings: Any, chain_key: str, legacy_key: str) -> str:
     legacy = str(getattr(settings, legacy_key, "") or "").strip()
     mark = "（最后一档=旧字段兜底 ✓）" if legacy and refs and refs[-1] == legacy else ""
     return " → ".join(refs) + mark
-
-
-def iter_refs(refs: Iterable[str]):
-    """把 str / list 统一成**带序号**的可迭代 ✓（日志要写"第几档"✓）"""
-    items = [refs] if isinstance(refs, str) else list(refs or [])
-    clean = []
-    for item in items:
-        ref = str(item or "").strip()
-        if ref and ref not in clean:
-            clean.append(ref)
-    return list(enumerate(clean, 1))

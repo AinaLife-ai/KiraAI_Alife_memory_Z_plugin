@@ -44,7 +44,7 @@ from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime, source_roots
-from .mchains import chain_refs
+from .mchains import chain_desc, chain_refs
 from .retrieval import (
     strip_at_ids,
     tfield,
@@ -542,6 +542,14 @@ class AlifeMemoryPlugin(BasePlugin):
             )
             if getattr(self, "engine", None) is not None:
                 self.engine.decisions = self.decisions   # 引擎侧决策留痕用
+            # ★ 2026-10-10：把**生效中的链路**打进日志 ✓（排查"配了没生效"只看这一行 ✓）
+            logger.info(
+                "[记忆·Z] 模型链路：压缩 %s ｜ 审计 %s ｜ JEV %s ｜ 重排 %s",
+                chain_desc(self.settings, "compress_models", "compress_model"),
+                chain_desc(self.settings, "audit_models", "audit_model"),
+                chain_desc(self.settings, "jev_models", "jev_model_name"),
+                chain_desc(self.settings, "rerank_models", "rerank_model"),
+            )
             self._jev_notice = None          # 配置变了 ⇒ 允许重新提示
             self._aux_fp = self._aux_fingerprint(self.settings)
             _c = getattr(self.decisions, "cfg", None)
