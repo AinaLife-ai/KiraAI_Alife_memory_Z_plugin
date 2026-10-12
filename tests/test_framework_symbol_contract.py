@@ -133,7 +133,7 @@ def test_ctx_members_exist_and_await_matches():
     problems = []
     for name, sites in _ctx_usages().items():
         if name not in known:
-            problems.append("ctx.%s 在 rc.1 的 PluginContext 上不存在 ✗ ← %s" % (name, sites[0][0]))
+            problems.append("ctx.%s 在**当前框架**的 PluginContext 上不存在 ✗（疑似改名/删除）← %s" % (name, sites[0][0]))
             continue
         member = inspect.getattr_static(PluginContext, name, None)
         async_member = inspect.iscoroutinefunction(member)
