@@ -1603,7 +1603,13 @@ function applyBatchMode() {
 //   而回退链的**顺序就是语义**（先试谁、失败换谁）⇒ 必须能上下调序 ✓
 //   值格式沿用仓库约定：`data-kind="array"` + 换行分隔 ✓（readConfig 会 split("\n") ✓）
 function modelLabel(m) {
-  return (m.name || m.model || m.id) + (m.provider ? " · " + m.provider : "");
+  // ★ 2026-10-12（用户实拍）：显示名会"撞车" —— 同名模型、或同名但类型不同的提供商
+  //   ⇒ 面板里两个芯片长得一模一样 ⇒ 分不清、容易删错
+  //   后端 /models 给重名条目打了 dup + tag（短标识）⇒ 这里补上，前端才分得清
+  let s = (m.name || m.model || m.id) + (m.provider ? " · " + m.provider : "");
+  if (m.kind === "embedding") s += " · 向量";
+  if (m.dup && m.tag) s += " · " + m.tag;
+  return s;
 }
 function chainLookup(models) {
   const byRef = new Map();
@@ -1631,7 +1637,7 @@ function chainRefsOf(modelKey, fallbackValue) {
   const out = [];
   list.forEach((x) => {
     const ref = String(x || "").trim();
-    if (ref && !out.includes(ref) && out.length < 10) out.push(ref);
+    if (ref && !out.includes(ref) && out.length < ((config && config.chain_max) || 10)) out.push(ref);
   });
   const one = String(fallbackValue || "").trim();
   if (!out.length && one) out.push(one);   // 旧配置只有单模型值 ⇒ 当作一档 ✓
@@ -1641,11 +1647,37 @@ function chainNameOf(ref, lookup) {
   const m = lookup.get(ref);
   return m ? modelLabel(m) : ref + "（旧值）";
 }
+// ★ 2026-10-12（用户要求）：模型名 + 提供商名 + 撞车后缀会很**长** ✗
+//   长到芯片里显示不下 ⇒ 用户看不清到底选了哪个 ✓
+//   做法：① 悬停显示完整名（title ✓）② 悬停 / 已选中时**横向滚动**（真 app 里靠 CSS 动画 ✓）
+//   结构上放**两份文本**，动画位移 -50% 正好是一份 ⇒ 无缝循环 ✓（经典 marquee ✓）
+function marqueeName(text) {
+  const safe = esc(text == null ? "" : String(text));
+  return '<span class="mmq" title="' + safe + '"><span class="mmq-in">' +
+    '<span class="mmq-tx">' + safe + "</span>" +
+    '<span class="mmq-tx" aria-hidden="true">' + safe + "</span></span></span>";
+}
+
+// 渲染完调用一次：**只有真的放不下才滚** ✓（短名字乱动很难看 ✗）
+function markMarquees(root) {
+  const scope = root || document;
+  if (!scope.querySelectorAll) return;
+  scope.querySelectorAll(".mmq").forEach((el) => {
+    let wide = false;
+    try {
+      wide = el.scrollWidth > el.clientWidth + 2;
+    } catch (e) {
+      wide = false;
+    }
+    if (el.classList) el.classList.toggle("is-wide", wide);
+  });
+}
+
 function chainRowHtml(ref, idx, lookup) {
   return (
     '<button type="button" class="chain-item is-on" data-ref="' + esc(ref) + '">' +
     '<span class="chain-no">' + (idx + 1) + "</span>" +
-    '<span class="chain-nm">' + esc(chainNameOf(ref, lookup)) + "</span>" +
+    '<span class="chain-nm">' + marqueeName(chainNameOf(ref, lookup)) + "</span>" +
     '<span class="chain-ord"><i data-up="1" title="上移（更优先）">↑</i>' +
     '<i data-down="1" title="下移">↓</i></span>' +
     '<span class="chain-x" title="从回退链移除">✕</span></button>'
@@ -1714,7 +1746,7 @@ function chainCombo(modelKey, value, models) {
     '<button type="button" class="chain-box">' +
     '<span class="chain-cnt">' + (refs.length ? refs.length + " 档" : "") + "</span>" +
     '<span class="chain-box-tx">' +
-    esc(refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）") +
+    marqueeName(refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）") +
     '</span><span class="chain-caret">▾</span></button>' +
     '<div class="chain-menu hide">' +
     '<input type="search" class="chain-search" placeholder="搜索模型名 / 提供商…">' +
@@ -1734,17 +1766,26 @@ function bindChainCombos() {
     const menu = combo.querySelector(".chain-menu");
     const list = combo.querySelector(".chain-list");
     const search = combo.querySelector(".chain-search");
-    let refs = (hidden.value || "").split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 10);
+    let refs = (hidden.value || "").split("\n").map((s) => s.trim()).filter(Boolean).slice(0, (config && config.chain_max) || 10);
+    // ★ 2026-10-12：链是**闭包内存态** ⇒ 外部（「恢复默认」等）改了隐藏值必须重新同步
+    //   否则内存 refs 还是旧的，下一次 paint() 会把旧值写回隐藏框 ⇒ 用户看到"点了没反应"
+    hidden.addEventListener("input", () => {
+      const now = (hidden.value || "").split("\n").map((s) => s.trim()).filter(Boolean).slice(0, (config && config.chain_max) || 10);
+      if (now.join("\n") === refs.join("\n")) return;   // paint() 自己触发的 ⇒ 早退（防死循环）
+      refs = now;
+      paint();
+    });
     const paint = () => {
       hidden.value = refs.join("\n");
       sel.value = refs[0] || "";
       const boxTx = combo.querySelector(".chain-box-tx");
       const cntEl = combo.querySelector(".chain-cnt");
       if (!boxTx || !cntEl) return;            // 结构已被重渲染 ⇒ 直接跳过（不抛 ✓）
-      boxTx.textContent =
-        refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）";
+      boxTx.innerHTML =
+        marqueeName(refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）");
       cntEl.textContent = refs.length ? refs.length + " 档" : "";
       list.innerHTML = chainListHtml(refs, models, isEmb, lookup);
+      markMarquees(combo);        // ★ 名字长到放不下 ⇒ 打标 is-wide（CSS 才会滚 ✓）
       hidden.dispatchEvent(new Event("input", { bubbles: true }));
     };
     const move = (ref, d) => {
@@ -1953,6 +1994,7 @@ function renderConfig(values) {
   // ★ 2026-10-10：模型回退链的标签编辑器接线（有序 ✓ 可调序 ✓ 可删 ✓）
   // ★ 2026-10-10（用户要求 v2）：下拉内编辑控件接线 + 设置搜索 ✓
   bindChainCombos();
+  markMarquees(document);      // ★ 初次渲染也判定一次（否则要等点一下才滚 ✓）
   setupConfigTools();
   applyBatchMode();   // v2.18.15：按当前模式收起另一套参数 ✓
   $$("#configForm [data-key]").forEach(
@@ -1970,16 +2012,36 @@ function renderConfig(values) {
       (b.onclick = (event) => {
         event.preventDefault();
         const key = b.dataset.default;
-        const fallback = config.schema.properties[key]?.default;
+        const sm = (config.schema.properties || {})[key] || {};
+        // ★ 2026-10-12（用户实拍）：**不能只读 schema.properties[key].default**
+        //   `*_models` 是 default_factory=list ⇒ JSON Schema 里根本没有 default
+        //   ⇒ 旧代码读到 undefined 就 return ⇒ 点「恢复默认」毫无反应（用户报的正是这个）
+        //   现在：① 后端 /config 给的 defaults 全表优先  ② 退到 schema.default
+        //        ③ 最后按类型给"清空/关掉"的语义默认（绝不再静默 return）
+        let fallback;
+        if (config.defaults && Object.prototype.hasOwnProperty.call(config.defaults, key)) {
+          fallback = config.defaults[key];
+        } else if (sm.default !== undefined) {
+          fallback = sm.default;
+        } else {
+          fallback = sm.type === "boolean" ? false
+            : sm.type === "integer" || sm.type === "number" ? 0 : "";
+        }
         const input = document.querySelector(
           '#configForm [data-key="' + key + '"]',
         );
-        if (fallback === undefined || !input) return;
+        if (!input) return;
         if (Array.isArray(fallback)) input.value = fallback.join("\n");
         else if (input.type === "checkbox") input.checked = !!fallback;
         else input.value = fallback;
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        toast("已填入内置默认文案，记得点「保存并生效」");
+        // ★ 顺带把「模型回退链」拉回同步（它内存里还留着旧链 ⇒ 会把旧值写回去）
+        const combo = input.closest ? input.closest(".chain-combo") : null;
+        if (combo) combo.dispatchEvent(new Event("input", { bubbles: true }));
+        const shown = Array.isArray(fallback)
+          ? (fallback.length ? fallback.join(" → ") : "（清空 ⇒ 跟随 KiraAI 默认模型）")
+          : String(fallback);
+        toast("已恢复默认：" + shown + " —— 记得点「保存并生效」");
       }),
   );
   vectorControls();

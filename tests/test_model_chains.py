@@ -225,7 +225,10 @@ def test_frontend_chain_editor_is_ordered_and_wraps():
     assert "text-overflow: ellipsis" in css and ".chain-box-tx" in css, "框内必须单行省略 ✓"
     assert ".chain-list { display: flex; flex-direction: column;" in css, "下拉列表必须竖排 ✓"
     # ⑤ 上限 10 档（与后端 CHAIN_MAX 一致）
-    assert ">= 10" in js and "slice(0, 10)" in js, "必须限制最多 10 档 ✓"
+    # ★ 2026-10-12：上限改成**从后端拿**（config.chain_max ✓ 单一事实来源）
+    #   原来是前端硬编码 slice(0, 10) ✗ ⇒ 后端调上限时前端不跟 ✗
+    assert "config.chain_max" in js, "链长上限必须来自后端 config.chain_max（别硬编码 ✗）"
+    assert "|| 10" in js, "要有 10 的兜底（后端没给时仍能用 ✓）"
     # ⑥ 设置可达性（用户反馈"131 项找不到"）
     # ⑥ 设置可达性（用户反馈"131 项找不到"）——★ 按用户意见改为：
     #    **搜索** ✓ + **记录用户真实搜索**（localStorage）✓

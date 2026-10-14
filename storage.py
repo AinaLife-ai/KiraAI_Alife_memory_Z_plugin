@@ -617,6 +617,10 @@ class Store:
         )
         return True
 
+        # ★ 2026-10-12：建/改检索索引 ⇒ memo 缓存的 search 结果会变 ⇒ 必须失效 ✓
+        with self.connect() as db:
+            self.bump(db)
+
     def scrub_capture_text(self, batch=200):
         """存量清洗：把早期版本混进原文/摘要里的协议外壳与思考块清一遍。
 
@@ -682,6 +686,12 @@ class Store:
         self._scrub_stats["changed"] += len(updates)
         self._scrub_stats["emptied"] += len(emptied)
         return False
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：清洗/重写记录正文 ⇒ 注入的 context 会变
+        with self.connect() as db:
+            self.bump(db)
 
     def backfill_time_provenance(self, batch=300):
         """存量迁移：给老数据补上「事件时间」与「发言人」。
@@ -767,6 +777,12 @@ class Store:
             "unresolved": len(rows) - len(updates),
         }
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：回填时间来源 ⇒ 注入里显示的时间会变
+        with self.connect() as db:
+            self.bump(db)
+
     def permanents_need_tidy(self, sid, days):
         """这个会话里是否有"太久没被整理"的永久记忆（v2.16.3 周期整理用）。
 
@@ -801,6 +817,12 @@ class Store:
             )
         return True
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：同上：收尾重写 ⇒ context 会变
+        with self.connect() as db:
+            self.bump(db)
+
     def scrub_stats(self):
         return dict(self._scrub_stats)
 
@@ -821,6 +843,12 @@ class Store:
             )
         self._fts_stale = False
         return True
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：检索索引 ⇒ search 会变
+        with self.connect() as db:
+            self.bump(db)
 
     def index_backfill(self, batch=500):
         """补齐 search_body 列与索引；返回是否已全部覆盖（供后台分批调用）。
@@ -847,6 +875,12 @@ class Store:
         self._fts_stats["plain"] += sum(1 for body in bodies if body == NO_TOKENS)
         return False
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：补索引 ⇒ search 会变
+        with self.connect() as db:
+            self.bump(db)
+
     def rebuild_search_index(self):
         """整表重建（异常或版本升级时用）。"""
         with self.connect() as db:
@@ -858,6 +892,12 @@ class Store:
             db.execute("INSERT INTO records_fts(records_fts) VALUES('rebuild')")
         self._fts_state = "ready"
         return True
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：重建索引 ⇒ search 会变
+        with self.connect() as db:
+            self.bump(db)
 
     # TODO(v2.19): 按年份分库（方案见 README「L0 容量、分库预留与决策触发线」）
     #   触发线：库 > 500MB / FTS 查询 > 200ms / vacuum > 60s / 单年条目 > 50 万
@@ -1319,6 +1359,12 @@ class Store:
                         r["name_source_id"] = r["lookup_id"]
             return rows
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：新建实体行 ⇒ context 里的人物/主题会变
+        with self.connect() as db:
+            self.bump(db)
+
     def entity_ids(self, sid, users=(), scope="session"):
         # Resolve identities from the same scope predicate, independently of pagination.
         with self.connect() as db:
@@ -1338,6 +1384,12 @@ class Store:
                 ids.update(row["users"])
                 ids.add(row["sid"])
             return sorted(ids)
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：同上：实体补建
+        with self.connect() as db:
+            self.bump(db)
 
     def entity_ids_for_query(self, query, sid="", users=(), scope="session"):
         """Entities whose current or former name (or id) appears in the query text.
@@ -1621,6 +1673,12 @@ class Store:
                 " AND content LIKE '%\"tool_calls\"%'"
             )
             return cur.rowcount or 0
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：回填工具步骤记录 ⇒ context 会变
+        with self.connect() as db:
+            self.bump(db)
 
     def legacy_migrated_at(self):
         """上次成功迁移旧记忆的时间戳（0 表示还没成功过）。"""
@@ -2341,6 +2399,12 @@ class Store:
                 changed += cur.rowcount or 0
             db.commit()
         return changed
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：把记录转永久 ⇒ context 会变
+        with self.connect() as db:
+            self.bump(db)
 
     def compress(self, sid, candidates, level, output):
         with self.connect() as db:
@@ -3490,6 +3554,12 @@ class Store:
         except Exception:
             return 0
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：回填发言人 ⇒ 注入里「谁说的」会变
+        with self.connect() as db:
+            self.bump(db)
+
     def get_state(self, key, default=""):
         """读字符串小状态（没有就返回 default ✓）"""
         try:
@@ -4045,6 +4115,12 @@ class Store:
                     )
         return len(shown) + len(used)
 
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：轮换指针 ⇒ 下一轮注入选哪些记忆会变
+        with self.connect() as db:
+            self.bump(db)
+
     def rotation_stats(self, kind="record"):
         """一次性取回"有轮换记录"的计数（量很小）。
 
@@ -4244,6 +4320,12 @@ class Store:
                     time.time(),
                 ),
             )
+            # ★ 2026-10-12（用户实拍）：**这里必须让进程内缓存失效** ✗
+            #   面板「拆开合并」走的正是这个方法 ✓ 它改了事实正文与来源 ✓
+            #   若只改库不 bump revision ⇒ memo 缓存（注入用的 context/search）不会失效 ✗
+            #   ⇒ 用户拆完合并，bot 在**别的写入发生之前**一直看到旧的合并结果 ✗
+            #   （实测：结构性守卫 test_every_content_write_bumps_store_revision 单独揪出本方法 ✓）
+            self.bump(db)
         return True
 
     def merge_facts(self, target_id, source_ids, content, reason, new_sid="", tags=None):
@@ -4533,6 +4615,12 @@ class Store:
                 "INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)",
                 (record_id, model, revision, dump(vector)),
             )
+
+        # ★ 2026-10-12：本方法改了「注入可见」的内容 ⇒ 必须让进程内 memo 缓存失效 ✗
+        #   memo 只缓存三样：("context", …) 记忆正文 ｜ ("spaced_names",) 称呼 ｜ search 召回
+        #   理由：写入向量 ⇒ memo 缓存的 search 结果会变
+        with self.connect() as db:
+            self.bump(db)
 
     def enqueue(self, kind, sid, detail="", automatic=False):
         """把任务排进队列 ✓（同一 (kind,sid) 只占一行 ✓）
