@@ -51,12 +51,12 @@ function extract(name) {
   throw new Error("函数 " + name + " 大括号不平衡");
 }
 
-const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
+const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
               "chainRowHtml", "chainListHtml"];
 const code = want.map(extract).join("\n");
 const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} } };
 require("vm").createContext(sandbox);
-require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees};", sandbox);
+require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf};", sandbox);
 const F = sandbox.__fn;
 
 const dup = [
@@ -76,7 +76,23 @@ F.markMarquees({ querySelectorAll: () => [
   { scrollWidth: 300, clientWidth: 120, classList: { toggle: (_c, on) => { toggled.push(on); } } },
   { scrollWidth: 100, clientWidth: 120, classList: { toggle: (_c, on) => { toggled.push(on); } } },
 ]});
+// ★ 成对恢复默认：链 ⇄ 旧单模型 必须互相带上 ✓
+sandbox.config.schema = { properties: {
+  compress_model: {}, compress_models: {}, audit_model: {}, audit_models: {},
+  jev_model_name: {}, jev_models: {}, rerank_model: {}, rerank_models: {},
+  embedding_model: {} } };
+const restore_pairs = {
+  compress_models: F.restoreKeysOf("compress_models"),
+  audit_models: F.restoreKeysOf("audit_models"),
+  rerank_models: F.restoreKeysOf("rerank_models"),
+  jev_models: F.restoreKeysOf("jev_models"),
+  compress_model: F.restoreKeysOf("compress_model"),
+};
+// 成对清空后的状态：两个字段都为空 ⇒ 解析出的链必须是空的 ✓
+sandbox.config.settings = { compress_models: [], compress_model: "" };
+const both_cleared_chain = F.chainRefsOf("compress_model", "").length;
 console.log(JSON.stringify({
+  restore_pairs, both_cleared_chain,
   labels, unique: uniq.size, rows,
   legacy_fallback: F.chainRefsOf("compress_model", "workbuddy:gpt-4o").length,
   // ★ 恢复默认后的状态：值清空 ⇒ 链必须为空（= 跟随宿主默认 ✓ 不是"零档" ✗）
@@ -162,3 +178,28 @@ def test_restore_default_clears_the_chain_so_host_default_applies():
     assert data["empty_legacy"] == 0, "清空后旧单模型字段还有残留 ✗"
     # 而"有值"时仍然照旧解析成 1 档（不能把正常配置也清掉 ✗）
     assert data["legacy_fallback"] == 1, "有旧单模型值时应当解析成第 1 档 ✗"
+
+
+def test_restore_default_clears_both_chain_and_legacy_field():
+    """★ 用户实拍的严重问题：**只清链会让旧字段把旧模型复活** ✗
+
+    现象（2026-10-14 用户报）："前端点恢复默认模型后保存，以压缩/审计为例，切页后模型又回到原本选的，
+    从而跟不上最新设置并失败" ✗
+    根因：`chainRefsOf` 在**链为空时会回退读 `*_model`**（为兼容老配置 ✓）
+      ⇒ 「恢复默认」只清了 `*_models` ✗ ⇒ 旧字段里的旧模型被**复活** ✗
+      ⇒ 切页/重载后 UI 又显示回旧模型，**运行时也照旧用它** ✗
+    修法：恢复默认必须**成对清空**（`*_models` + `*_model`/`*_model_name` ✓）
+    """
+    data = _run_driver()
+    pairs = data["restore_pairs"]
+    # 链字段 ⇒ 必须把配对的旧字段一起带上 ✓
+    assert pairs["compress_models"] == ["compress_models", "compress_model"], pairs
+    assert pairs["audit_models"] == ["audit_models", "audit_model"], pairs
+    assert pairs["rerank_models"] == ["rerank_models", "rerank_model"], pairs
+    # JEV 的旧字段叫 jev_model_name（不是 jev_model）⇒ 也必须能配对 ✓
+    assert "jev_model_name" in pairs["jev_models"], pairs
+    # 反向：从旧字段点恢复默认 ⇒ 也要把链带上 ✓
+    assert "compress_models" in pairs["compress_model"], pairs
+    # 成对清空后 ⇒ 链必须是空的（= 跟随宿主默认 ✓ 而不是"复活旧值" ✗）
+    assert data["both_cleared_chain"] == 0, (
+        "成对清空后链里还有残留 ⇒ 会继续用旧模型 ✗ 实际 %s" % data["both_cleared_chain"])
