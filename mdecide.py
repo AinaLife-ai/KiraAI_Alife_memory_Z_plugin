@@ -387,7 +387,13 @@ def resolve_config(settings: Any, provider_mgr: Any = None) -> JevConfig:
                 cfg = {}
             base = base or _pick(cfg, _BASE_KEYS)
             key = key or _env(_pick(cfg, _KEY_KEYS))
-            model = model or mid
+            # ★ 2026-10-12（用户实测用法：把 JEV 注册成 KiraAI 的 OpenAI 提供商 ✓）：
+            #   3.0 里 `mid` 是**模型内部 id（uuid）** ✗ —— 直接当模型名发给 JEV 会 **403** ✗
+            #   （实测：4 种 base_url 粘法全 403 ✓；而用 ModelInfo.model_name 就对 ✓）
+            #   ⇒ 优先取 ModelInfo 上的 model_name（= 面板里显示的名字，如 jev-latest ✓）；
+            #     2.x 里 mid 本身就是名字 ⇒ 两者相同，回退到 mid 仍然正确 ✓
+            info_name = str(getattr(info, "model_name", "") or "").strip() if info else ""
+            model = model or info_name or mid
             # 与"加速器类插件"共存的保险：若端点被改写成本地代理/加速地址，
             # 提示用户改用显式「JEV 接口地址」直填原始地址（显式值优先级最高 ✓）
             if base and re.search(r"(127\.0\.0\.1|localhost|:\d{2,5}/|/accel|/proxy)", base, re.I):

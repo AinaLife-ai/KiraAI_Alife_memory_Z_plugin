@@ -44,7 +44,7 @@ from .engine import worth_checking_probe
 from .engine import _boost_ok   # v2.18.19：与引擎共用每会话冷却 ✓
 from .storage import Conflict, Store
 from .migration import SOURCES, newest_legacy_mtime, source_roots
-from .mchains import chain_desc, chain_refs
+from .mchains import CHAIN_MAX, chain_desc, chain_refs
 from .retrieval import (
     strip_at_ids,
     tfield,
@@ -170,9 +170,26 @@ def brief(perception):
     head = "【记忆%s】%s" % (scope_mark, session if scope_mark else "")
 
     names_map = perception.get("names") or {}
+
+    def _name_of(value):
+        """把 names 的值渲染成**名字** ✓
+
+        ★ 2026-10-12（实测抓到）：分组视图下 `short_names()` 给的是
+          `{短码: [真实 id, "名字|别名"]}`（**给 JSON 事实区用的** ✓ 图例里写明 ✓）
+          ⇒ 这里若直接 `%s` 就会把 **列表 repr 塞进提示词** ✗
+            实测注入头变成 `n1=['qq:123', '小明|小明']` ✗ ⇒ 白费 token + 模型得自己猜 ✓
+          ⇒ 两种形态都兼容：字符串直接用 ✓；[id, 名字] 取**名字**（头部只需 短码→名字 ✓）
+        """
+        if isinstance(value, (list, tuple)):
+            for cand in value[1:]:
+                if str(cand).strip():
+                    return str(cand)
+            return str(value[0]) if value else ""
+        return str(value)
+
     pairs = []
     if isinstance(names_map, dict):
-        pairs = ["%s=%s" % (k, v) for k, v in names_map.items() if k and v]
+        pairs = ["%s=%s" % (k, _name_of(v)) for k, v in names_map.items() if k and _name_of(v)]
     elif isinstance(names_map, list):
         pairs = [
             "%s=%s" % (it.get("code") or it.get("a"), it.get("name") or it.get("s"))
@@ -4550,6 +4567,13 @@ class AlifeMemoryPlugin(BasePlugin):
             "revision": revision(self.settings),
             "settings": self.settings.model_dump(),
             "schema": Settings.model_json_schema(),
+            # ★ 2026-10-12（用户实拍）：光给 schema 不够 ✗
+            #   `*_models` 是 default_factory=list ⇒ **JSON Schema 里没有 default 字段** ✗
+            #   ⇒ 前端「恢复默认」读到 undefined 就直接 return ✗（点了毫无反应 ✓ 用户报的就是这个）
+            #   这里把**真实默认值全表**一起给前端 ✓ 用 Settings() 现造一份最准 ✓
+            "defaults": Settings().model_dump(),
+            # ★ 2026-10-12：链长上限**只有一个来源**（mchains.CHAIN_MAX ✓）⇒ 前端别硬编码 ✗
+            "chain_max": CHAIN_MAX,
             "labels": schema_labels(),
             "help": HELP,
         }
@@ -4830,7 +4854,21 @@ class AlifeMemoryPlugin(BasePlugin):
                         "provider": provider.get("name") or pid,
                         "kind": kind,
                         "legacy": legacy,          # ★ 老配置里存的旧名 ⇒ 前端仍能回显 ✓
+                        "key": str(mid),           # 模型键（撞车时的区分后缀来源 ✓）
                     })
+        # ★ 2026-10-12（用户实拍）：**显示名撞车**的模型要让前端能区分 ✓
+        #   典型：两台提供商都叫「XXX」但类型不同（一个 OpenAI 兼容、一个别的）✗
+        #   或同一个提供商下两个模型显示名一样 ✗ ⇒ 面板里两个芯片长得一模一样 ⇒ 分不清、易删错 ✗
+        #   这里按 (显示名 + 提供商显示名 + 类型) 统计重名，重名的补一个**短标识** ✓
+        seen = {}
+        for item in result:
+            sig = (item["name"], item["provider"], item["kind"])
+            seen[sig] = seen.get(sig, 0) + 1
+        for item in result:
+            sig = (item["name"], item["provider"], item["kind"])
+            if seen[sig] > 1:
+                item["dup"] = True
+                item["tag"] = str(item["id"]).split(":", 1)[0] or item["key"]
         return {"models": result}
 
     async def _cold_auto_once(self, force=False):

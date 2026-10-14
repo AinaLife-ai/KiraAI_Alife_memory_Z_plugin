@@ -1852,3 +1852,24 @@ button.primary:hover::after {
 /* ★ 2026-10-11（用户问"这几条是不是都被挡了"）：把结论直接标在卡片上 ✓ */
 .self-tag { background: var(--soft); color: var(--accent); }
 .filt-tag { background: rgba(217, 83, 79, 0.12); color: #c9453f; }
+
+
+/* ============================================================
+   ★ 2026-10-12（用户要求）：模型名变长了（名字 + 提供商 + 撞车后缀）
+   长到芯片/显示框里放不下 ⇒ 悬停 或 已选中时，名字**横向滚动** ✓
+   结构：两份文本 + 位移 -50%（正好一份）⇒ 无缝循环 ✓（JS 只在**真放不下**时打 .is-wide ✓）
+   ============================================================ */
+.mmq { display: inline-block; max-width: 100%; overflow: hidden; white-space: nowrap; vertical-align: bottom; }
+.mmq-in { display: inline-block; }
+.mmq-tx { padding-right: 28px; }            /* 两遍之间的间隔 ✓ */
+.mmq-tx + .mmq-tx { display: none; }        /* ★ 默认**藏掉副本**（否则短名字会显示两遍 ✗ 截图抓到过 ✓）*/
+.mmq.is-wide .mmq-tx + .mmq-tx { display: inline; }   /* 只有真的放不下（要滚）时才显示副本 ✓ */
+.mmq.is-wide:hover .mmq-in,
+.chain-item.is-on .mmq.is-wide .mmq-in,     /* 选中的条目：常驻滚动 ✓ */
+.chain-box:hover .mmq.is-wide .mmq-in,      /* 鼠标悬停显示框 ✓ */
+.plain-models .chain-item:hover .mmq.is-wide .mmq-in { animation: mmq-run 7s linear infinite; }
+.mmq.is-wide:hover .mmq-in { animation-duration: 4.5s; }   /* 悬停时滚快些，方便看全 ✓ */
+@keyframes mmq-run { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) {   /* 尊重系统"减少动态效果" ✓ */
+  .mmq-in { animation: none !important; }
+}
