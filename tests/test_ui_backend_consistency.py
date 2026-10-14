@@ -437,3 +437,68 @@ def test_jev_model_name_from_provider_info_not_internal_uuid(tmp_path):
                         "https://api.example.com/v1/systemone")):
         got = md.endpoint_of(base)
         assert got == want, "端点规整错 ✗ %s → %s（应 %s）" % (base, got, want)
+
+
+# ---------------------------------------------------------------- 恢复默认 ⇒ 跟随宿主
+def test_restore_default_makes_each_consumer_follow_host_defaults(tmp_path):
+    """★ 前端点「恢复默认」并保存后 ⇒ 各消费者必须**真的跟随框架已设的默认模型** ✓
+
+    用户问题："如果各模型前端点恢复默认并保存，真的是恢复默认并正常使用了吗？（跟随框架已设的各默认模型）"
+    插件设计约定（代码注释原话）：**空值 = 宿主默认** ✓
+      · 压缩           空 ⇒ `ctx.get_default_fast_llm_client()`（快速模型 ✓ 压缩用它）
+      · 审计/其它 LLM   空 ⇒ `ctx.get_default_llm_client()`
+      · 向量           空 ⇒ `ctx.get_default_embedding_client()`
+    这里逐个消费者实测：**必须调到对应的默认入口**，而不是报错或偷偷用别的模型 ✓
+    """
+    p = build(tmp_path)          # build 默认就把所有模型字段留空 = 「恢复默认后」的配置 ✓
+    for k in ("compress_model", "compress_models", "audit_model", "audit_models",
+              "jev_model", "jev_models", "rerank_model", "rerank_models", "embedding_model"):
+        assert getattr(p.settings, k, "") in ("", []), "测试前提错：%s 应默认为空 ✗" % k
+
+    used = []
+
+    class _Cli:
+        class model:            # noqa: N801
+            provider_id, model_id = "host", "default-model"
+
+        async def chat(self, req):
+            used.append("called")
+            return type("R", (), {"tool_calls": None, "text_response": '{"summary":"用户喜欢甜食，已归档完成","facts":[]}'})()
+
+    class _AuditCli(_Cli):
+        async def chat(self, req):
+            used.append("called")
+            return type("R", (), {"tool_calls": None, "text_response": '{"actions":[]}'})()
+
+    p.ctx.get_default_fast_llm_client = lambda: used.append("fast") or _Cli()
+    p.ctx.get_default_llm_client = lambda: used.append("llm") or _AuditCli()
+    p.ctx.get_default_embedding_client = lambda: used.append("embed") or _Cli()
+
+    # ① 压缩 ⇒ 必须走宿主 **fast** 默认 ✓
+    _now = time.time()
+    run(p.store.call("capture", SID, "turn-restore", [
+        {"role": "user", "content": "第 %d 条原始消息" % i, "time": _now + i,
+         "users": ["test:qq:u"], "speaker": "小明", "speaker_id": "test:qq:u"}
+        for i in range(8)]))
+    p.settings = p.settings.model_copy(
+        update={"compress_batch_mode": "records", "threshold": 8, "batch_size": 6})
+    p._build_aux()
+    run(p.engine.compress(SID))
+    assert "fast" in used, "压缩在空模型时没有跟随宿主默认（fast）✗ 实际 %s" % used
+
+    # ② 审计 ⇒ 必须走宿主 **默认 LLM** ✓（不是 fast ✗）
+    used.clear()
+    p.store.add_facts(SID, [{
+        "subject": "用户", "category": "profile", "content": "用户喜欢甜食",
+        "importance": 6, "reason": "restore-test", "scenario": "",
+        "relations": [], "tags": [], "source_ids": [], "time": "2026-10-12T10:00:00",
+    }])
+    run(p.engine.audit(SID))
+    assert "llm" in used, "审计在空模型时没有跟随宿主默认 LLM ✗ 实际 %s" % used
+
+    # ③ 向量 ⇒ 必须走宿主 **默认 embedding** ✓
+    used.clear()
+    p.settings = p.settings.model_copy(update={"semantic_enabled": True, "embedding_model": ""})
+    cfg = type("C", (), {"semantic_enabled": True, "embedding_model": ""})()
+    run(p.engine.embed("测试文本", cfg))
+    assert "embed" in used, "向量在空模型时没有跟随宿主默认 embedding ✗ 实际 %s" % used

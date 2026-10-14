@@ -79,6 +79,9 @@ F.markMarquees({ querySelectorAll: () => [
 console.log(JSON.stringify({
   labels, unique: uniq.size, rows,
   legacy_fallback: F.chainRefsOf("compress_model", "workbuddy:gpt-4o").length,
+  // ★ 恢复默认后的状态：值清空 ⇒ 链必须为空（= 跟随宿主默认 ✓ 不是"零档" ✗）
+  empty_chain: F.chainRefsOf("compress_models", "").length,
+  empty_legacy: F.chainRefsOf("compress_model", "").length,
   marquee: {
     copies: (mq.match(/mmq-tx/g) || []).length,
     hasInner: mq.indexOf("mmq-in") >= 0,
@@ -146,3 +149,16 @@ def test_marquee_css_exists_in_stylesheet():
     assert ".mmq.is-wide:hover .mmq-in" in css, "悬停触发规则缺失 ✗"
     assert ".chain-item.is-on" in css, "已选中条目常驻滚动规则缺失 ✗"
     assert "prefers-reduced-motion" in css, "应尊重系统「减少动态效果」 ✗"
+
+
+def test_restore_default_clears_the_chain_so_host_default_applies():
+    """★ 用户问的："前端点恢复默认并保存，真的恢复默认并正常使用了吗？"
+
+    恢复默认 ⇒ 值被清空 ⇒ 前端解析出的链必须是**空**（= 跟随宿主默认 ✓）
+    而不是残留旧值 ✗（那样保存后还在用旧模型 ⇒ 看起来"恢复了"其实没有 ✗）
+    """
+    data = _run_driver()
+    assert data["empty_chain"] == 0, "清空后链里还有残留 ✗ 实际 %s 档" % data["empty_chain"]
+    assert data["empty_legacy"] == 0, "清空后旧单模型字段还有残留 ✗"
+    # 而"有值"时仍然照旧解析成 1 档（不能把正常配置也清掉 ✗）
+    assert data["legacy_fallback"] == 1, "有旧单模型值时应当解析成第 1 档 ✗"
