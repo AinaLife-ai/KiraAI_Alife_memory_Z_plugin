@@ -571,3 +571,34 @@ def test_default_models_are_always_listed(tmp_path):
     assert "ghost:cc-model" in ids, (
         "正在使用的默认模型没被列出 ✗（这正是用户报的「查无此人」✓）实际 %s" % ids)
     assert len(ids) == len(set(ids)), "去重失效 ⇒ 出现重复 ✗ %s" % ids
+
+
+def test_model_display_name_on_30_reads_model_name_attr(tmp_path):
+    """★ 3.0 形状差异（用户实拍「模型名全变成 UUID」✗）：
+
+    3.0 的 `get_model_infos(pid)` 返回对象里 **`model_config` 是空的 `{}`** ✗，
+    显示名改挂在**对象属性 `model_name`** 上 ✓（2.x 才在 model_config 里 ✓）
+    ⇒ 只读 model_config 就取不到名字 ⇒ 回退成 id ✗（3.0 的 id 是 UUID ⇒ 面板显示一串哈希 ✓）
+    """
+    p = build(tmp_path)
+
+    class Info:
+        def __init__(self, mid, nm):
+            self.model_id, self.model_name = mid, nm
+            self.model_config = {}          # ★ 3.0：空 ✗
+            self.provider_name = "提供商一"
+
+    class _PM:
+        kira_config = {"providers": {"p1": {"name": "提供商一", "model_config": {}}}}
+
+        def get_all_providers(self):
+            return {"p1": Info("x", "y")}
+
+        def get_model_infos(self, pid):
+            return [Info("3f2c1d9e-uuid-hash", "真名一")]
+
+    p.ctx.provider_mgr = _PM()
+    got = run(p.api_models())["models"]
+    assert got, "一条都没列出 ✗"
+    assert got[0]["name"] == "真名一", (
+        "3.0 下显示名丢了 ⇒ 会退化成 UUID ✗ 实际 %r" % got[0])

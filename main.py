@@ -4951,11 +4951,20 @@ class AlifeMemoryPlugin(BasePlugin):
                     if not _mid or _kk not in ("llm", "embedding"):
                         continue
                     _mc = getattr(info, "model_config", None)
+                    _mc = dict(_mc) if isinstance(_mc, dict) else {}
+                    # ★★ 2026-10-15（用户实拍 3.0："模型名全变成 UUID" ✗）：
+                    #   3.0 的 `get_model_infos` 返回对象里 **`model_config` 是空的** ✗，
+                    #   显示名改挂在**对象属性 `model_name`** 上 ✓（2.x 才在 model_config 里 ✓）
+                    #   ⇒ 只读 model_config 就取不到名字 ⇒ 回退成 id ✗
+                    #     （3.0 的 id 是 UUID ⇒ 面板上显示成一串哈希 ✓ = 用户看到的现象 ✓）
+                    _nm = (getattr(info, "model_name", None)
+                           or getattr(info, "display_name", None))
+                    if _nm and not _mc.get("model_name"):
+                        _mc["model_name"] = _nm
                     _pn = (getattr(info, "provider_name", None) or pname)
                     if not _pn and isinstance(_mc, dict):
                         _pn = _mc.get("provider_name")
-                    _push(pid, _kk, _mid, _mc if isinstance(_mc, dict) else {},
-                          _pn, "infos")
+                    _push(pid, _kk, _mid, _mc, _pn, "infos")
             except Exception:
                 pass
             # ①-b 官方取模型（与运行时同一份 ✓）
