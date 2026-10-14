@@ -902,7 +902,7 @@ class AlifeMemoryPlugin(BasePlugin):
             _cfg = getattr(_pm, "kira_config", None) or {}
             _provs = (_cfg.get("providers") or {}) if hasattr(_cfg, "get") else {}
             _parts = []
-            for _pid, _pv in list(_provs.items())[:20]:
+            for _pid, _pv in list(_provs.items()):   # ★ 全量打印（原来只打前 20 ✗ 会让人误以为"没有那家" ✓）
                 _mc = (_pv or {}).get("model_config") or {}
                 _parts.append("%s(%d)" % ((_pv or {}).get("name") or _pid,
                                           len(_mc.get("llm") or {}) + len(_mc.get("embedding") or {})))
@@ -4850,82 +4850,179 @@ class AlifeMemoryPlugin(BasePlugin):
     @register.api(method="GET", path="/models", auth=True)
     async def api_models(self):
         result = []
-        # ★ 2026-09-23：`provider_mgr` / `kira_config` 不是 PluginContext 的固定契约
-        #   （框架版本演进过）⇒ 用 getattr 链兜底 ✗ 否则前端"模型下拉"直接 500 ✗
-        provider_mgr = getattr(self.ctx, "provider_mgr", None)
-        kira_config = getattr(provider_mgr, "kira_config", None) or {}
-        providers = (kira_config.get("providers") or {}) if isinstance(kira_config, dict) else {}
-        # ★ 2026-10-15（用户实拍："模型列表依然是不全的"）：**先问框架自己的接口** ✓
-        #   只读配置字典会漏 ✗（不同版本字段不同 / 运行时注册 / 存在别处）
-        #   ⇒ 框架的 get_model_infos/get_models 是**官方出口** ✓ 这里先走它，再兜底读字典 ✓
-        for pid in list(providers.keys()):
+        seen_ids = set()
+
+        def _push(pid, kind, mid, entry, pname, src):
+            """加入一个模型（按 `pid:mid` 去重 ✓）"""
+            key = "%s:%s" % (pid, mid)
+            if key in seen_ids or not str(mid).strip():
+                return
+            seen_ids.add(key)
+            entry = entry if isinstance(entry, dict) else {}
             try:
-                infos = None
-                for fn in ("get_model_infos", "get_models"):
-                    f = getattr(provider_mgr, fn, None)
-                    if callable(f):
-                        try:
-                            infos = f(pid)
-                        except Exception:
-                            infos = None
-                        if infos:
-                            break
-                for info in (infos or []):
-                    mid = getattr(info, "model_id", None)
-                    mtype = getattr(info, "model_type", None)
-                    kind = getattr(mtype, "value", mtype) or "llm"
-                    if not mid or kind not in ("llm", "embedding"):
-                        continue
-                    cfg = getattr(info, "model_config", None)
-                    display, legacy = self._model_entry_name(str(mid), cfg if isinstance(cfg, dict) else {})
-                    result.append({
-                        "id": f"{pid}:{mid}",
-                        "name": display,
-                        "model": display,
-                        "provider": getattr(info, "provider_name", None) or (providers.get(pid) or {}).get("name") or pid,
-                        "kind": kind,
-                        "legacy": legacy,
-                        "key": str(mid),
-                    })
+                display, legacy = self._model_entry_name(str(mid), entry)
+            except Exception:
+                display, legacy = str(mid), ""
+            result.append({"id": key, "name": display, "model": display,
+                           "provider": pname or pid, "kind": kind,
+                           "legacy": legacy, "key": str(mid), "src": src})
+
+        # `provider_mgr` / `kira_config` 不是 PluginContext 的固定契约（框架演进过 ✓）
+        provider_mgr = getattr(self.ctx, "provider_mgr", None)
+        kira_config = getattr(provider_mgr, "kira_config", None)
+        providers = {}
+        if isinstance(kira_config, dict):
+            providers = kira_config.get("providers") or {}
+        elif isinstance(getattr(provider_mgr, "providers_config", None), dict):
+            providers = provider_mgr.providers_config
+
+        def _cfg_get(key, default=None):
+            """读框架配置（KiraConfig 或纯 dict 都能读 ✓）"""
+            try:
+                if kira_config is not None and hasattr(kira_config, "get_config"):
+                    val = kira_config.get_config(key)
+                    if val not in (None, "", {}):
+                        return val
+                if isinstance(kira_config, dict):
+                    cur = kira_config
+                    for part in str(key).split("."):
+                        if not isinstance(cur, dict):
+                            return default
+                        cur = cur.get(part)
+                    return cur if cur is not None else default
             except Exception:
                 pass
-        for pid, provider in providers.items():
-            for kind in ("llm", "embedding"):
-                for mid, entry in provider.get("model_config", {}).get(kind, {}).items():
-                    # ★ 2026-10-10：显示名与内部 id **分开** ✓
-                    #   3.0 的 key 是 uuid ✗（用户看到一串哈希 ✗ 截图实证）；
-                    #   可读名在 entry["model_name"] ✓，旧引用在 entry["legacy_ids"] ✓
-                    display, legacy = self._model_entry_name(mid, entry)
-                    result.append({
-                        "id": f"{pid}:{mid}",      # ★ 传参用这个（= 3.0 的 model_uuid 格式 ✓）
-                        "name": display,           # ★ 显示用这个（人类可读 ✓）
-                        "model": display,
-                        # v2.18.1：带上"用户在 KiraAI 里看到的提供商名字"，前端别再显示内部 id ✗
-                        "provider": provider.get("name") or pid,
-                        "kind": kind,
-                        "legacy": legacy,          # ★ 老配置里存的旧名 ⇒ 前端仍能回显 ✓
-                        "key": str(mid),           # 模型键（撞车时的区分后缀来源 ✓）
-                    })
-        # ★ 两条路可能给出同一条 ⇒ 按 id **去重**（保留先到的 ✓）
-        _uniq, _seen_ids = [], set()
-        for _it in result:
-            if _it["id"] in _seen_ids:
+            return default
+
+        # ★ 2026-10-15（用户实拍 + 真框架复现）：提供商必须取**与运行时同一份** ✗→✓
+        #   真因：`kira_config["providers"]` 与 `provider_manager` 的**活注册表**可能是两份 ✗
+        #        而用户 WebUI 建的、**真的在跑**的那家（如 commandcode）只在活注册表里 ✓
+        #   ⇒ 三路并集：① 活注册表 ② 配置字典 ③ **默认模型指向的提供商** ✓
+        live = {}
+        try:
+            _fn = getattr(provider_mgr, "get_all_providers", None)
+            live = (_fn() if callable(_fn) else None) or {}
+        except Exception:
+            live = {}
+        pids = list(live.keys()) if isinstance(live, dict) else []
+        if isinstance(providers, dict):
+            for _pid in providers.keys():
+                if _pid not in pids:
+                    pids.append(_pid)
+        default_refs = []
+        for _key, _label in (("models.default_llm", "主"),
+                             ("models.default_fast_llm", "快速"),
+                             ("models.default_embedding", "向量"),
+                             ("models.default_rerank", "重排")):
+            _ref = str(_cfg_get(_key) or "").strip()
+            if not _ref or ":" not in _ref:
                 continue
-            _seen_ids.add(_it["id"])
-            _uniq.append(_it)
-        result = _uniq
+            _pid, _, _mid = _ref.partition(":")
+            _pid, _mid = _pid.strip(), _mid.strip()
+            if not _pid or not _mid:
+                continue
+            default_refs.append((_pid, _mid, _label, _key))
+            if _pid not in pids:
+                pids.append(_pid)
+                logger.info("[记忆·Z] 默认模型指向的提供商不在任何列表里 ⇒ 已补进下拉：%s", _pid)
+
+        def _name_of(pid):
+            try:
+                _pv = live.get(pid) if isinstance(live, dict) else None
+                _n = (getattr(_pv, "name", None) or getattr(_pv, "provider_name", None)
+                      or (_pv.get("name") if isinstance(_pv, dict) else None))
+            except Exception:
+                _n = None
+            if not _n and isinstance(providers, dict):
+                _n = (providers.get(pid) or {}).get("name")
+            return _n
+
+        for pid in pids:
+            pname = _name_of(pid)
+            # ①-a 框架接口 `get_model_infos`（返回**对象列表**，含 provider_name/model_config ✓）
+            #     ★ 用户实拍"列表依然不全"后优先接的正是这条 ✓
+            try:
+                _fn = getattr(provider_mgr, "get_model_infos", None)
+                infos = _fn(pid) if callable(_fn) else None
+                for info in (infos or []):
+                    _mid = getattr(info, "model_id", None)
+                    _mt = getattr(info, "model_type", None)
+                    _kk = getattr(_mt, "value", _mt) or "llm"
+                    if not _mid or _kk not in ("llm", "embedding"):
+                        continue
+                    _mc = getattr(info, "model_config", None)
+                    _pn = (getattr(info, "provider_name", None) or pname)
+                    if not _pn and isinstance(_mc, dict):
+                        _pn = _mc.get("provider_name")
+                    _push(pid, _kk, _mid, _mc if isinstance(_mc, dict) else {},
+                          _pn, "infos")
+            except Exception:
+                pass
+            # ①-b 官方取模型（与运行时同一份 ✓）
+            try:
+                _fn = getattr(provider_mgr, "get_models", None)
+                gm = _fn(pid) if callable(_fn) else None
+                if isinstance(gm, dict):
+                    for kind, mmap in gm.items():
+                        kk = getattr(kind, "value", kind)
+                        if kk not in ("llm", "embedding") or not isinstance(mmap, dict):
+                            continue
+                        for mid, entry in mmap.items():
+                            _push(pid, kk, mid, entry, pname, "api")
+            except Exception:
+                pass
+            # ② 配置字典兜底
+            if isinstance(providers, dict):
+                mc = ((providers.get(pid) or {}).get("model_config") or {})
+                if isinstance(mc, dict):
+                    for kind in ("llm", "embedding"):
+                        mmap = mc.get(kind) or {}
+                        if not isinstance(mmap, dict):
+                            continue
+                        for mid, entry in mmap.items():
+                            _push(pid, kind, mid, entry, pname, "dict")
+
+        # ★★ 2026-10-15：**正在使用的默认模型必须能被选到** ✓
+        #   真框架复现：只在活注册表里的提供商 ⇒ `get_models(pid)` 返回 **{}** ✗、字典也没有 ✗
+        #   ⇒ 而它正是 `models.default_llm`（**真的在跑** ✓）⇒ 面板里"查无此人" ✗（用户报的 ✓）
+        for _pid, _mid, _label, _key in default_refs:
+            if _key.endswith("rerank"):
+                continue          # 重排不是"可选的对话模型"，不塞进链 ✓
+            if ("%s:%s" % (_pid, _mid)) in seen_ids:
+                continue
+            _entry = {}
+            try:
+                _fn = getattr(provider_mgr, "get_model_info", None)
+                _mi = _fn(_pid, _mid) if callable(_fn) else None
+                _mc = getattr(_mi, "model_config", None) if _mi is not None else None
+                if isinstance(_mc, dict):
+                    _entry = _mc
+            except Exception:
+                _entry = {}
+            _kind = "embedding" if _key.endswith("embedding") else "llm"
+            _push(_pid, _kind, _mid, _entry,
+                  (_name_of(_pid) or _pid) + "（默认%s）" % _label, "default")
+            logger.info("[记忆·Z] 默认%s模型不在任何列表里 ⇒ 已补进下拉：%s:%s", _label, _pid, _mid)
+
+        # ★ 2026-10-15：把**接口实际返回了什么**写进日志 ✓（面板零改动 ✓ 只在内容变化时打印 ✓）
+        try:
+            _sig = (len(result), tuple(m["id"] for m in result[:3]))
+            if getattr(self, "_models_log_sig", None) != _sig:
+                self._models_log_sig = _sig
+                logger.info("[记忆·Z] 模型下拉清单：共 %d 个 —— %s%s",
+                            len(result), "、".join(str(m["id"]) for m in result[:14]),
+                            "…" if len(result) > 14 else "")
+        except Exception:
+            pass
 
         # ★ 2026-10-12（用户实拍）：**显示名撞车**的模型要让前端能区分 ✓
-        #   典型：两台提供商都叫「XXX」但类型不同（一个 OpenAI 兼容、一个别的）✗
-        #   或同一个提供商下两个模型显示名一样 ✗ ⇒ 面板里两个芯片长得一模一样 ⇒ 分不清、易删错 ✗
-        #   这里按 (显示名 + 提供商显示名 + 类型) 统计重名，重名的补一个**短标识** ✓
+        #   （同一显示名 + 同一提供商 + 同类型 ⇒ 重名 ⇒ 补一个短标识 ✓）
         seen = {}
         for item in result:
             sig = (item["name"], item["provider"], item["kind"])
             seen[sig] = seen.get(sig, 0) + 1
         for item in result:
-            sig = (item["name"], item["provider"], item["kind"])
-            if seen[sig] > 1:
+            if seen[(item["name"], item["provider"], item["kind"])] > 1:
                 item["dup"] = True
                 item["tag"] = str(item["id"]).split(":", 1)[0] or item["key"]
         return {"models": result}

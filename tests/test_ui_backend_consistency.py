@@ -536,3 +536,38 @@ def test_model_list_also_uses_framework_official_accessor(tmp_path):
     assert "p1:only_via_api" in ids, "框架接口给出的模型被漏掉了 ✗ 实际 %s" % ids
     assert "p1:only_in_dict" in ids, "配置字典里的模型也要在（兜底那条路 ✓）实际 %s" % ids
     assert len(ids) == len(set(ids)), "两条路合并后出现重复 ✗ %s" % ids
+
+
+# ---------------------------------------------------------------- 默认模型必定可选
+def test_default_models_are_always_listed(tmp_path):
+    """★ 用户实拍（真框架已复现）：**正在用的默认模型**必须出现在下拉里 ✓
+
+    复现场景（2026-10-15）：
+      · 某提供商只存在于 `provider_manager` 的**活注册表**里（WebUI 就是那么建的 ✓）
+      · 配置字典里没有它 ✗，框架官方 `get_models(pid)` 对它返回 **{}** ✗
+      · 而 `models.default_llm` 正指向它的模型（**真的在跑** ✓）
+      ⇒ 三条枚举路全落空 ⇒ 面板里"查无此人" ✗（用户："commandcode 前端和日志都找不到，但它真在处理记忆"）
+    修：把 `models.default_*` 指向的模型**逐个补进下拉** ✓（保底一定可选 ✓）
+    """
+    p = build(tmp_path)
+
+    class _Obj:
+        name = "只在活注册表"
+
+    class _PM:
+        # 活注册表里有 ✓；字典里没有 ✗；官方 get_models 返回空 ✗ —— 完全照用户现场 ✓
+        kira_config = {"providers": {}, "models": {"default_llm": "ghost:cc-model",
+                                                   "default_fast_llm": "ghost:cc-model"}}
+
+        def get_all_providers(self):
+            return {"ghost": _Obj()}
+
+        def get_models(self, pid):
+            return {}
+
+    p.ctx.provider_mgr = _PM()
+    got = [(m["id"], m["name"]) for m in run(p.api_models())["models"]]
+    ids = [g[0] for g in got]
+    assert "ghost:cc-model" in ids, (
+        "正在使用的默认模型没被列出 ✗（这正是用户报的「查无此人」✓）实际 %s" % ids)
+    assert len(ids) == len(set(ids)), "去重失效 ⇒ 出现重复 ✗ %s" % ids

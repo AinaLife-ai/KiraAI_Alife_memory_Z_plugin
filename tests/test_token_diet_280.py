@@ -573,7 +573,10 @@ def test_model_options_show_provider_name():
         "选项文本必须用显示名并带回退 ✗")
     assert "esc(m.id)" not in app.split("m.provider")[1][:600], "不许再直接显示内部 id ✗"
     main = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert 'provider.get("name") or pid' in main, "后端必须带提供商显示名（缺了回退到 pid）"
+    # 2026-10-15：`api_models` 重写为"三路并集"（活注册表 + 配置字典 + 默认模型 ✓）
+    #   ⇒ 提供商显示名改为经 `_name_of(pid)` 取、并保留"缺了回退到 pid" ✓（原意不变 ✓）
+    assert ("_name_of(pid)" in main and "pname or pid" in main) or \
+        ('provider.get("name") or pid' in main), "后端必须带提供商显示名（缺了回退到 pid）"
 
 
 def test_sidebar_nav_is_scrollable():
