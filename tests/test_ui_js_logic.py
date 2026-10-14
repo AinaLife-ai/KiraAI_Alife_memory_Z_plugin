@@ -54,7 +54,8 @@ function extract(name) {
 const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "hostDefaultLabel", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
               "chainRowHtml", "chainListHtml"];
 const code = want.map(extract).join("\n");
-const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} } };
+const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} },
+  };
 require("vm").createContext(sandbox);
 require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf,plainModelSelect,chainCombo};", sandbox);
 const F = sandbox.__fn;
@@ -267,3 +268,22 @@ def test_stylesheet_is_versioned_and_box_scrolls_always():
     assert ".chain-box .mmq.is-wide .mmq-in," in css, \
         "显示框里的名字必须**常驻滚动**（不只是悬停 ✓）"
     assert "@keyframes mmq-run" in css and "translateX(-50%)" in css
+
+
+def test_styles_are_injected_and_build_is_never_stale():
+    """★ 两条守卫（2026-10-15 用户实拍之后定的）
+
+    ① **滚动样式由 app.js 注入**（`ensureMarqueeStyles` ✓）
+       上一版只给 style.css 加 `?v=` ✗ —— 只要框架/浏览器缓存了 CSS，动画就还是加载不上 ✗
+    ② **页面 HTML 被缓存时能自愈**（`index.html` 里的版本比对脚本 ✓）
+       旧 HTML 指向旧资源 ⇒ 用户"更新了插件却没变化" ✗ ⇒ 发现版本不一致就自动强刷一次 ✓
+    ③ 面板里**不允许再塞任何诊断/调试行** ✗（用户明确要求 ✓）
+    """
+    src = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "function ensureMarqueeStyles()" in src, "滚动样式没有从 JS 注入 ✗"
+    assert "ensureMarqueeStyles();" in src, "注入函数没有被调用 ✗"
+    for bad in ("modelsDiagText", "APP_BUILD", "chain-src"):
+        assert bad not in src, "面板里不该出现诊断/调试物：%s ✗（用户明确不允许 ✓）" % bad
+    idx = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert "app.js?v=" in idx, "app.js 必须带版本号 ✗"
+    assert "alife-asset-bust-" in idx, "缺少『HTML 被缓存就自愈强刷』的脚本 ✗"
