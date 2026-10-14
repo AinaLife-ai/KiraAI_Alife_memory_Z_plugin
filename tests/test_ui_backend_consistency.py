@@ -502,3 +502,37 @@ def test_restore_default_makes_each_consumer_follow_host_defaults(tmp_path):
     cfg = type("C", (), {"semantic_enabled": True, "embedding_model": ""})()
     run(p.engine.embed("测试文本", cfg))
     assert "embed" in used, "向量在空模型时没有跟随宿主默认 embedding ✗ 实际 %s" % used
+
+
+# ---------------------------------------------------------------- 模型列表完整性
+def test_model_list_also_uses_framework_official_accessor(tmp_path):
+    """★ 用户实拍："模型列表依然是不全的" ⇒ 不能**只**读配置字典 ✗
+
+    真因：只按 `provider_mgr.kira_config["providers"][pid]["model_config"][kind]` 取 ✗
+    ⇒ 只要框架把模型记在别处（版本差异 / 运行时注册 / 存 DB）就会漏 ✓
+    修：**先问框架自己的接口**（`get_model_infos` / `get_models` ✓），再兜底读字典 ✓，两条路合并去重 ✓
+    本用例：让"框架接口"给出一个**字典里没有**的模型 ⇒ 列表必须包含它 ✓
+    """
+    p = build(tmp_path)
+
+    class _Info:
+        def __init__(self, mid, name):
+            self.model_id, self.model_name = mid, name
+            self.model_type = "llm"
+            self.provider_name = "框架提供商"
+            self.model_config = {"model_name": name}
+
+    class _PM:
+        kira_config = {"providers": {"p1": {"name": "字典提供商",
+                                            "model_config": {"llm": {"only_in_dict": {"model_name": "只在字典"}}}}}}
+
+        def get_model_infos(self, pid):
+            # 框架接口给出一个**字典里没有**的模型（模拟"注册在别处" ✓）
+            return [_Info("only_via_api", "只在框架接口")]
+
+    p.ctx.provider_mgr = _PM()
+    got = [(m["id"], m["name"]) for m in run(p.api_models())["models"]]
+    ids = [g[0] for g in got]
+    assert "p1:only_via_api" in ids, "框架接口给出的模型被漏掉了 ✗ 实际 %s" % ids
+    assert "p1:only_in_dict" in ids, "配置字典里的模型也要在（兜底那条路 ✓）实际 %s" % ids
+    assert len(ids) == len(set(ids)), "两条路合并后出现重复 ✗ %s" % ids

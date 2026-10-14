@@ -4839,6 +4839,40 @@ class AlifeMemoryPlugin(BasePlugin):
         provider_mgr = getattr(self.ctx, "provider_mgr", None)
         kira_config = getattr(provider_mgr, "kira_config", None) or {}
         providers = (kira_config.get("providers") or {}) if isinstance(kira_config, dict) else {}
+        # ★ 2026-10-15（用户实拍："模型列表依然是不全的"）：**先问框架自己的接口** ✓
+        #   只读配置字典会漏 ✗（不同版本字段不同 / 运行时注册 / 存在别处）
+        #   ⇒ 框架的 get_model_infos/get_models 是**官方出口** ✓ 这里先走它，再兜底读字典 ✓
+        for pid in list(providers.keys()):
+            try:
+                infos = None
+                for fn in ("get_model_infos", "get_models"):
+                    f = getattr(provider_mgr, fn, None)
+                    if callable(f):
+                        try:
+                            infos = f(pid)
+                        except Exception:
+                            infos = None
+                        if infos:
+                            break
+                for info in (infos or []):
+                    mid = getattr(info, "model_id", None)
+                    mtype = getattr(info, "model_type", None)
+                    kind = getattr(mtype, "value", mtype) or "llm"
+                    if not mid or kind not in ("llm", "embedding"):
+                        continue
+                    cfg = getattr(info, "model_config", None)
+                    display, legacy = self._model_entry_name(str(mid), cfg if isinstance(cfg, dict) else {})
+                    result.append({
+                        "id": f"{pid}:{mid}",
+                        "name": display,
+                        "model": display,
+                        "provider": getattr(info, "provider_name", None) or (providers.get(pid) or {}).get("name") or pid,
+                        "kind": kind,
+                        "legacy": legacy,
+                        "key": str(mid),
+                    })
+            except Exception:
+                pass
         for pid, provider in providers.items():
             for kind in ("llm", "embedding"):
                 for mid, entry in provider.get("model_config", {}).get(kind, {}).items():
@@ -4856,6 +4890,15 @@ class AlifeMemoryPlugin(BasePlugin):
                         "legacy": legacy,          # ★ 老配置里存的旧名 ⇒ 前端仍能回显 ✓
                         "key": str(mid),           # 模型键（撞车时的区分后缀来源 ✓）
                     })
+        # ★ 两条路可能给出同一条 ⇒ 按 id **去重**（保留先到的 ✓）
+        _uniq, _seen_ids = [], set()
+        for _it in result:
+            if _it["id"] in _seen_ids:
+                continue
+            _seen_ids.add(_it["id"])
+            _uniq.append(_it)
+        result = _uniq
+
         # ★ 2026-10-12（用户实拍）：**显示名撞车**的模型要让前端能区分 ✓
         #   典型：两台提供商都叫「XXX」但类型不同（一个 OpenAI 兼容、一个别的）✗
         #   或同一个提供商下两个模型显示名一样 ✗ ⇒ 面板里两个芯片长得一模一样 ⇒ 分不清、易删错 ✗
