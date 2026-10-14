@@ -29,7 +29,9 @@ def test_theme_is_applied_before_stylesheet():
     """内联脚本必须在 <link rel=stylesheet> 之前，否则开屏动画会先闪一下亮色。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")
     script = html.index("alife-theme")
-    css = html.index('href="style.css"')
+    # 用不带闭合引号的写法 ✓：样式表现在带缓存版本号（style.css?v=2.22.12 ✓）
+    # 否则这条"顺序"检查会因为？v= 而失效 ✗（本次实测踩到 ✓）
+    css = html.index("style.css")
     assert script < css, "主题脚本要放在样式表之前才能首帧生效"
 
 
