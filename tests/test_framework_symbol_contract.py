@@ -200,3 +200,30 @@ def test_plugin_has_no_stale_dunder_or_framework_dataclass_assumptions():
                         and isinstance(target.ctx, ast.Store)):
                     offenders.append("%s:%d  event/session 属性赋值" % (path.name, target.lineno))
     assert not offenders, "不要给框架对象赋值（可能是只读 property ✗）：\n  " + "\n  ".join(offenders)
+
+
+def test_manifest_version_spec_allows_current_and_future_frameworks():
+    """★ 声明只能有**下界**，不能有上界 —— 否则将来框架一升版插件就装不上 ✗
+
+    背景（2026-10-14，用户要求"以 3.0 正式版及未来更高版本兼容为准"）：
+      框架加载期用 PEP 440 规范符 + `prereleases=True` 校验 manifest 的 `core_version`
+      ⇒ `>=x.y.z` 这种**只有下界**的写法对 3.0 正式版与未来版本一律放行 ✓
+      ⇒ 一旦有人写成 `<3.1` / `>=2,<3` / `==3.0.0` 之类 ✗ 未来版本就会被挡在门外 ✗
+    这里把这条约定钉成测试 ✓（配合 `tools/future_compat_probe.py` 的实测 ✓）
+    """
+    import json as _json
+
+    manifest = _json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+    spec = str(manifest.get("core_version") or "").strip()
+    assert spec, "manifest 必须有 core_version（否则框架不校验 ⇒ 也不该留空 ✗）"
+    assert spec.startswith(">="), "core_version 必须是 >=x.y.z 形式（只有下界）✗ 实际 %r" % spec
+    for bad in ("<", ",", "==", "~=", "!=", "*"):
+        assert bad not in spec, (
+            "core_version 里出现了会挡住未来版本的写法 %r ✗（%s）"
+            "—— 只能写下界，未来版本一律放行 ✓" % (bad, spec))
+    # 顺带确认兼容测试套件本身也**不硬编码**框架路径（只认 KIRA_CORE ✓）
+    _suites = ["tests/test_framework_symbol_contract.py", "tests/test_real_plugin_manager.py",
+               "tests/test_upgrade_path_e2e.py"]
+    for f in _suites:
+        src = (ROOT / f).read_text(encoding="utf-8")
+        assert "KIRA_CORE" in src, "%s 必须从 KIRA_CORE 取框架路径 ✓" % f

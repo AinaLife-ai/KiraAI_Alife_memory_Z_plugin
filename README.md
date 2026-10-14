@@ -197,7 +197,18 @@ L100 永久记忆（不参与自动压缩，只能由 Bot 主动 Memorize 或你
 2. 安装依赖：`pip install -r requirements.txt`（KiraAI 自带 FastAPI 和 Pydantic，无需另装）。
 3. 在 KiraAI 插件管理里启用，侧边栏会出现 **长期记忆·Z**。
 
-> 核对过的 KiraAI 核心版本：**v2.34.1**（提交 `cad046f`）。没有设置 `core_version` 门槛，兼容性通过真实接口测试确认。
+> **兼容基线：KiraAI 3.0.0 正式版**（`9db3d67`）与 2.x，两代都跑全量测试实测通过 ✓
+> 已声明 `core_version = ">=2.24.3"` —— **只写了下界** ✓ 3.0 正式版与**未来更高版本一律放行** ✓
+> （写成 `<3.1` / `>=2,<3` / `==3.0.0` 这类带上界的写法会把未来版本挡在门外 ✗ 已用测试钉死 ✓）
+>
+> **每次框架发版后跑这三步即可**：
+> 1. `KIRA_CORE=<框架路径> python3 -m pytest tests -q`（全量 ✓ 其中含
+>    `test_framework_symbol_contract.py` 符号契约、`test_real_plugin_manager.py` 真加载器、
+>    `test_upgrade_path_e2e.py` 存量升级 ✓）
+> 2. `python3 tools/future_compat_probe.py --core <框架路径>` —— 造一份"**未来框架**"再跑上面那三套：
+>    只读复制源框架 ✓ 然后做真实发版里最典型的无害演进（版本号 + PluginContext 加字段/方法 +
+>    会话类加属性）⇒ 期望**全绿** ✓（绿了才说明没绑死当前版本 ✓）；
+>    加 `--break <符号名>` 可反向验证：把插件在用的符号改名 ⇒ 期望**报红并精确点名** ✓
 
 ## 第一次使用（推荐设置）
 
@@ -502,6 +513,24 @@ L0（原始消息层）只增不减（软删 + 冷层，从不真删 ✓），�
   · 插件启动日志直接写明：`模型链路：压缩 宿主默认 ｜ 审计 宿主默认 ｜ JEV 宿主默认 ｜ 重排 宿主默认` ✓
   · 两端都加了断言：前端"清空后链必须为空（= 跟随默认，不是零档）" ✓
     后端"空值必须调到对应的**默认入口**"（fast / llm / embedding 三个入口分别校验 ✓）
+- ✅ **对齐 KiraAI 3.0.0 正式版**（`9db3d67`）—— 全量测试 **1057 passed / 0 failed** ✓
+  · rc.1 → 正式版共 14 个提交，涉及插件面的只有"给 `send_message_chain` 加**带默认值的
+    kw-only** `bot` 参数"等**向后兼容**改动 ✓ 符号契约测试实测 **0 处不兼容** ✓
+  · **补上 `manifest.core_version = ">=2.24.3"`** ✓：原来根本没有这个声明 ⇒ 框架不做校验 ✓
+    现在**只写下界** ⇒ 3.0 正式版与**未来更高版本一律放行** ✓（写成 `<3.1` 之类会把未来版本挡住 ✗
+    已用测试钉死 ✓）
+  · 真加载器（真 PluginManager）在 **3.0 正式版 / rc.1 / 2.x 三套框架上都是 9/9** ✓
+- 🧪 **新增 `tools/future_compat_probe.py`：造"未来框架"验证不绑版本**（用户要求"以 3.0 及未来更高版本为准"）
+  · 只读复制源框架 ✓ 再做真实发版里最典型的无害演进（版本号提高 + PluginContext 加字段/方法 +
+    会话类加属性）⇒ 三套兼容测试**全绿** ✓（绿了才说明没绑死当前版本 ✓）
+  · `--break <符号名>` 反向验证：把插件在用的符号改名 ⇒ **报红并精确点名** ✓（实测 ✓）
+- 🐛 **修好了那条一直红的测试**（`test_recall_budget.py::test_jev_on_never_injects_more_facts_than_off`）
+  · 根因（逐层插桩定位）：`initialize()` 把**数据迁移**丢到后台跑 ✓，迁移期间
+    `migration_blocked=True` ⇒ `runtime_settings()` 把 `enabled` 置 False ⇒ `on_request` 立刻
+    `return` ⇒ **注入为空** ⇒ 用例只剩自己的"假绿"守卫报红 ✗
+    （**不是产品问题**：真机上迁移本来就在后台 ✓ 是用例没等它就绪 ✓）
+  · 修：用例里加 `_settle()` **等后台任务结束**再注入 ✓（另关掉与本题无关的 `auto_migrate` ✓）
+  · 连带治本：`tests/conftest.py` 补上**数据目录隔离**（原来只隔离了配置路径 ✗）
 - 🔧 其他一致性
   · 链长上限**单一来源**：后端透出 `chain_max`（原前端硬编码 3 处 ✗）
   · 新增 `tests/test_ui_backend_consistency.py`（9 条）+ `tests/test_ui_js_logic.py`（5 条，仓库首个 JS 测试）

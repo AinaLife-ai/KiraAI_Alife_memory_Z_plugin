@@ -25,11 +25,20 @@ def _isolate_plugin_config_path(tmp_path):
     if not targets:
         yield                      # 该用例没导入插件主模块 ⇒ 无需隔离 ✓
         return
-    saved = [(m, m.get_config_path) for m in targets]
-    for m, _ in saved:
+    saved = [(m, m.get_config_path, getattr(m, "get_data_path", None)) for m in targets]
+    for m, _, _ in saved:
         m.get_config_path = lambda: tmp_path / "cfg"
+        # ★ 2026-10-14（用户要求修绿那条红的）：**数据目录也必须隔离** ✗
+        #   否则插件启动时的 migrate() 会看到仓库里的 `data/memory/`（遗留数据源）
+        #   ⇒ 置 `migration_blocked=True` ⇒ `runtime_settings()` 直接把 enabled 置 False
+        #   ⇒ on_request 立刻 return ⇒ **什么都没注入** ⇒ 测试静默变空 ⇒ 假红/假绿 ✓
+        #   （实测：`test_jev_on_never_injects_more_facts_than_off` 就是这么一直红的 ✓）
+        if hasattr(m, "get_data_path"):
+            m.get_data_path = lambda: tmp_path / "data"
     try:
         yield
     finally:
-        for m, fn in saved:
+        for m, fn, dfn in saved:
             m.get_config_path = fn
+            if dfn is not None:
+                m.get_data_path = dfn

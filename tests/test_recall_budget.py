@@ -6,6 +6,7 @@
    —— 未压缩原文、父行已消失的孤儿折叠行**照旧召回** ✓（唯一副本不能丢）
 """
 
+import asyncio
 import importlib
 import itertools
 import os
@@ -155,6 +156,25 @@ def _seed(store, sid, texts):
         for i, t in enumerate(texts)])
 
 
+async def _settle(plugin):
+    """等插件的**后台迁移任务**结束 ✓
+
+    ★ 2026-10-14（用户要求修绿这条一直红的用例）：`initialize()` 会把 `migrate()` 丢到后台
+      （`self.migration_task = asyncio.create_task(self.migrate())` ✓），而迁移期间
+      `migration_blocked=True` ⇒ `runtime_settings()` 把 enabled 置 False ⇒ `on_request` 立刻 return
+      ⇒ **注入为空** ⇒ 用例只剩自己的"假绿"守卫报红 ✓（实测插桩逐层定位到这一步 ✓）
+    ⇒ 正确做法是**等它结束**再注入 ✓（这不是产品问题：真机上迁移本来就在后台跑 ✓）
+    """
+    task = getattr(plugin, "migration_task", None)
+    if task is not None:
+        try:
+            await task
+        except Exception:
+            pass
+    for _ in range(50):                      # 再让事件循环转几圈（其余后台任务收尾 ✓）
+        await asyncio.sleep(0)
+
+
 async def _inject(plugin, text, sess):
     session = Session(adapter_name="test", session_type="dm", session_id=sess)
     msg = KiraIMMessage(message_id="m", self_id="bot",
@@ -198,6 +218,7 @@ async def test_jev_on_never_injects_more_facts_than_off(tmp_path):
     # ① JEV 关
     p_off = _boot(tmp_path / "off", **common)
     await p_off.initialize()
+    await _settle(p_off)
     _seed(p_off.store, "qq:gm:seed", seeds)
     off_view = await _inject(p_off, "你还记得我花生过敏的事吗", "s-off")
     n_off = len(_fact_lines(off_view))
@@ -208,6 +229,7 @@ async def test_jev_on_never_injects_more_facts_than_off(tmp_path):
                                     jev_api_key="stub", jev_model_name="jev-latest",
                                     recall_budget_mode="strict"))
     await p_on.initialize()
+    await _settle(p_on)
     _seed(p_on.store, "qq:gm:seed", seeds)
     # ★ 先把决策层建好，再装桩 ✗ 否则 on_request 里的 _ensure_aux() 会重建，
     #   把桩冲掉 ⇒ 测试变成"假绿"（实测踩到：切 loose 也不红 ✓ 说明 JEV 根本没生效）
