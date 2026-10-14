@@ -198,7 +198,9 @@ async function api(path, body) {
             /[\u3400-\u9fff]/.test(detail.detail)
               ? detail.detail
               : "")
-        : "操作失败（" + r.status + "），请检查连接或登录状态。",
+        : r.status === 409
+          ? "配置已在别处被改动 ⇒ 请刷新页面后重试（本次未保存）"
+          : "操作失败（" + r.status + "），请检查连接或登录状态。",
     );
   }
   return r.json();
@@ -1550,8 +1552,10 @@ async function saveEdit(extra) {
 }
 function readConfig() {
   const value = { ...config.settings };
-  $$("#configForm [data-key]").forEach((e) => {
-    const key = e.dataset.key,
+  // ★ 2026-10-14 用户实拍：链的隐藏 input 是 data-key="*_model" + **data-field="*_models"** ✗
+  //   原来只读 data-key ⇒ **权威的回退链压根没提交** ✗ ⇒ 保存后链还是旧的、还会被塌缩成一个 ✗
+  $$("#configForm [data-key], #configForm [data-field]").forEach((e) => {
+    const key = e.dataset.field || e.dataset.key,
       kind = e.dataset.kind;
     value[key] =
       kind === "boolean"
@@ -1725,7 +1729,10 @@ function plainModelSelect(modelKey, value, models) {
   const isEmb = modelKey === "embedding_model";
   const tip = modelKey === "compress_model" ? "快速" : modelKey === "audit_model" ? "主" : "向量";
   return (
-    '<select class="' + (isEmb ? "" : "chain-hidden") + '">' +
+      // ★ 2026-10-14 用户实拍：这个**隐藏 select** 本来就要负责提交旧字段（*_model）✗
+      //   但原来没给它 data-key ⇒ readConfig 收不到它 ⇒ 旧字段永远不被提交/不更新 ✗
+      //   （而回退链的 input 又被通用渲染器覆盖成 data-key=*_model ✗ ⇒ 两者都错位 ✓）
+      '<select class="' + (isEmb ? "" : "chain-hidden") + '" data-key="' + modelKey + '" data-kind="string">' +
     '<option value="">使用 KiraAI 默认' + tip + "模型</option>" +
     models
       .filter((m) => m.kind === (isEmb ? "embedding" : "llm"))
@@ -1981,10 +1988,18 @@ function renderConfig(values) {
           ' step="' +
           (type === "number" ? "any" : "1") +
           '">';
+      // ★ 2026-10-14（用户实拍严重问题）：模型字段的 HTML 其实是**整条回退链控件** ✗
+      //   下面这条 replace 命中的是控件里的**第一个 input**（= 链的权威输入 ✗）
+      //   ⇒ 把它的 `data-key=<*_models>` / `data-kind=array` **覆盖成**旧字段名与 string ✗
+      //   ⇒ `readConfig` 于是把链当成旧字符串字段提交 ⇒ **权威的链从没被提交** ✗
+      //     ⇒ 保存成功、切页回来还是旧模型（用户报的就是这个 ✓）
+      //   链控件自己已经带对了属性 ⇒ 对它**跳过**这条替换 ✓
+      if (!(key.endsWith("_model") && key !== "embedding_model")) {
       input = input.replace(
         /<(input|select|textarea)/,
         '<$1 data-key="' + key + '" data-kind="' + type + '"',
       );
+      }
       const wide =
       key === "compress_instruction" || key.endsWith("_prompt") || key.endsWith("_prompt_append");
       const restorable =
@@ -2058,7 +2073,7 @@ function renderConfig(values) {
             val = ksm.type === "boolean" ? false
               : (ksm.type === "integer" || ksm.type === "number") ? 0 : "";
           }
-          const elx = document.querySelector('#configForm [data-key="' + k + '"]');
+          const elx = document.querySelector('#configForm [data-key="' + k + '"], #configForm [data-field="' + k + '"]');
           if (!elx) return;
           if (Array.isArray(val)) elx.value = val.join("\n");
           else if (elx.type === "checkbox") elx.checked = !!val;
@@ -2699,9 +2714,10 @@ async function boot() {
   if (draft?.configDirty) {
     await loadConfig();
     renderConfig({ ...config.settings, ...draft.config });
-    config.revision = draft.configRevision;
-    configDirty = true;
-    $("#dirty").textContent = "已恢复未保存草稿；保存时将检查版本冲突";
+    // ★ 2026-10-14（用户实拍"保存失败"）：**绝不能用草稿里的旧 revision** ✗ 原来这行是
+    //   `config.revision = draft.configRevision;` ⇒ 一次保存失败后草稿就把旧 revision 钉死 ✗
+    //   ⇒ 之后**每次保存都 409（永久失败）** ✗ ⇒ revision 只认服务端刚返回的那个 ✓
+    $("#dirty").textContent = "已恢复未保存草稿（版本以服务器为准 ✓）";
   }
   if (draft?.tab) await selectTab(draft.tab);
   if (draft?.nameDraft) {

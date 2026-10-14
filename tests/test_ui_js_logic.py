@@ -51,12 +51,12 @@ function extract(name) {
   throw new Error("函数 " + name + " 大括号不平衡");
 }
 
-const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
+const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
               "chainRowHtml", "chainListHtml"];
 const code = want.map(extract).join("\n");
 const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} } };
 require("vm").createContext(sandbox);
-require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf};", sandbox);
+require("vm").runInContext(code + "\n;globalThis.__fn={modelLabel,chainLookup,chainListHtml,chainRefsOf,marqueeName,markMarquees,restoreKeysOf,plainModelSelect,chainCombo};", sandbox);
 const F = sandbox.__fn;
 
 const dup = [
@@ -91,8 +91,19 @@ const restore_pairs = {
 // 成对清空后的状态：两个字段都为空 ⇒ 解析出的链必须是空的 ✓
 sandbox.config.settings = { compress_models: [], compress_model: "" };
 const both_cleared_chain = F.chainRefsOf("compress_model", "").length;
+// ★ 2026-10-15（用户实拍严重 bug 回归）：链控件与旧字段的**属性必须各自正确** ✗
+//   否则通用渲染器一覆盖 ⇒ 权威的链提交不出去 ⇒ 保存后切页回跳 ✓
+const comboHtml = F.chainCombo("compress_model", "prov:X", []);
+const selHtml = F.plainModelSelect("compress_model", "prov:X", []);
+const markup = {
+  combo_chainKey: comboHtml.includes('data-key="compress_models"'),
+  combo_arrayKind: comboHtml.includes('data-kind="array"'),
+  combo_hasField: comboHtml.includes('data-field="compress_models"'),
+  select_legacyKey: selHtml.includes('data-key="compress_model"'),
+  select_stringKind: selHtml.includes('data-kind="string"'),
+};
 console.log(JSON.stringify({
-  restore_pairs, both_cleared_chain,
+  restore_pairs, both_cleared_chain, markup,
   labels, unique: uniq.size, rows,
   legacy_fallback: F.chainRefsOf("compress_model", "workbuddy:gpt-4o").length,
   // ★ 恢复默认后的状态：值清空 ⇒ 链必须为空（= 跟随宿主默认 ✓ 不是"零档" ✗）
@@ -203,3 +214,41 @@ def test_restore_default_clears_both_chain_and_legacy_field():
     # 成对清空后 ⇒ 链必须是空的（= 跟随宿主默认 ✓ 而不是"复活旧值" ✗）
     assert data["both_cleared_chain"] == 0, (
         "成对清空后链里还有残留 ⇒ 会继续用旧模型 ✗ 实际 %s" % data["both_cleared_chain"])
+
+
+def test_chain_combo_and_legacy_select_carry_correct_attributes():
+    """★ 用户实拍严重 bug 的回归：链控件 / 旧字段的属性必须**各自正确** ✗
+
+    背景（2026-10-15，在真浏览器 + 真面板上端到端定位）：
+      通用渲染器渲染完字段后会做一次字符串替换：
+        `input.replace(/<(input|select|textarea)/, '<$1 data-key="…" data-kind="…"')`
+      而模型字段的 HTML 其实是**整条回退链控件** ⇒ 它命中的是控件里的**第一个 input**
+      （= 链的权威输入 ✗）⇒ 把 `data-key="compress_models"` / `data-kind="array"`
+      **覆盖成** `compress_model` / `string` ✗
+      ⇒ 保存时权威的链**从没被提交** ⇒ 后端保留旧链 ⇒ **切页回来显示旧模型** ✓（用户报的）
+    修法：链控件自己带对属性且**跳过**那条替换 ✓；隐藏 `<select>` 补上
+      `data-key="*_model"` + `data-kind="string"`（它本来就负责收集旧字段 ✓）
+    本测试直接断言两个控件的**生成结果**，防止再被覆盖 ✗
+    """
+    data = _run_driver()
+    m = data["markup"]
+    assert m["combo_chainKey"], "回退链输入的 data-key 必须是 <*_models> ✗（被覆盖就会切页回跳 ✓）"
+    assert m["combo_arrayKind"], "回退链输入的 data-kind 必须是 array ✗（否则会按字符串提交 ⇒ 422 ✓）"
+    assert m["combo_hasField"], "回退链输入必须带 data-field=<*_models> ✓"
+    assert m["select_legacyKey"], "隐藏 select 必须带 data-key=<*_model>（否则旧字段不被收集 ✗）"
+    assert m["select_stringKind"], "隐藏 select 的 data-kind 应为 string ✗"
+
+
+def test_source_guards_for_the_three_restore_default_bugs():
+    """★ 三个已修 bug 的**源码级守卫**（改回去就报红 ✓）"""
+    src = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    # ① 通用渲染器必须**跳过**模型回退链控件 ✗（否则覆盖链的属性 ⇒ 提交不出去）
+    assert 'key.endsWith("_model") && key !== "embedding_model"' in src, \
+        "通用渲染器没有跳过模型链控件 ✗ ⇒ 链属性会被覆盖 ⇒ 切页回跳 ✓"
+    # ② readConfig 必须优先用 data-field ✓
+    assert "e.dataset.field || e.dataset.key" in src, "readConfig 没优先用 data-field ✗"
+    # ③ 草稿恢复**绝不许**用草稿里的旧 revision ✗（否则一次失败后永远 409 ✓）
+    #    注意：注释里引用了原代码 ⇒ 要**去掉注释行**再判 ✗
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("//"))
+    assert "config.revision = draft.configRevision" not in code, \
+        "草稿又在覆盖 revision ✗ ⇒ 一次保存失败后会永久 409（用户报的\"保存失败\" ✓）"
