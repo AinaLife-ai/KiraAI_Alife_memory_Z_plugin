@@ -1870,7 +1870,7 @@ button.primary:hover::after {
 .chain-box .mmq.is-wide .mmq-in,
 .chain-box:hover .mmq.is-wide .mmq-in,      /* 鼠标悬停显示框 ✓ */
 .chain-list .chain-item:hover .mmq.is-wide .mmq-in,   /* ★ 菜单里的候选条目（原来漏了 ✗）*/
-.plain-models .chain-item:hover .mmq.is-wide .mmq-in { animation: mmq-run 7s linear infinite; }
+.plain-models .chain-item:hover .mmq.is-wide .mmq-in { animation: mmq-run 7s linear infinite !important; }
 .mmq.is-wide:hover .mmq-in { animation-duration: 4.5s; }   /* 悬停时滚快些，方便看全 ✓ */
 @keyframes mmq-run { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 @media (prefers-reduced-motion: reduce) {   /* 尊重系统"减少动态效果" ✓ */
