@@ -1,6 +1,33 @@
 <!doctype html>
 <html lang="zh-CN">
   <head>
+  <script>
+    // ★ 2026-10-15（存量用户升级自愈）：
+    //   本页资源都带版本号（app.js?v=… ✓），但**页面 HTML 自身**可能被浏览器 / 框架缓存 ✗
+    //   ⇒ 缓存里的旧 HTML 指向旧资源 ⇒ 用户永远看不到新代码 ✗（"更新了插件却没变化"就是它 ✓）
+    //   这里：**同步**问一次插件真实版本（服务端 /status ✓），与页内烤好的版本比对
+    //     · 一致 ⇒ 什么都不做 ✓
+    //     · 不一致 ⇒ 用真实版本强刷一次（同版本只刷一次，避免死循环 ✓）
+    (function () {
+      var PID = "alife_memory_z";
+      var BAKED = "2.22.14";
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/plugin/" + PID + "/status", false);   // 同步：几毫秒，换取"立刻正确"
+        xhr.send(null);
+        if (xhr.status !== 200) return;
+        var live = (JSON.parse(xhr.responseText) || {}).version || "";
+        if (live && live !== BAKED) {
+          var key = "alife-asset-bust-" + live;
+          if (!sessionStorage.getItem(key)) {
+            sessionStorage.setItem(key, "1");
+            location.replace(location.pathname + "?v=" + encodeURIComponent(live));
+          }
+        }
+      } catch (e) { /* 取不到就算了：按页内版本正常加载 ✓ */ }
+    })();
+  </script>
+
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta http-equiv="Cache-Control" content="no-cache" />
@@ -22,7 +49,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="style.css?v=2.22.13" />
+    <link rel="stylesheet" href="style.css?v=2.22.14" />
   </head>
   <body>
     <div class="ambient" aria-hidden="true">
@@ -523,7 +550,7 @@
     </dialog>
     <div id="toast" class="hide" role="status"></div>
     <script src="/plugin-bridge.js"></script>
-    <script src="graph.js?v=2.22.13"></script>
-    <script src="app.js?v=2.22.13"></script>
+    <script src="graph.js?v=2.22.14"></script>
+    <script src="app.js?v=2.22.14"></script>
   </body>
 </html>
