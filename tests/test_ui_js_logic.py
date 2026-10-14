@@ -51,7 +51,7 @@ function extract(name) {
   throw new Error("函数 " + name + " 大括号不平衡");
 }
 
-const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
+const want = ["esc", "modelLabel", "marqueeName", "markMarquees", "restoreKeysOf", "hostDefaultLabel", "plainModelSelect", "chainCombo", "chainLookup", "chainKeyOf", "chainRefsOf", "chainNameOf",
               "chainRowHtml", "chainListHtml"];
 const code = want.map(extract).join("\n");
 const sandbox = { Set, Map, Array, String, Object, JSON, console, config: { settings: {} } };
@@ -252,3 +252,18 @@ def test_source_guards_for_the_three_restore_default_bugs():
     code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("//"))
     assert "config.revision = draft.configRevision" not in code, \
         "草稿又在覆盖 revision ✗ ⇒ 一次保存失败后会永久 409（用户报的\"保存失败\" ✓）"
+
+
+def test_stylesheet_is_versioned_and_box_scrolls_always():
+    """★ 用户反馈"模型名不滚动"的两条真原因（2026-10-15）
+
+    ① `index.html` 引 `style.css` **没有版本号** ✗ ⇒ 浏览器长期用**缓存的旧 CSS**
+       ⇒ 之后所有 CSS 改动（含滚动动画）都不会生效 ✗
+    ② 显示框里的名字原来**只在鼠标悬停时**才滚 ✗ ⇒ 用户要求"点击上（选中）也要滚" ✓
+    """
+    idx = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'href="style.css?v=' in idx, "style.css 必须带版本号 ✗（否则旧 CSS 一直缓存 ✓）"
+    css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    assert ".chain-box .mmq.is-wide .mmq-in," in css, \
+        "显示框里的名字必须**常驻滚动**（不只是悬停 ✓）"
+    assert "@keyframes mmq-run" in css and "translateX(-50%)" in css

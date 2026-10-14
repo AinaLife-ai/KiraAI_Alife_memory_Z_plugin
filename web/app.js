@@ -1717,7 +1717,7 @@ function chainListHtml(refs, models, isEmb, lookup) {
       return i >= 0
         ? chainRowHtml(m.id, i, lookup)
         : '<button type="button" class="chain-item" data-ref="' + esc(m.id) + '">' +
-            '<span class="chain-no"></span><span class="chain-nm">' + esc(modelLabel(m)) +
+            '<span class="chain-no"></span><span class="chain-nm">' + marqueeName(modelLabel(m)) +
             '</span><span class="chain-ord"></span><span class="chain-x">＋</span></button>';
     })
     .join("");
@@ -1725,6 +1725,17 @@ function chainListHtml(refs, models, isEmb, lookup) {
 }
 // 原生单选：① 向量模型**不做回退链**（维度一致性 ⇒ 宁缺勿滥）② 回退链里那枚
 // **隐藏**的 `<select data-key="*_model">` ⇒ 保证旧字段照样被收集，逻辑零改动 ✓
+// ★ 2026-10-15（用户实拍）：空值状态原来只显示「使用 KiraAI 默认模型（未指定）」✗
+//   完全看不出"跟随默认"到底是**哪个**模型 ✓（用户："别的向量字段写得好，这个括号很迷惑"）
+//   现在与别的字段统一成：使用 KiraAI 默认{快速/主/向量}模型 ✓
+function hostDefaultLabel(modelKey) {
+  // ★ 2026-10-15：与其它字段**统一**的写法 ✓
+  //   原来链栏是「使用 KiraAI 默认模型（未指定）」✗ —— 括号多余且让人误以为"没默认" ✓
+  const tip = modelKey === "embedding_model" ? "向量"
+    : (modelKey === "compress_model" ? "快速" : "主");
+  return "使用 KiraAI 默认" + tip + "模型";
+}
+
 function plainModelSelect(modelKey, value, models) {
   const isEmb = modelKey === "embedding_model";
   const tip = modelKey === "compress_model" ? "快速" : modelKey === "audit_model" ? "主" : "向量";
@@ -1733,7 +1744,7 @@ function plainModelSelect(modelKey, value, models) {
       //   但原来没给它 data-key ⇒ readConfig 收不到它 ⇒ 旧字段永远不被提交/不更新 ✗
       //   （而回退链的 input 又被通用渲染器覆盖成 data-key=*_model ✗ ⇒ 两者都错位 ✓）
       '<select class="' + (isEmb ? "" : "chain-hidden") + '" data-key="' + modelKey + '" data-kind="string">' +
-    '<option value="">使用 KiraAI 默认' + tip + "模型</option>" +
+    '<option value="">' + hostDefaultLabel(modelKey) + "</option>" +
     models
       .filter((m) => m.kind === (isEmb ? "embedding" : "llm"))
       .slice()
@@ -1769,7 +1780,7 @@ function chainCombo(modelKey, value, models) {
     '<button type="button" class="chain-box">' +
     '<span class="chain-cnt">' + (refs.length ? refs.length + " 档" : "") + "</span>" +
     '<span class="chain-box-tx">' +
-    marqueeName(refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）") +
+    marqueeName(refs.length ? chainNameOf(refs[0], lookup) : hostDefaultLabel(modelKey)) +
     '</span><span class="chain-caret">▾</span></button>' +
     '<div class="chain-menu hide">' +
     '<input type="search" class="chain-search" placeholder="搜索模型名 / 提供商…">' +
@@ -1778,6 +1789,29 @@ function chainCombo(modelKey, value, models) {
     "</div></div>"
   );
 }
+// ★ 2026-10-15（用户实拍："我 webui 注册的提供商和模型找不到"）：**列表只取一次** ✗
+//   原来只有页面加载时 `models = (await api("/models"))?.models` ✓ ⇒ 之后你在 KiraAI WebUI 里
+//   新建的提供商 / 新加的模型**永远进不了这个下拉** ✗（列表还按提供商名排序 ⇒ 看着像"到某家就结束"✗）
+//   ⇒ 打开模型菜单时**重新拉一次**，并让界面上所有链控件就地重画 ✓（不动用户已选的内容 ✓）
+async function refreshModels() {
+  try {
+    const d = await api("/models");
+    const got = (d && d.models) || [];
+    if (!got.length) return;
+    models = got;
+    $$("#configForm .chain-combo").forEach((c) => {
+      // ★ 直接重画列表（**不能**靠 dispatch("input") ✗：链控件的监听器在"值没变"时会早退 ✗）
+      const h = c.querySelector('input[type="hidden"]');
+      const lst = c.querySelector(".chain-list");
+      if (!h || !lst) return;
+      const refs = (h.value || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      const isEmb = c.dataset.modelKey === "embedding_model";
+      lst.innerHTML = chainListHtml(refs, models, isEmb, chainLookup(models));
+      markMarquees(c);                    // 新名字可能也长 ⇒ 重新判定滚动 ✓
+    });
+  } catch (e) { /* 网络抖动不影响已渲染的列表 ✓ */ }
+}
+
 function bindChainCombos() {
   $$("#configForm .chain-combo").forEach((combo) => {
     const modelKey = combo.dataset.modelKey;
@@ -1805,7 +1839,7 @@ function bindChainCombos() {
       const cntEl = combo.querySelector(".chain-cnt");
       if (!boxTx || !cntEl) return;            // 结构已被重渲染 ⇒ 直接跳过（不抛 ✓）
       boxTx.innerHTML =
-        marqueeName(refs.length ? chainNameOf(refs[0], lookup) : "使用 KiraAI 默认模型（未指定）");
+        marqueeName(refs.length ? chainNameOf(refs[0], lookup) : hostDefaultLabel(modelKey));
       cntEl.textContent = refs.length ? refs.length + " 档" : "";
       list.innerHTML = chainListHtml(refs, models, isEmb, lookup);
       markMarquees(combo);        // ★ 名字长到放不下 ⇒ 打标 is-wide（CSS 才会滚 ✓）
@@ -1843,6 +1877,7 @@ function bindChainCombos() {
       $$("#configForm .chain-menu").forEach((m) => m.classList.add("hide"));
       $$("#configForm .chain-box").forEach((b) => b.classList.remove("is-open"));
       if (!open) {
+        refreshModels();          // ★ 打开菜单就重新拉一次模型列表（WebUI 新加的提供商/模型立刻可见 ✓）
         menu.classList.remove("hide");
         box.classList.add("is-open");
         search.value = "";

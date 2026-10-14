@@ -1866,6 +1866,8 @@ button.primary:hover::after {
 .mmq.is-wide .mmq-tx + .mmq-tx { display: inline; }   /* 只有真的放不下（要滚）时才显示副本 ✓ */
 .mmq.is-wide:hover .mmq-in,
 .chain-item.is-on .mmq.is-wide .mmq-in,     /* 选中的条目：常驻滚动 ✓ */
+/* ★ 2026-10-15（用户要求：点击上也要滚）：显示框里的名字**常驻滚动** ✓（原来只在悬停时滚 ✗）*/
+.chain-box .mmq.is-wide .mmq-in,
 .chain-box:hover .mmq.is-wide .mmq-in,      /* 鼠标悬停显示框 ✓ */
 .plain-models .chain-item:hover .mmq.is-wide .mmq-in { animation: mmq-run 7s linear infinite; }
 .mmq.is-wide:hover .mmq-in { animation-duration: 4.5s; }   /* 悬停时滚快些，方便看全 ✓ */
