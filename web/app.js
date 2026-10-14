@@ -1631,6 +1631,22 @@ function chainLookup(models) {
 function chainKeyOf(modelKey) {
   return modelKey.replace(/_model$/, "_models");
 }
+// ★ 2026-10-14（用户实拍严重问题："点恢复默认并保存，切页后模型又变回原来选的" ✗）：
+//   模型字段是**成对**的：`*_models`（有序链，权威 ✓）与 `*_model` / `*_model_name`（旧单模型 ✓）
+//   而 chainRefsOf 在**链为空时会回退读旧字段**（为兼容老配置 ✓）
+//   ⇒ 只清一个的话，另一个会把旧模型**复活** ✗（切页/重载又显示回原样，运行时也照旧用它 ✗）
+//   ⇒ 「恢复默认」必须**成对清空** ✓（把这条链路整体交回宿主默认 ✓）
+function restoreKeysOf(key) {
+  const props = (config.schema && config.schema.properties) || {};
+  const out = [key];
+  [key.replace(/_(model|model_name)$/, "_models"),
+   key.replace(/_models$/, "_model"),
+   key.replace(/_models$/, "_model_name")].forEach((k) => {
+    if (k && k !== key && props[k]) out.push(k);
+  });
+  return out.filter((k, i, a) => a.indexOf(k) === i);
+}
+
 function chainRefsOf(modelKey, fallbackValue) {
   const arr = (config.settings || {})[chainKeyOf(modelKey)];
   const list = Array.isArray(arr) ? arr : String(arr || "").split("\n");
@@ -2027,21 +2043,37 @@ function renderConfig(values) {
           fallback = sm.type === "boolean" ? false
             : sm.type === "integer" || sm.type === "number" ? 0 : "";
         }
-        const input = document.querySelector(
-          '#configForm [data-key="' + key + '"]',
-        );
-        if (!input) return;
-        if (Array.isArray(fallback)) input.value = fallback.join("\n");
-        else if (input.type === "checkbox") input.checked = !!fallback;
-        else input.value = fallback;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        // ★ 顺带把「模型回退链」拉回同步（它内存里还留着旧链 ⇒ 会把旧值写回去）
-        const combo = input.closest ? input.closest(".chain-combo") : null;
-        if (combo) combo.dispatchEvent(new Event("input", { bubbles: true }));
-        const shown = Array.isArray(fallback)
-          ? (fallback.length ? fallback.join(" → ") : "（清空 ⇒ 跟随 KiraAI 默认模型）")
-          : String(fallback);
-        toast("已恢复默认：" + shown + " —— 记得点「保存并生效」");
+        // ★ 成对清空（2026-10-14 用户实拍：只清链 ⇒ 旧字段把旧模型**复活** ✗）：
+        //   链 `*_models` 与它的旧单模型 `*_model` / `*_model_name` **一起**恢复 ✓
+        const keys = restoreKeysOf(key);
+        const shown = [];
+        keys.forEach((k) => {
+          const ksm = (config.schema.properties || {})[k] || {};
+          let val;
+          if (config.defaults && Object.prototype.hasOwnProperty.call(config.defaults, k)) {
+            val = config.defaults[k];
+          } else if (ksm.default !== undefined) {
+            val = ksm.default;
+          } else {
+            val = ksm.type === "boolean" ? false
+              : (ksm.type === "integer" || ksm.type === "number") ? 0 : "";
+          }
+          const elx = document.querySelector('#configForm [data-key="' + k + '"]');
+          if (!elx) return;
+          if (Array.isArray(val)) elx.value = val.join("\n");
+          else if (elx.type === "checkbox") elx.checked = !!val;
+          else elx.value = val;
+          elx.dispatchEvent(new Event("input", { bubbles: true }));
+          if (elx.tagName === "SELECT") elx.dispatchEvent(new Event("change", { bubbles: true }));
+          shown.push(k + "=" + (Array.isArray(val)
+            ? (val.length ? val.join(" → ") : "跟随默认")
+            : (val === "" ? "跟随默认" : String(val))));
+        });
+        // 链编辑器按新值重新同步 ✓（外部改了隐藏值 ⇒ 闭包状态与显示都要跟着变 ✓）
+        document.querySelectorAll(".chain-combo").forEach((c) => {
+          c.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        toast("已恢复默认（" + shown.join(" ｜ ") + "）—— 记得点「保存并生效」");
       }),
   );
   vectorControls();
