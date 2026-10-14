@@ -2738,7 +2738,34 @@ for (let i = 1; i <= 32; i++)
 Object.entries(labels).forEach(([v, n]) =>
   $("#category").add(new Option(n, v)),
 );
+
+// ★ 2026-10-15（用户实拍："依然没有长名滚动"）：滚动样式**直接从 JS 注入** ✓
+//   为什么：`style.css` 由 index.html 引入 ⇒ 浏览器缓存或框架静态缓存都可能让它**加载不上** ✗
+//   而 app.js 本来就带版本号（app.js?v=2.22.x ✓）⇒ 只要新 app.js 到了，样式就**一定**生效 ✓
+//   （同时补上一条**原来缺的规则**：菜单里候选条目的 hover 滚动 ✗）
+function ensureMarqueeStyles() {
+  if (document.getElementById("memz-marquee-style")) return;
+  const st = document.createElement("style");
+  st.id = "memz-marquee-style";
+  st.textContent = `
+.mmq{display:inline-block;max-width:100%;overflow:hidden;white-space:nowrap;vertical-align:bottom}
+.mmq-in{display:inline-block}
+.mmq-tx{padding-right:28px}
+.mmq-tx + .mmq-tx{display:none}
+.mmq.is-wide .mmq-tx + .mmq-tx{display:inline}
+.mmq.is-wide:hover .mmq-in,
+.chain-item.is-on .mmq.is-wide .mmq-in,
+.chain-box:hover .mmq.is-wide .mmq-in,
+.chain-list .chain-item:hover .mmq.is-wide .mmq-in,
+.plain-models .chain-item:hover .mmq.is-wide .mmq-in{animation:mmq-run 7s linear infinite}
+.mmq.is-wide:hover .mmq-in{animation-duration:4.5s}
+@keyframes mmq-run{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@media (prefers-reduced-motion: reduce){.mmq-in{animation:none !important}}
+`;
+  document.head.appendChild(st);
+}
 async function boot() {
+  ensureMarqueeStyles();     // ★ 先把滚动样式注入进来（不依赖 style.css 是否被缓存 ✓）
   if (window.PluginPageContext && window.parent !== window)
     ctx = await window.PluginPageContext.ready();
   await poll();
