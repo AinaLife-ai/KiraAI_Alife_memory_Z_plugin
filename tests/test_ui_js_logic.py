@@ -287,3 +287,21 @@ def test_styles_are_injected_and_build_is_never_stale():
     idx = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     assert "app.js?v=" in idx, "app.js 必须带版本号 ✗"
     assert "alife-asset-bust-" in idx, "缺少『HTML 被缓存就自愈强刷』的脚本 ✗"
+
+
+def test_marquee_survives_global_reduced_motion_disable():
+    """★ 滚动必须**压过面板全局的"减弱动态效果就禁用所有动画"** ✗
+
+    真因（2026-10-15 用户实拍"怎么都不滚"）：
+      style.css 里有 `@media (prefers-reduced-motion: reduce){ *{ animation:none !important } }` ✗
+      ⇒ 手机开了"减弱动态效果"（很多手机默认开）⇒ 滚动被**全局禁用** ✗
+    ⇒ 所以滚动规则必须带 `!important` 且**优先级更高** ✓（并把该设置下的时长改成"放慢" ✓）
+    另：菜单**展开后**必须重新测量（隐藏时测量为 0 ✗ ⇒ 永远标不上"需要滚" ✗）
+    """
+    src = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "animation:mmq-run 7s linear infinite !important" in src, \
+        "滚动动画必须带 !important ✗（否则被全局禁用压过 ⇒ 怎么都不滚 ✓）"
+    assert "animation-duration:9s !important" in src, "减弱动态效果下应是\"放慢\"而不是取消 ✗"
+    assert "markMarquees(combo);" in src, "菜单展开后没有重新测量 ✗（隐藏时测量为 0 ✓）"
+    css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    assert "mmq-run 7s linear infinite !important" in css, "style.css 里的滚动规则也要带 !important ✗"

@@ -1879,6 +1879,10 @@ function bindChainCombos() {
       if (!open) {
         refreshModels();          // ★ 打开菜单就重新拉一次模型列表（WebUI 新加的提供商/模型立刻可见 ✓）
         menu.classList.remove("hide");
+        // ★ 2026-10-15（用户实拍"列表滚不了"）：**展开之后必须重新测量** ✗
+        //   列表渲染时菜单是隐藏的 ⇒ scrollWidth/clientWidth 都是 0 ✗
+        //   ⇒ 永远标不上 is-wide ⇒ 之后悬停也不滚 ✓（这就是真原因 ✓）
+        markMarquees(combo);
         box.classList.add("is-open");
         search.value = "";
         search.dispatchEvent(new Event("input"));
@@ -2753,14 +2757,24 @@ function ensureMarqueeStyles() {
 .mmq-tx{padding-right:28px}
 .mmq-tx + .mmq-tx{display:none}
 .mmq.is-wide .mmq-tx + .mmq-tx{display:inline}
+/* ★ 2026-10-15：必须带 !important ✗
+   面板全局有一条 @media (prefers-reduced-motion: reduce){ * { animation:none !important } } ✗
+   ⇒ 手机开了"减弱动态效果"时滚动会被**全局禁用** ✗（实测确认：这就是"怎么都不滚"的真原因 ✓）
+   这里用**更高优先级 + !important** 压过它 ✓ */
 .mmq.is-wide:hover .mmq-in,
 .chain-item.is-on .mmq.is-wide .mmq-in,
 .chain-box:hover .mmq.is-wide .mmq-in,
 .chain-list .chain-item:hover .mmq.is-wide .mmq-in,
-.plain-models .chain-item:hover .mmq.is-wide .mmq-in{animation:mmq-run 7s linear infinite}
-.mmq.is-wide:hover .mmq-in{animation-duration:4.5s}
+.plain-models .chain-item:hover .mmq.is-wide .mmq-in{animation:mmq-run 7s linear infinite !important}
+.mmq.is-wide:hover .mmq-in{animation-duration:4.5s !important}
 @keyframes mmq-run{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-@media (prefers-reduced-motion: reduce){.mmq-in{animation:none !important}}
+/* 减弱动态效果：**放慢**而不是取消 ✓ */
+@media (prefers-reduced-motion: reduce){
+  .mmq.is-wide:hover .mmq-in,
+  .chain-item.is-on .mmq.is-wide .mmq-in,
+  .chain-box:hover .mmq.is-wide .mmq-in,
+  .chain-list .chain-item:hover .mmq.is-wide .mmq-in{animation-duration:9s !important}
+}
 `;
   document.head.appendChild(st);
 }

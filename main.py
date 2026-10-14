@@ -894,6 +894,22 @@ class AlifeMemoryPlugin(BasePlugin):
         except Exception:
             logger.exception("[记忆·Z] 历史工具记录清理未完成，可稍后在后台任务页重试")
         await self.engine.start()
+        # ★ 2026-10-15（用户实拍"模型列表不全"）：把"框架此刻给了哪些提供商/几个模型"
+        #   写进**服务端日志** ✓（面板里一个字节都不加 ✓ 与页脚版本号一样，属正常运行信息 ✓）
+        #   ⇒ 若这里就没有你 WebUI 里的那一家 ⇒ 是框架运行时没给；若有 ⇒ 才轮到前端 ✗
+        try:
+            _pm = getattr(self.ctx, "provider_mgr", None)
+            _cfg = getattr(_pm, "kira_config", None) or {}
+            _provs = (_cfg.get("providers") or {}) if hasattr(_cfg, "get") else {}
+            _parts = []
+            for _pid, _pv in list(_provs.items())[:20]:
+                _mc = (_pv or {}).get("model_config") or {}
+                _parts.append("%s(%d)" % ((_pv or {}).get("name") or _pid,
+                                          len(_mc.get("llm") or {}) + len(_mc.get("embedding") or {})))
+            logger.info("[记忆·Z] 模型来源：框架此刻给出 %d 家 —— %s",
+                        len(_provs), "、".join(_parts) or "（一家都没有 ✗）")
+        except Exception:
+            pass
         logger.info(
             "[记忆·Z] 记忆系统就绪 · 访问范围 %s · 向量检索%s",
             self.settings.recall_scope,
