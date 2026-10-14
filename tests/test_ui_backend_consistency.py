@@ -30,6 +30,7 @@ pkg = types.ModuleType("alife_uib")
 pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("alife_uib", pkg)
 m = importlib.import_module("alife_uib.main")
+m_q = m   # 本文件里统一用 m ✓（brief 也在这个模块 ✓）
 
 SID = "qq:ui:1"
 run = asyncio.run
@@ -336,3 +337,28 @@ def test_background_compress_refreshes_cached_reads(tmp_path):
     assert calls, "压缩压根没调模型 ⇒ 这条断言没意义 ✗"
     assert repr(v1) != repr(v2), "后台压缩改完了，但同一 memo key 的结果没变 ✗ ⇒ 缓存没失效 ✗"
     assert "已压缩" in repr(v2), "压缩后的摘要没有进入重算结果 ✗"
+
+
+# ---------------------------------------------------------------- 注入简报渲染
+def test_brief_renders_short_codes_as_names_not_list_repr(tmp_path):
+    """★ 注入简报头里的「短码=名字」必须是**名字**，不能是列表 repr ✗
+
+    实测抓到（2026-10-14）：分组视图下 `short_names()` 给的是
+    `{短码: [真实 id, "名字|别名"]}`（**给 JSON 事实区用的** ✓ 图例里写明 ✓）
+    而 `brief()` 直接 `%s` ⇒ 头部变成 `n1=['qq:123', '小明|小明']` ✗
+    ⇒ 白费 token ✗ 且模型得自己猜那是什么 ✓（默认 fact_view 就是分组视图 ⇒ **默认路径上** ✓）
+    """
+    p = build(tmp_path)
+    perception = {
+        "scope": "global", "session": "s1",
+        # 分组视图形态（现在真实用的就是它 ✓）
+        "names": {"n1": ["qq:123", "小明|小明"], "n2": ["qq:456", "小红|小红"]},
+        "facts": {"n1": [["pf", "喜欢甜食", 9]]},
+    }
+    text = m_q.brief(perception)
+    assert "[" not in text.split("\n")[0], "简报头里出现了列表 repr ✗：%s" % text.split("\n")[0]
+    assert "n1=小明|小明" in text, "短码没有渲染成名字 ✗：%s" % text.split("\n")[0]
+    assert "n2=小红|小红" in text
+    # 扁平视图形态（字符串名字 ✓）也要照旧正确 ✓
+    flat = {"scope": "global", "session": "s1", "names": {"n1": "小明|小明"}, "facts": []}
+    assert "n1=小明|小明" in m_q.brief(flat)

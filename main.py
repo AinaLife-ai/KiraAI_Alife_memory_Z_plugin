@@ -170,9 +170,26 @@ def brief(perception):
     head = "【记忆%s】%s" % (scope_mark, session if scope_mark else "")
 
     names_map = perception.get("names") or {}
+
+    def _name_of(value):
+        """把 names 的值渲染成**名字** ✓
+
+        ★ 2026-10-12（实测抓到）：分组视图下 `short_names()` 给的是
+          `{短码: [真实 id, "名字|别名"]}`（**给 JSON 事实区用的** ✓ 图例里写明 ✓）
+          ⇒ 这里若直接 `%s` 就会把 **列表 repr 塞进提示词** ✗
+            实测注入头变成 `n1=['qq:123', '小明|小明']` ✗ ⇒ 白费 token + 模型得自己猜 ✓
+          ⇒ 两种形态都兼容：字符串直接用 ✓；[id, 名字] 取**名字**（头部只需 短码→名字 ✓）
+        """
+        if isinstance(value, (list, tuple)):
+            for cand in value[1:]:
+                if str(cand).strip():
+                    return str(cand)
+            return str(value[0]) if value else ""
+        return str(value)
+
     pairs = []
     if isinstance(names_map, dict):
-        pairs = ["%s=%s" % (k, v) for k, v in names_map.items() if k and v]
+        pairs = ["%s=%s" % (k, _name_of(v)) for k, v in names_map.items() if k and _name_of(v)]
     elif isinstance(names_map, list):
         pairs = [
             "%s=%s" % (it.get("code") or it.get("a"), it.get("name") or it.get("s"))
