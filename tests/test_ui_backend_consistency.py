@@ -362,3 +362,78 @@ def test_brief_renders_short_codes_as_names_not_list_repr(tmp_path):
     # 扁平视图形态（字符串名字 ✓）也要照旧正确 ✓
     flat = {"scope": "global", "session": "s1", "names": {"n1": "小明|小明"}, "facts": []}
     assert "n1=小明|小明" in m_q.brief(flat)
+
+
+# ---------------------------------------------------------------- JEV × 提供商
+def test_jev_model_name_from_provider_info_not_internal_uuid(tmp_path):
+    """★ 把 JEV 注册成 KiraAI 提供商后，发给 JEV 的 model 必须是**模型名**，不是内部 uuid ✗
+
+    用户实测用法（2026-10-14）："拿我发的 key+url 用 KiraAI 的 OpenAI 提供商注册" ⇒
+    框架给的 provider_config 只有 {base_url, api_key} ✓，而 `mid` 在 **3.0 里是 uuid** ✗
+    ⇒ 旧代码 `model = model or mid` 会把 uuid 当模型名发出去 ⇒ 渠道 **403** ✗
+      （实测 4 种 base_url 粘法全 403 ✓；改成优先 ModelInfo.model_name 后全通 ✓）
+    2.x 里 mid 本身就是名字 ⇒ 回退到 mid 仍然正确 ✓
+    """
+    import importlib as _il
+
+    from core.provider import ModelInfo, ModelType
+
+    md = _il.import_module("alife_uib.mdecide")   # 与文件顶部的包名一致 ✓
+
+    class _PM:
+        def __init__(self, info):
+            self._i = info
+
+        def get_model_info(self, pid, mid):
+            return self._i
+
+    def settings(**kw):
+        s = type("S", (), {})()
+        for k, v in {"jev_enabled": True, "jev_model": "", "jev_base_url": "",
+                     "jev_api_key": "", "jev_model_name": "", "jev_timeout_ms": 8000,
+                     "jev_prompt_append": ""}.items():
+            setattr(s, k, v)
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    def info(model_id, model_name):
+        """★ 两代 ModelInfo 形状不同：2.x **没有 model_name 字段** ✗（实测 TypeError ✓）
+        ⇒ 先按通用字段造，再按需 setattr ✓（插件用 getattr 读 ⇒ 两代都能被测到 ✓）"""
+        m = ModelInfo(model_type=ModelType.LLM, model_id=model_id,
+                      provider_id="prov1", provider_name="futureppo",
+                      provider_config={"base_url": "https://api.example.com/v1",
+                                       "api_key": "sk-test-not-real"},
+                      model_config={})
+        if model_name:
+            try:
+                m.model_name = model_name
+            except Exception:
+                pass
+        return m
+
+    # 3.0：uuid 当 mid ⇒ 必须用 model_name 上的名字 ✓
+    cfg = md.resolve_config(settings(jev_model="prov1:1f0c-uuid-9a"),
+                            _PM(info("1f0c-uuid-9a", "jev-latest")))
+    assert cfg.model == "jev-latest", "发给 JEV 的模型名应是面板里的名字 ✗ 实际 %r" % cfg.model
+
+    # 2.x/无 model_name：回退到 mid（那时 mid 就是名字 ✓）
+    cfg2 = md.resolve_config(settings(jev_model="prov1:jev-latest"),
+                             _PM(info("jev-latest", "")))
+    assert cfg2.model == "jev-latest", "没有 model_name 时应回退到 mid ✗ 实际 %r" % cfg2.model
+
+    # 显式填了 jev_model_name ⇒ 显式优先 ✓
+    cfg3 = md.resolve_config(settings(jev_model="prov1:1f0c-uuid-9a", jev_model_name="my-jev"),
+                             _PM(info("1f0c-uuid-9a", "jev-latest")))
+    assert cfg3.model == "my-jev", "显式模型名应优先 ✗ 实际 %r" % cfg3.model
+
+    # base_url 带 /v1、带尾斜杠、粘成 chat/completions ⇒ 端点都要规整正确 ✓
+    for base, want in (("https://api.example.com", "https://api.example.com/v1/systemone"),
+                       ("https://api.example.com/v1", "https://api.example.com/v1/systemone"),
+                       ("https://api.example.com/v1/", "https://api.example.com/v1/systemone"),
+                       ("https://api.example.com/v1/chat/completions",
+                        "https://api.example.com/v1/systemone"),
+                       ("https://api.example.com/v1/systemone",
+                        "https://api.example.com/v1/systemone")):
+        got = md.endpoint_of(base)
+        assert got == want, "端点规整错 ✗ %s → %s（应 %s）" % (base, got, want)
