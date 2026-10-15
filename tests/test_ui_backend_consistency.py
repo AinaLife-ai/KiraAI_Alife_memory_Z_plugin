@@ -241,7 +241,9 @@ def test_same_display_name_models_are_marked_selectable(tmp_path):
     dup = [m for m in got if m.get("dup")]
     assert len(dup) == 2, "同名（含同名提供商）的两条应被标记 dup ✗ 实际 %d 条" % len(dup)
     assert all(m.get("tag") for m in dup), "标了 dup 却没给区分用 tag ✗"
-    assert {m["tag"] for m in dup} == {"pid-a", "pid-b"}, "tag 没起到区分作用 ✗"
+    # 2026-10-15：区分标识改为"**可读**优先" ✓（3.0 的 provider id 是 UUID ✗ 绝不能吐 ✓）
+    #   这里两个模型 id 短而可读 ⇒ 用模型 id 本身区分 ✓（能区分即可 ✓）
+    assert len({m["tag"] for m in dup}) == 2, "tag 没起到区分作用 ✗ 实际 %r" % [m["tag"] for m in dup]
     plain = [m for m in got if not m.get("dup")]
     assert len(plain) == 1 and plain[0]["provider"] == "Trae", "不该被标记的条目被误标 ✗"
 
@@ -602,3 +604,108 @@ def test_model_display_name_on_30_reads_model_name_attr(tmp_path):
     assert got, "一条都没列出 ✗"
     assert got[0]["name"] == "真名一", (
         "3.0 下显示名丢了 ⇒ 会退化成 UUID ✗ 实际 %r" % got[0])
+
+
+def test_dup_tag_is_readable_never_uuid(tmp_path):
+    """★ 用户实拍（3.0）：行尾出现 `… · commandcode goat · 13e2edf385f9…` ✗
+
+    原因：3.0 里 WebUI 建的 **provider id 就是 UUID** ✗，
+    而我给"显示名撞车"补的区分标识取的是 **provider id** ✗ ⇒ 吐了一串 UUID ✓
+    修：**短且可读**的模型 id 才用 ✓，否则用**组内序号 #n** ✓；provider 名找不到时也不用 UUID 顶替 ✓
+    """
+    import json as _json
+    p = build(tmp_path)
+
+    class Info:
+        def __init__(self, mid, nm, pn=None):
+            self.model_id, self.model_name = mid, nm
+            self.model_config = {}
+            self.provider_name = pn
+            self.model_type = "llm"
+
+    UUID_PID = "13e2edf385f9a1b2c3d4e5f60718293a"
+
+    class _PM:
+        kira_config = {"providers": {UUID_PID: {"name": "commandcode goat", "model_config": {}}}}
+
+        def get_all_providers(self):
+            return {UUID_PID: Info("x", "y")}
+
+        def get_model_infos(self, pid):
+            # 同一提供商下两个**同名**模型，且 id 都是不透明长串 ⇒ 必须靠可读序号区分 ✓
+            return [Info("0f3a9c1d2e4b5a6c7d8e9f0a1b2c3d4e", "同名模型", "commandcode goat"),
+                    Info("aa11bb22cc33dd44ee55ff6677889900", "同名模型", "commandcode goat")]
+
+    p.ctx.provider_mgr = _PM()
+    got = run(p.api_models())["models"]
+    blob = _json.dumps(got, ensure_ascii=False)
+    assert len(got) == 2, "两条都该保留（重名不是重复 ✗）实际 %d" % len(got)
+    assert all(g.get("dup") for g in got), "重名必须被标记 ✓"
+    assert [g["tag"] for g in got] == ["#1", "#2"], "区分标识应是可读序号 ✗ 实际 %r" % [g["tag"] for g in got]
+    shown = _json.dumps([{k: g.get(k) for k in ("name", "provider", "tag")} for g in got], ensure_ascii=False)
+    assert UUID_PID[:12] not in shown, "面板上不该出现 UUID ✗ 实际 %r" % shown
+    assert all(g["provider"] == "commandcode goat" for g in got), "提供商显示名不应对 ✗"
+
+
+def test_dup_tag_prefers_provider_type_before_index(tmp_path):
+    """★ 用户建议（2026-10-15）：出 `#1/#2` 之前，**先用品提供商类型** ✓
+
+    kira 注册的类型（OpenAI / DeepSeek / Anthropic…，含**插件实现**的自定义类型 ✓）
+    区分度远高于序号 ✓ ⇒ 同名时优先用它 ✓；只有当类型也相同、才退到"类型 #n" ✓
+    """
+    p = build(tmp_path)
+
+    class Info:
+        def __init__(self, mid, nm, pn):
+            self.model_id, self.model_name = mid, nm
+            self.model_config = {}
+            self.provider_name = pn
+            self.model_type = "llm"
+
+    A, B = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"
+
+    class _PM:
+        # 两家**显示名相同**（都叫"同名提供商" ✓）但**类型不同**（OpenAI / DeepSeek ✓）
+        kira_config = {"providers": {A: {"name": "同名提供商", "format": "OpenAI", "model_config": {}},
+                                     B: {"name": "同名提供商", "format": "DeepSeek", "model_config": {}}}}
+
+        def get_all_providers(self):
+            return {A: Info("x", "y", "同名提供商"), B: Info("z", "w", "同名提供商")}
+
+        def get_model_infos(self, pid):
+            return [Info("9f8e7d6c5b4a39281706f5e4d3c2b1a0", "同名模型", "同名提供商")]
+
+    p.ctx.provider_mgr = _PM()
+    got = run(p.api_models())["models"]
+    tags = sorted(g["tag"] for g in got)
+    assert tags == ["DeepSeek", "OpenAI"], "应先用品提供商类型区分 ✗ 实际 %r" % tags
+
+
+def test_dup_tag_falls_back_to_type_numbered_when_type_is_same(tmp_path):
+    """类型也相同 ⇒ 退到"类型 #n" ✓（仍是可读的 ✓，绝不吐 UUID ✓）"""
+    p = build(tmp_path)
+
+    class Info:
+        def __init__(self, mid, nm, pn):
+            self.model_id, self.model_name = mid, nm
+            self.model_config = {}
+            self.provider_name = pn
+            self.model_type = "llm"
+
+    A, B = "cccccccc-1111-2222-3333-444444444444", "dddddddd-1111-2222-3333-444444444444"
+
+    class _PM:
+        kira_config = {"providers": {A: {"name": "同名提供商", "format": "OpenAI", "model_config": {}},
+                                     B: {"name": "同名提供商", "format": "OpenAI", "model_config": {}}}}
+
+        def get_all_providers(self):
+            return {A: Info("x", "y", "同名提供商"), B: Info("z", "w", "同名提供商")}
+
+        def get_model_infos(self, pid):
+            return [Info("11112222333344445555666677778888", "同名模型", "同名提供商")]
+
+    p.ctx.provider_mgr = _PM()
+    got = run(p.api_models())["models"]
+    tags = sorted(g["tag"] for g in got)
+    assert tags == ["OpenAI #1", "OpenAI #2"], "类型相同时应退到「类型 #n」✗ 实际 %r" % tags
+    assert all("cccc" not in t and "dddd" not in t for t in tags), "绝不吐 UUID ✗"
