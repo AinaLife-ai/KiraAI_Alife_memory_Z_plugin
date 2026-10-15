@@ -4852,7 +4852,7 @@ class AlifeMemoryPlugin(BasePlugin):
         result = []
         seen_ids = set()
 
-        def _push(pid, kind, mid, entry, pname, src):
+        def _push(pid, kind, mid, entry, pname, src, ptype=None):
             """加入一个模型（按 `pid:mid` 去重 ✓）"""
             key = "%s:%s" % (pid, mid)
             if key in seen_ids or not str(mid).strip():
@@ -4863,8 +4863,16 @@ class AlifeMemoryPlugin(BasePlugin):
                 display, legacy = self._model_entry_name(str(mid), entry)
             except Exception:
                 display, legacy = str(mid), ""
+            _pn = str(pname or "").strip()
+            if not _pn:
+                # 名字找不到时：短且可读的 pid 才用 ✓，否则给个可读占位 ✓（绝不吐 UUID ✗）
+                _ps = str(pid or "").strip()
+                _pn = _ps if (_ps and len(_ps) <= 22 and _ps.count("-") < 4) else "未知提供商"
+            # ★ 2026-10-15（用户建议 ✓）：把**提供商类型**（OpenAI / DeepSeek / 插件实现的类型 ✓）
+            #   也带上 ⇒ 重名时优先用它区分 ✓（比序号可读得多 ✓）
+            _pt = str(ptype or "").strip()
             result.append({"id": key, "name": display, "model": display,
-                           "provider": pname or pid, "kind": kind,
+                           "provider": _pn, "kind": kind, "ptype": _pt,
                            "legacy": legacy, "key": str(mid), "src": src})
 
         # `provider_mgr` / `kira_config` 不是 PluginContext 的固定契约（框架演进过 ✓）
@@ -4926,6 +4934,21 @@ class AlifeMemoryPlugin(BasePlugin):
                 pids.append(_pid)
                 logger.info("[记忆·Z] 默认模型指向的提供商不在任何列表里 ⇒ 已补进下拉：%s", _pid)
 
+        def _type_of(pid):
+            """提供商**类型**（kira 注册的那类 ✓，含插件实现的类型 ✓）"""
+            try:
+                _pv = live.get(pid) if isinstance(live, dict) else None
+                _t = getattr(_pv, "format", None) or getattr(_pv, "provider_type", None)
+                if not _t and isinstance(_pv, dict):
+                    _t = _pv.get("format") or _pv.get("provider_type")
+            except Exception:
+                _t = None
+            if not _t and isinstance(providers, dict):
+                _pp = providers.get(pid) or {}
+                _t = _pp.get("format") or _pp.get("provider_type")
+            _t = getattr(_t, "value", _t)        # 可能是枚举 ✓
+            return str(_t or "").strip()
+
         def _name_of(pid):
             try:
                 _pv = live.get(pid) if isinstance(live, dict) else None
@@ -4964,7 +4987,7 @@ class AlifeMemoryPlugin(BasePlugin):
                     _pn = (getattr(info, "provider_name", None) or pname)
                     if not _pn and isinstance(_mc, dict):
                         _pn = _mc.get("provider_name")
-                    _push(pid, _kk, _mid, _mc, _pn, "infos")
+                    _push(pid, _kk, _mid, _mc, _pn, "infos", _type_of(pid))
             except Exception:
                 pass
             # ①-b 官方取模型（与运行时同一份 ✓）
@@ -4977,7 +5000,7 @@ class AlifeMemoryPlugin(BasePlugin):
                         if kk not in ("llm", "embedding") or not isinstance(mmap, dict):
                             continue
                         for mid, entry in mmap.items():
-                            _push(pid, kk, mid, entry, pname, "api")
+                            _push(pid, kk, mid, entry, pname, "api", _type_of(pid))
             except Exception:
                 pass
             # ② 配置字典兜底
@@ -4989,7 +5012,7 @@ class AlifeMemoryPlugin(BasePlugin):
                         if not isinstance(mmap, dict):
                             continue
                         for mid, entry in mmap.items():
-                            _push(pid, kind, mid, entry, pname, "dict")
+                            _push(pid, kind, mid, entry, pname, "dict", _type_of(pid))
 
         # ★★ 2026-10-15：**正在使用的默认模型必须能被选到** ✓
         #   真框架复现：只在活注册表里的提供商 ⇒ `get_models(pid)` 返回 **{}** ✗、字典也没有 ✗
@@ -5010,7 +5033,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 _entry = {}
             _kind = "embedding" if _key.endswith("embedding") else "llm"
             _push(_pid, _kind, _mid, _entry,
-                  (_name_of(_pid) or _pid) + "（默认%s）" % _label, "default")
+                  (_name_of(_pid) or _pid) + "（默认%s）" % _label, "default", _type_of(_pid))
             logger.info("[记忆·Z] 默认%s模型不在任何列表里 ⇒ 已补进下拉：%s:%s", _label, _pid, _mid)
 
         # ★ 2026-10-15：把**接口实际返回了什么**写进日志 ✓（面板零改动 ✓ 只在内容变化时打印 ✓）
@@ -5025,15 +5048,37 @@ class AlifeMemoryPlugin(BasePlugin):
             pass
 
         # ★ 2026-10-12（用户实拍）：**显示名撞车**的模型要让前端能区分 ✓
-        #   （同一显示名 + 同一提供商 + 同类型 ⇒ 重名 ⇒ 补一个短标识 ✓）
-        seen = {}
+        # ★ 2026-10-15（用户实拍 3.0）：区分标识**必须可读** ✗
+        #   原来取的是 **provider id** ✗ —— 而 3.0 里 WebUI 建的 provider id 是 **UUID** ✗
+        #   ⇒ 面板上就出现 `… · commandcode goat · 13e2edf385f9…` 这种尾巴 ✓（用户截图 ✓）
+        #   ⇒ 现在：短且可读的模型 id 才用 ✓；否则用**组内序号 #n** ✓（永不吐 UUID ✓）
+        def _readable(s):
+            s = str(s or "").strip()
+            if not s or len(s) > 22:
+                return ""
+            if s.count("-") >= 4:          # UUID 形状（8-4-4-4-12）✗
+                return ""
+            return s
+
+        groups = {}
         for item in result:
             sig = (item["name"], item["provider"], item["kind"])
-            seen[sig] = seen.get(sig, 0) + 1
-        for item in result:
-            if seen[(item["name"], item["provider"], item["kind"])] > 1:
+            groups.setdefault(sig, []).append(item)
+        for sig, items in groups.items():
+            if len(items) < 2:
+                continue
+            for idx, item in enumerate(items, 1):
                 item["dup"] = True
-                item["tag"] = str(item["id"]).split(":", 1)[0] or item["key"]
+                tag = _readable(item.get("key")) or _readable(str(item["id"]).split(":", 1)[-1])
+                if not tag:
+                    # ★ 用户建议：**先用品提供商类型**（DeepSeek / OpenAI / 插件实现的类型 ✓）
+                    tag = str(item.get("ptype") or "").strip()
+                item["tag"] = tag or ("#%d" % idx)
+            # 组内仍不唯一 ⇒ 退到"类型 #n"（带类型前缀，保留可读性 ✓）
+            if len({it["tag"] for it in items}) != len(items):
+                for idx, it in enumerate(items, 1):
+                    _pt = str(it.get("ptype") or "").strip()
+                    it["tag"] = ("%s #%d" % (_pt, idx)) if _pt else ("#%d" % idx)
         return {"models": result}
 
     async def _cold_auto_once(self, force=False):
