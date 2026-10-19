@@ -3325,7 +3325,7 @@ class AlifeMemoryPlugin(BasePlugin):
         speakers = []
         for row in priority:
             name = self.model_text(row["speaker"] or "", keep_names)
-            if name and name != "?" and name not in speakers:
+            if name and name not in ("?", "？") and name not in speakers:
                 speakers.append(name)
         # v2.18.19：**单字符串** ✓（原来 {legend, rows, more_hint} 三个键名白占 ~30 字符 ✗）
         # 没有可确认的说话人时不要写 `说话人=?`：问号不是信息，
