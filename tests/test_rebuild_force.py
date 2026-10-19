@@ -173,10 +173,14 @@ def test_recall_merge_check_on_both_paths():
 
     被动（每轮注入）⇒ 有 ✓；主动（bot 调工具）⇒ 本次补上 ✓
     """
-    assert 'dropped = await self.queue_recall_merges(sid, facts)' in MAIN, "被动侧必须排 ✓"
-    assert 'asyncio.create_task(' in MAIN and 'self.queue_recall_merges(event.sid' in MAIN, \
-        "主动侧也要排（同步出口 ⇒ create_task ✓）"
-    assert 'value.get("facts")' in MAIN, "主动侧要从返回载荷里取事实 id ✓"
+    assert 'dropped = await self.queue_recall_merges(sid, facts + neighbor_rows)' in MAIN, \
+        "被动侧必须排（含相关人物事实）✓"
+    assert 'await self.queue_recall_merges(event.sid, rows)' in MAIN, \
+        "overview 必须用 raw rows 排 ✓"
+    assert 'await self.queue_recall_merges(event.sid, merge_rows)' in MAIN, \
+        "GetProfile 必须用 raw facts 排 ✓"
+    assert 'value.get("facts")' not in MAIN, \
+        "打包后的简报没有 id，不能从这里取事实 id ✓"
 
 
 def test_cold_records_cannot_be_force_tidied():

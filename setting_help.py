@@ -96,6 +96,8 @@ HELP = {
     "record_merge_reason_chars": "理由超过这个字数判定失败。",
     "record_merge_prompt": "永久记忆合并提示词。可用 {content_max} 与 {reason_max} 占位符，保存后替换成上面的字数设置。；改乱了可点旁边的「恢复默认」",
     "profile_summary_count": "人物列表卡片上直接显示的画像要点条数（按重要度取）。默认3。",
+    "profile_neighbors": "点名一个人时，是否补「与他有明确关系、但关系事实还没被正常召回」的相关人物。off=关；digest=只给名字和关系；smart=问「谁/关系/认识/介绍」时再补一条事实正文。默认 smart。已在事实区出现过的人不会重复。",
+    "profile_neighbors_max": "每轮最多补几个相关人物（只在确实有未召回的关系事实时出现）。默认 2；0=关。",
     "tool_refine_mode": "主动召回的精修方式。expand（默认）先从更宽的候选里挑（×3）再按相关性筛排，最后截回原条数，让「表面不像、实际相关」的记忆也有机会被看到；inline 只在原条数内精修。JEV 未启用或失败时两者都等于旧行为。",
     "recall_keep_max": "单次注入事实的条数上限。0=自动：与关闭 JEV 时注入的条数相同（推荐，保证开了 JEV 只会更少更准、不会更多）。",
     "recall_budget_mode": "strict（默认）：开 JEV 时注入条数不超过关闭时的数量；loose：不做条数上限，只按相关度清除（旧行为）。",

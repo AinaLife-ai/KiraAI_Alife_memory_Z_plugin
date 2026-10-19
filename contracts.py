@@ -438,6 +438,10 @@ class Settings(Strict):
     record_merge_reason_chars: int = Field(default=60, ge=2, le=500)
     record_merge_prompt: str = Field(default=RECORD_MERGE_PROMPT, max_length=8000)
     profile_summary_count: int = Field(default=3, ge=1, le=10)
+    # 相关人物：点名实体时，补「关系事实还没进 facts」的相关用户。
+    # off=关；digest=只给名字（关系）；smart=问人/关系时再补一条事实正文。
+    profile_neighbors: Literal["off", "digest", "smart"] = "smart"
+    profile_neighbors_max: int = Field(default=2, ge=0, le=10)
     tool_refine_mode: Literal["expand", "inline"] = Field(
         default="expand",
         description=(

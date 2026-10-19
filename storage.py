@@ -3449,6 +3449,7 @@ class Store:
         prefer_sid="",
         prefer_users=(),
         prefer_subjects=(),
+        prefer_users_first=False,
         hide_pending=False,
         importance_first=False,
         min_score=0,
@@ -3476,12 +3477,21 @@ class Store:
                 args.append(value)
         tier_parts, tier_args = [], []
         if prefer_sid or prefer_users:
-            # Same session first, then facts about the current participants.
-            tier_parts.append(
-                "CASE WHEN sid=? THEN 0 WHEN subject IN "
-                "(SELECT value FROM json_each(?)) THEN 1 ELSE 2 END"
-            )
-            tier_args += [prefer_sid, dump(list(prefer_users))]
+            if prefer_users_first and prefer_users:
+                # 当前参与者优先于“同一会话”：画像常驻要让正在聊天的人
+                # 排在本会话的高重要度路人前面。
+                tier_parts.append(
+                    "CASE WHEN subject IN (SELECT value FROM json_each(?)) THEN 0 "
+                    "WHEN sid=? THEN 1 ELSE 2 END"
+                )
+                tier_args += [dump(list(prefer_users)), prefer_sid]
+            else:
+                # Same session first, then facts about the current participants.
+                tier_parts.append(
+                    "CASE WHEN sid=? THEN 0 WHEN subject IN "
+                    "(SELECT value FROM json_each(?)) THEN 1 ELSE 2 END"
+                )
+                tier_args += [prefer_sid, dump(list(prefer_users))]
         if prefer_subjects:
             # Then facts about entities named in the current message.
             tier_parts.append(
@@ -3515,6 +3525,85 @@ class Store:
                     [*args, *tier_args, limit, offset],
                 )
             ]
+
+    def related_facts(self, entity_id, tokens=(), exclude_subjects=(), limit=30):
+        """反查「与某实体有显式关系」的其他主体事实（只读，零模型）。
+
+        用于被动召回的「相关人物」：正文里没有点名实体、但 relations 指向它的
+        事实（如「阿远负责夜班巡逻」+ 阿远>同事>弗弗），普通词法召回捞不到。
+        只返回 profile / relationship 两类，且谓词必须具体；跨主体是这里的本意，
+        但事实本身仍按 subject 归组，不会被合并。
+        """
+        entity_id = str(entity_id or "").strip()
+        token_set = {
+            str(value).strip()
+            for value in (tokens or ())
+            if str(value or "").strip()
+        }
+        if not entity_id or not token_set:
+            return []
+        where = [
+            "f.deleted=0",
+            "f.merge_pending=0",
+            # json_valid 只做布尔判断，不解析；真正的解析在 Python 侧兜底。
+            # 不能把 json_each(f.relations) 直接放 FROM：SQLite 可能先展开、
+            # 再评估 json_valid，遇到脏数据直接 malformed JSON（实测）。
+            "json_valid(f.relations)",
+            "f.relations IS NOT NULL",
+            "f.relations != ''",
+            "f.category IN ('profile','relationship')",
+        ]
+        args = []
+        if exclude_subjects:
+            where.append("f.subject NOT IN (SELECT value FROM json_each(?))")
+            args.append(dump(list(dict.fromkeys(
+                str(value) for value in exclude_subjects if value
+            ))))
+        # 先用 instr 做廉价预筛（JSON 里确实可能出现这个 id/名字），
+        # 再用 Python 精确比对 subject/object；instr 对脏 JSON 也不会抛错。
+        matches = []
+        for token in sorted(token_set):
+            matches.append("instr(f.relations, ?) > 0")
+            args.append(token)
+        where.append("(" + " OR ".join(matches) + ")")
+        sql = (
+            "SELECT f.* FROM facts f WHERE "
+            + " AND ".join(where)
+            + " ORDER BY f.importance DESC, f.created DESC, f.id LIMIT ?"
+        )
+        args.append(max(1, int(limit or 30)))
+        with self.connect() as db:
+            rows = [self.row(r) for r in db.execute(sql, args)]
+        out, seen = [], set()
+        for row in rows:
+            for relation in row.get("relations") or []:
+                if not isinstance(relation, dict):
+                    continue
+                subject = str(relation.get("subject") or "").strip()
+                obj = str(relation.get("object") or "").strip()
+                predicate = str(relation.get("predicate") or "").strip()
+                if not predicate:
+                    continue
+                if subject in token_set:
+                    other = obj
+                elif obj in token_set:
+                    other = subject
+                else:
+                    continue
+                if not other or other == entity_id:
+                    continue
+                if relation_issue({
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                }):
+                    continue
+                marker = (row["id"], other)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                out.append({**row, "_other": other, "_predicate": predicate})
+        return out
 
     def audit_candidates(self, sid, limit=20, recheck_seconds=0):
         """Facts eligible for audit: never audited, or stale beyond the cooldown."""

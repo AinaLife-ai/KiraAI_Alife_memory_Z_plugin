@@ -111,6 +111,8 @@ const fields = {
   record_merge_reason_chars: "永久记忆合并理由（硬上限）",
   record_merge_prompt: "永久记忆合并提示词",
   profile_summary_count: "画像摘要条数",
+  profile_neighbors: "相关人物召回",
+  profile_neighbors_max: "相关人物最多几个",
   search_active_only: "检索默认只搜常驻",
   cold_after_days: "归档转入冷归档天数",
   tidy_rebuild_bot_enabled: "允许 Bot 强制重提取单条事实",
