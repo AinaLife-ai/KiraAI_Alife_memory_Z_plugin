@@ -21,6 +21,7 @@ from core.chat.message_elements import Text
 from core.utils.path_utils import get_config_path, get_data_path
 from core.logging_manager import get_logger
 
+from .logfmt import provider_log_brief
 from .contracts import (
     ConfigEdit,
     TrashPurge,
@@ -901,13 +902,42 @@ class AlifeMemoryPlugin(BasePlugin):
             _pm = getattr(self.ctx, "provider_mgr", None)
             _cfg = getattr(_pm, "kira_config", None) or {}
             _provs = (_cfg.get("providers") or {}) if hasattr(_cfg, "get") else {}
+            # ★ 2026-10-15（用户要求 ✓）：
+            #   ① 名字必须是**用户能读的** ✗ —— 原来 `name or _pid` 在 3.0 上会退成 **UUID** ✗
+            #      （3.0 的 WebUI 建的 provider，其 id 就是 UUID ✓ 用户日志里看到的就是它 ✓）
+            #   ② **不许刷屏** ✗ —— 原来全量打印（31 家就是一行几百字 ✓）
+            #      ⇒ 最多显示 **首 5 + 尾 5**（共 10 个 ✓），中间 `……`，末尾 `等共 N 个` ✓
+            def _readable_pid(_x):
+                _s = str(_x or "").strip()
+                if not _s or len(_s) > 22 or _s.count("-") >= 4:
+                    return ""
+                return _s
+
+            def _prov_name(_pid, _pv):
+                _n = str((_pv or {}).get("name") or "").strip()
+                if _n and not (len(_n) > 22 and _n.count("-") >= 4):   # 名字本身是 UUID ✗ 也不用
+                    return _n
+                _live = None
+                try:
+                    _live = _pm.get_provider(_pid) if getattr(_pm, "get_provider", None) else None
+                except Exception:
+                    _live = None
+                for _cand in (getattr(_live, "name", None), getattr(_live, "provider_name", None),
+                              _readable_pid(_pid)):
+                    _c = str(_cand or "").strip()
+                    if _c:
+                        return _c
+                return "未命名提供商"
+
             _parts = []
-            for _pid, _pv in list(_provs.items()):   # ★ 全量打印（原来只打前 20 ✗ 会让人误以为"没有那家" ✓）
+            for _pid, _pv in list(_provs.items()):
                 _mc = (_pv or {}).get("model_config") or {}
-                _parts.append("%s(%d)" % ((_pv or {}).get("name") or _pid,
-                                          len(_mc.get("llm") or {}) + len(_mc.get("embedding") or {})))
+                _parts.append("%s(%d)" % (
+                    _prov_name(_pid, _pv),
+                    len(_mc.get("llm") or {}) + len(_mc.get("embedding") or {}),
+                ))
             logger.info("[记忆·Z] 模型来源：框架此刻给出 %d 家 —— %s",
-                        len(_provs), "、".join(_parts) or "（一家都没有 ✗）")
+                        len(_parts), provider_log_brief(_parts) or "（一家都没有 ✗）")
         except Exception:
             pass
         logger.info(
