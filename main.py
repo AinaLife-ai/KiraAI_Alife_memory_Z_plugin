@@ -113,8 +113,8 @@ _GROUPED_FACT_DOC = (
 )
 
 _FLAT_FACT_DOC = _GROUPED_FACT_DOC.replace(
-    "事实行 = <主体码> <类别码> <内容> ★重要度 <关系> <时间>（后三项可缺）。",
-    "事实行 = - <主体>｜<内容>（类别/重要度/关系/时间省略）。",
+    "事实 = <主体码> <类别码> <内容> ★重要度 <关系> <时间>（后三项可缺）。",
+    "事实 = - <主体>｜<内容>（类别/重要度/关系/时间省略）。",
 )
 
 
@@ -262,6 +262,10 @@ def brief(perception):
                         subject = str(row.get("u") or "")
                         raw = names_map.get(subject) if isinstance(names_map, dict) else None
                         label = _name_of(raw) if raw else ""
+                        # flat 的 names 值是 "名字|别名"；主体行只显示现名，
+                        # 否则会出现 `- 我|我｜...` 这种重复（grouped 头部仍保留别名）。
+                        if "|" in label:
+                            label = label.split("|", 1)[0].strip()
                         if label:
                             lines.append("- %s｜%s" % (label, str(text)))
                         elif subject:
@@ -3183,7 +3187,9 @@ class AlifeMemoryPlugin(BasePlugin):
         # 不补所有事实主体（否则 10 个路人会把码表撑大，反而更费 token）。
         extra_ids = {str(value) for value in subjects if value}
         for fact in facts:
-            if fact.get("src_user"):
+            # 同会话事实的发言人不在行里渲染；只有跨会话行会显示
+            # `说话人@会话`，这时才需要补名字，避免无谓撑大码表。
+            if fact.get("src_user") and fact.get("sid") and fact["sid"] != sid:
                 extra_ids.add(str(fact["src_user"]))
             for relation in (
                 fact.get("verified_relations") or fact.get("relations") or []
@@ -3319,10 +3325,14 @@ class AlifeMemoryPlugin(BasePlugin):
         speakers = []
         for row in priority:
             name = self.model_text(row["speaker"] or "", keep_names)
-            if name and name not in speakers:
+            if name and name not in ("?", "？") and name not in speakers:
                 speakers.append(name)
         # v2.18.19：**单字符串** ✓（原来 {legend, rows, more_hint} 三个键名白占 ~30 字符 ✗）
-        _head = "会话=%s｜说话人=%s" % (sid, "、".join(speakers) or "?")
+        # 没有可确认的说话人时不要写 `说话人=?`：问号不是信息，
+        # 只会让模型以为“发言人未知、不能回答”，还白占 5 个字符。
+        _head = "会话=%s" % sid
+        if speakers:
+            _head += "｜说话人=%s" % "、".join(speakers)
         selected = "\n".join([_head] + lines)
         if omitted:
             # 明确的**调用字样** ✓（不要用"说 more"这种自然语言提示 ✗）

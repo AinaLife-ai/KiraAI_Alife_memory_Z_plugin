@@ -76,7 +76,7 @@ def test_rules_block_describes_grouped_layout():
     # flat 视图仍保留（旧用户可回滚）；说明必须与 grouped 不同，
     # 否则模型会按分组格式读 `- 主体｜内容`（实测会找不到类别码）。
     assert "_FLAT_FACT_DOC" in source, "flat 视图说明缺失 ✗"
-    assert "事实行 = - <主体>｜<内容>" in source, "flat 事实行说明不对 ✗"
+    assert "事实 = - <主体>｜<内容>" in source, "flat 事实行说明不对 ✗"
 
 
 def test_grouped_example_line_matches_real_render():

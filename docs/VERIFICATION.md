@@ -1,5 +1,11 @@
 # 验证记录
 
+## 2.22.22（2026-10-19）
+
+- flat 视图规则块与真实 `- <主体>｜<内容>` 渲染对齐；grouped 规则块逐字不变，缓存命中不受影响。
+- KiraAI **3.0.1**：`1083 passed + 16 subtests`，0 failed。
+- KiraAI **2.34.8**：`1083 passed + 16 subtests`，0 failed。
+
 ## 2.22.21（2026-10-19）
 
 - KiraAI **3.0.1**：`1083 passed + 16 subtests`，0 failed。

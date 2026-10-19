@@ -1918,13 +1918,15 @@ def test_memory_rules_per_view_are_complete_and_bounded():
     grouped = module.memory_rules("grouped")
     flat = module.memory_rules("flat")
     assert isinstance(grouped, str) and isinstance(flat, str)
-    # v2.18.19：注入统一为紧凑简报 ✗ 两种「事实视图」渲染一致 ✓ 说明也一致 ✓
-    assert grouped == flat, "简报下两种视图应给出同一份说明"
+    # grouped 与 flat 的事实行不同，说明也必须不同（否则模型会按错格式读）
+    assert grouped != flat, "两种视图的事实行不同，说明不能相同"
+    assert "事实 = <主体码>" in grouped, "分组规则缺主体码事实行"
+    assert "事实 = - <主体>｜<内容>" in flat, "flat 规则缺 `- 主体｜内容` 事实行"
     assert module.memory_rules(None) == grouped, "默认必须是分组视图"
     assert module.memory_rules("grouped") == grouped and module.memory_rules("flat") == flat, "同模式必须稳定"
     for token in ("记忆简报", "主体码", "序号", "来自"):
         assert token in grouped, "分组规则块缺：" + token
-    for token in ("记忆简报", "主体码", "序号", "来自"):
+    for token in ("记忆简报", "序号", "来自"):
         assert token in flat, "规则块缺：" + token
     for name, block in (("grouped", grouped), ("flat", flat)):
         assert len(block) < 900, name + " 规则块每轮全价发送，涨回去就是白花钱 ✗"

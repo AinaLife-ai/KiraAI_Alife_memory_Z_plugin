@@ -117,6 +117,7 @@ async def test_passive_names_neighbors_and_no_duplicates(tmp_path):
             for call in merge_calls for content in call
         ), "相关人物事实必须进入合并检查 ✓"
         assert "=弗弗" in m and "=阿远" in m and "=小夏" in m
+        assert "说话人=?" not in m, "未知说话人不应输出问号占位"
         # 只补点名实体/关系端点，不把 5 个路人的主体也塞进码表
         assert "=路人0号" not in m
         # B 只补尚未出现在 facts 里的“夜班巡逻”，已召回的小夏不重复
