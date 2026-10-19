@@ -113,8 +113,8 @@ _GROUPED_FACT_DOC = (
 )
 
 _FLAT_FACT_DOC = _GROUPED_FACT_DOC.replace(
-    "事实行 = <主体码> <类别码> <内容> ★重要度 <关系> <时间>（后三项可缺）。",
-    "事实行 = - <主体>｜<内容>（类别/重要度/关系/时间省略）。",
+    "事实 = <主体码> <类别码> <内容> ★重要度 <关系> <时间>（后三项可缺）。",
+    "事实 = - <主体>｜<内容>（类别/重要度/关系/时间省略）。",
 )
 
 
@@ -3183,7 +3183,9 @@ class AlifeMemoryPlugin(BasePlugin):
         # 不补所有事实主体（否则 10 个路人会把码表撑大，反而更费 token）。
         extra_ids = {str(value) for value in subjects if value}
         for fact in facts:
-            if fact.get("src_user"):
+            # 同会话事实的发言人不在行里渲染；只有跨会话行会显示
+            # `说话人@会话`，这时才需要补名字，避免无谓撑大码表。
+            if fact.get("src_user") and fact.get("sid") and fact["sid"] != sid:
                 extra_ids.add(str(fact["src_user"]))
             for relation in (
                 fact.get("verified_relations") or fact.get("relations") or []
