@@ -709,3 +709,40 @@ def test_dup_tag_falls_back_to_type_numbered_when_type_is_same(tmp_path):
     tags = sorted(g["tag"] for g in got)
     assert tags == ["OpenAI #1", "OpenAI #2"], "类型相同时应退到「类型 #n」✗ 实际 %r" % tags
     assert all("cccc" not in t and "dddd" not in t for t in tags), "绝不吐 UUID ✗"
+
+
+def test_provider_log_brief_shows_head_and_tail_only(tmp_path):
+    """★ 用户要求（2026-10-15）：日志**不许刷屏** ✓
+
+    最多显示 **首 5 + 尾 5（共 10 个）**，中间 `……`，末尾 `等共 N 个` ✓
+    例：`xxx……xxxx等共31个` ✓
+    """
+    p = build(tmp_path)                       # 建好包 alife_uib ✓（main 依赖框架 ✓ 不能裸导入 ✗）
+    m = importlib.import_module("alife_uib.logfmt")
+    brief = m.provider_log_brief
+
+    small = ["甲(2)", "乙(1)"]
+    assert brief(small) == "甲(2)、乙(1)", "≤10 个应全显示 ✓"
+
+    exact = ["p%d(1)" % i for i in range(1, 11)]
+    assert brief(exact) == "、".join(exact), "正好 10 个应全显示、且不加'等共' ✓"
+
+    many = ["p%d(1)" % i for i in range(1, 32)]        # 31 家 ✓
+    out = brief(many)
+    assert out.startswith("p1(1)、p2(1)、p3(1)、p4(1)、p5(1)、……"), out
+    assert out.endswith("p27(1)、p28(1)、p29(1)、p30(1)、p31(1)等共 31 个"), out
+    assert out.count("p") == 10, "最多只该出现 10 个 ✓ 实际 %d" % out.count("p")
+    assert len(out) < 200, "不能刷屏 ✓ 实际 %d 字符" % len(out)
+
+
+def test_provider_log_name_never_uuid():
+    """★ 用户要求（2026-10-15）：日志里的提供商名**不能是 UUID** ✗
+
+    3.0 里 WebUI 建的 provider，id 就是 UUID ✓ 原来 `name or _pid` 会把它打出来 ✗
+    ⇒ 源码断言：UUID 形状的备用名要被 `_readable_pid` 挡掉、并有可读占位 ✓
+    """
+    from pathlib import Path as _P
+    main = (_P(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    assert "def _prov_name(" in main and "def _readable_pid(" in main, "缺少可读名解析 ✓"
+    assert "未命名提供商" in main, "缺少可读占位 ✓"
+    assert "len(_n) > 22 and _n.count(\"-\") >= 4" in main, "名字本身是 UUID 时也要挡掉 ✓"
