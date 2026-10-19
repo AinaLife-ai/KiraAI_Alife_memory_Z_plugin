@@ -116,6 +116,13 @@ class ProfileCase(unittest.TestCase):
         )
         self.assertEqual(ordered[0]["content"], "提到的人的低重要度事实")
 
+    def test_profile_category_limit_keeps_total_stats(self):
+        for i in range(10):
+            self.add_fact("qq:gm:1", "qq:9", "画像事实%d" % i, "profile", 5)
+        profile = self.store.profile("qq:9", 3, category_limit=3)
+        self.assertEqual(len(profile["categories"]["profile"]), 3)
+        self.assertEqual(profile["stats"]["facts"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

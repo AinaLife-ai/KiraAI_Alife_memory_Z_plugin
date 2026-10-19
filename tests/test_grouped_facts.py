@@ -71,10 +71,12 @@ def test_rules_block_describes_grouped_layout():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "记忆简报" in source or "按主体分组" in source
     _g = source[source.index("_GROUPED_FACT_DOC = (") : source.index("MEMORY_RULES = (")]
-    # v2.18.19：注入统一为紧凑简报 ✗ `_FLAT_FACT_DOC` 已删 ✓（两种视图共用同一份说明 ✓）
     for stale in ("u=主体ID", "t2", "rec=记录日期", "src=来源存档ID"):
         assert stale not in _g, "分组说明残留旧措辞：" + stale
-    assert "_FLAT_FACT_DOC" not in source, "扁平文档已删 ✗ 不该再残留 ✓"
+    # flat 视图仍保留（旧用户可回滚）；说明必须与 grouped 不同，
+    # 否则模型会按分组格式读 `- 主体｜内容`（实测会找不到类别码）。
+    assert "_FLAT_FACT_DOC" in source, "flat 视图说明缺失 ✗"
+    assert "事实行 = - <主体>｜<内容>" in source, "flat 事实行说明不对 ✗"
 
 
 def test_grouped_example_line_matches_real_render():

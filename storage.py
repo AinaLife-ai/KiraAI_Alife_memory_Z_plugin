@@ -2936,8 +2936,15 @@ class Store:
             self.bump(db)
             return {"kind": kind, "target": target, "restored_from": version_id}
 
-    def profile(self, entity_id, summary_count=3, sid="", global_scope=True, hide_pending=False):
-        """Aggregated view of one entity: names, facts by category, relations, stats."""
+    def profile(
+        self, entity_id, summary_count=3, sid="", global_scope=True,
+        hide_pending=False, category_limit=0,
+    ):
+        """Aggregated view of one entity: names, facts by category, relations, stats.
+
+        ``category_limit`` 只用于 Bot 工具：每类最多取前 N 条，避免一个
+        500 条画像的人把整份数据搬进合并检查。Web 面板默认 0 = 全部。
+        """
         rows = self.entities(ids=[entity_id], limit=1)
         if not rows:
             return None
@@ -2977,6 +2984,11 @@ class Store:
         groups = {}
         for fact in facts:
             groups.setdefault(fact["category"], []).append(fact)
+        if category_limit and int(category_limit) > 0:
+            limit = int(category_limit)
+            groups = {
+                category: rows[:limit] for category, rows in groups.items()
+            }
         summary = [f["content"] for f in facts[:summary_count]]
         return {
             "entity": {
@@ -3449,6 +3461,7 @@ class Store:
         prefer_sid="",
         prefer_users=(),
         prefer_subjects=(),
+        prefer_users_first=False,
         hide_pending=False,
         importance_first=False,
         min_score=0,
@@ -3476,12 +3489,21 @@ class Store:
                 args.append(value)
         tier_parts, tier_args = [], []
         if prefer_sid or prefer_users:
-            # Same session first, then facts about the current participants.
-            tier_parts.append(
-                "CASE WHEN sid=? THEN 0 WHEN subject IN "
-                "(SELECT value FROM json_each(?)) THEN 1 ELSE 2 END"
-            )
-            tier_args += [prefer_sid, dump(list(prefer_users))]
+            if prefer_users_first and prefer_users:
+                # 当前参与者优先于“同一会话”：画像常驻要让正在聊天的人
+                # 排在本会话的高重要度路人前面。
+                tier_parts.append(
+                    "CASE WHEN subject IN (SELECT value FROM json_each(?)) THEN 0 "
+                    "WHEN sid=? THEN 1 ELSE 2 END"
+                )
+                tier_args += [dump(list(prefer_users)), prefer_sid]
+            else:
+                # Same session first, then facts about the current participants.
+                tier_parts.append(
+                    "CASE WHEN sid=? THEN 0 WHEN subject IN "
+                    "(SELECT value FROM json_each(?)) THEN 1 ELSE 2 END"
+                )
+                tier_args += [prefer_sid, dump(list(prefer_users))]
         if prefer_subjects:
             # Then facts about entities named in the current message.
             tier_parts.append(
@@ -3515,6 +3537,102 @@ class Store:
                     [*args, *tier_args, limit, offset],
                 )
             ]
+
+    def related_facts(
+        self, entity_id, tokens=(), exclude_subjects=(), limit=30,
+        global_scope=True, sid="", users=(),
+    ):
+        """反查「与某实体有显式关系」的其他主体事实（只读，零模型）。
+
+        用于被动召回的「相关人物」：正文里没有点名实体、但 relations 指向它的
+        事实（如「阿远负责夜班巡逻」+ 阿远>同事>弗弗），普通词法召回捞不到。
+        只返回 profile / relationship 两类，且谓词必须具体；跨主体是这里的本意，
+        但事实本身仍按 subject 归组，不会被合并。
+        """
+        entity_id = str(entity_id or "").strip()
+        token_set = {
+            str(value).strip()
+            for value in (tokens or ())
+            if str(value or "").strip()
+        }
+        if not entity_id or not token_set:
+            return []
+        where = [
+            "f.deleted=0",
+            "f.merge_pending=0",
+            # json_valid 只做布尔判断，不解析；真正的解析在 Python 侧兜底。
+            # 不能把 json_each(f.relations) 直接放 FROM：SQLite 可能先展开、
+            # 再评估 json_valid，遇到脏数据直接 malformed JSON（实测）。
+            "json_valid(f.relations)",
+            "f.relations IS NOT NULL",
+            "f.relations != ''",
+            "json_valid(f.sources)",
+            "f.category IN ('profile','relationship')",
+        ]
+        args = []
+        if not global_scope:
+            # 与 facts() 的 include_shared 口径一致：当前会话 + global +
+            # 来源记录对当前用户可见的共享事实。否则 session/linked 的
+            # 「相关人物」会绕过访问范围，把别的会话内容带进来。
+            where.append(
+                "(f.sid=? OR f.sid='global' OR EXISTS ("
+                "SELECT 1 FROM records, json_each(f.sources) AS src "
+                "WHERE records.id=src.value AND records.deleted=0 "
+                "AND (records.visibility='global' OR (records.visibility='user' "
+                "AND EXISTS (SELECT 1 FROM json_each(records.users) "
+                "WHERE value IN (SELECT value FROM json_each(?)))))))"
+            )
+            args.extend([str(sid or ""), dump(list(users or ()))])
+        if exclude_subjects:
+            where.append("f.subject NOT IN (SELECT value FROM json_each(?))")
+            args.append(dump(list(dict.fromkeys(
+                str(value) for value in exclude_subjects if value
+            ))))
+        # 先用 instr 做廉价预筛（JSON 里确实可能出现这个 id/名字），
+        # 再用 Python 精确比对 subject/object；instr 对脏 JSON 也不会抛错。
+        matches = []
+        for token in sorted(token_set):
+            matches.append("instr(f.relations, ?) > 0")
+            args.append(token)
+        where.append("(" + " OR ".join(matches) + ")")
+        sql = (
+            "SELECT f.* FROM facts f WHERE "
+            + " AND ".join(where)
+            + " ORDER BY f.importance DESC, f.created DESC, f.id LIMIT ?"
+        )
+        args.append(max(1, int(limit or 30)))
+        with self.connect() as db:
+            rows = [self.row(r) for r in db.execute(sql, args)]
+        out, seen = [], set()
+        for row in rows:
+            for relation in row.get("relations") or []:
+                if not isinstance(relation, dict):
+                    continue
+                subject = str(relation.get("subject") or "").strip()
+                obj = str(relation.get("object") or "").strip()
+                predicate = str(relation.get("predicate") or "").strip()
+                if not predicate:
+                    continue
+                if subject in token_set:
+                    other = obj
+                elif obj in token_set:
+                    other = subject
+                else:
+                    continue
+                if not other or other == entity_id:
+                    continue
+                if relation_issue({
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                }):
+                    continue
+                marker = (row["id"], other)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                out.append({**row, "_other": other, "_predicate": predicate})
+        return out
 
     def audit_candidates(self, sid, limit=20, recheck_seconds=0):
         """Facts eligible for audit: never audited, or stale beyond the cooldown."""

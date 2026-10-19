@@ -899,6 +899,25 @@
         "minimum": 1,
         "maximum": 10
       },
+      "profile_neighbors": {
+        "type": "string",
+        "name": "相关人物召回",
+        "default": "smart",
+        "description": "点名一个人时，是否补「与他有明确关系、但关系事实还没被正常召回」的相关人物。off=关；digest=只给名字和关系；smart=问「谁/关系/认识/介绍」时再补一条事实正文。默认 smart。已在事实区出现过的人不会重复。",
+        "options": [
+          "off",
+          "digest",
+          "smart"
+        ]
+      },
+      "profile_neighbors_max": {
+        "type": "integer",
+        "name": "相关人物最多几个",
+        "default": 2,
+        "description": "每轮最多补几个相关人物（只在确实有未召回的关系事实时出现）。默认 2；0=关。",
+        "minimum": 0,
+        "maximum": 10
+      },
       "tool_refine_mode": {
         "type": "string",
         "name": "主动召回精修方式",
