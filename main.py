@@ -262,6 +262,10 @@ def brief(perception):
                         subject = str(row.get("u") or "")
                         raw = names_map.get(subject) if isinstance(names_map, dict) else None
                         label = _name_of(raw) if raw else ""
+                        # flat 的 names 值是 "名字|别名"；主体行只显示现名，
+                        # 否则会出现 `- 我|我｜...` 这种重复（grouped 头部仍保留别名）。
+                        if "|" in label:
+                            label = label.split("|", 1)[0].strip()
                         if label:
                             lines.append("- %s｜%s" % (label, str(text)))
                         elif subject:
