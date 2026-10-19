@@ -1,9 +1,7 @@
 """真实宿主：相关人物 / names 补全 / 主动合并 / 当前说话人画像优先。"""
-import asyncio
 import json
 import os
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -66,6 +64,7 @@ def _add(store, sid, subject, category, content, importance, relations=None):
 @pytest.mark.asyncio
 async def test_passive_names_neighbors_and_no_duplicates(tmp_path):
     plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
     try:
         s = plugin.settings
         s.top_k = 5
@@ -134,6 +133,7 @@ async def test_passive_names_neighbors_and_no_duplicates(tmp_path):
 @pytest.mark.asyncio
 async def test_neighbor_digest_and_off_modes(tmp_path):
     plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
     try:
         s = plugin.settings
         s.top_k = 5
@@ -174,6 +174,7 @@ async def test_neighbor_digest_and_off_modes(tmp_path):
 @pytest.mark.asyncio
 async def test_active_overview_and_profile_queue_fact_merges(tmp_path):
     plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
     try:
         s = plugin.settings
         s.fact_merge_enabled = True
@@ -209,6 +210,7 @@ async def test_active_overview_and_profile_queue_fact_merges(tmp_path):
 @pytest.mark.asyncio
 async def test_current_speaker_profile_is_not_crowded_out(tmp_path):
     plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
     try:
         s = plugin.settings
         s.top_k = 5

@@ -1857,6 +1857,9 @@ async def test_prewarm_hook_accepts_single_message_event(tmp_path):
     from test_helpers_plugin import build_plugin
 
     plugin, store = await build_plugin(tmp_path)
+    # 迁移期间 runtime_settings() 会按设计返回 enabled=False；
+    # 预热测试必须先等迁移结束，否则全量跑时会偶发提前返回（实测）。
+    await plugin.wait_migration()
     try:
         event = make_single_event()
         # ★ 2026-09-29：宿主对「bot 不会回应」的消息给 process_strategy="discard"，

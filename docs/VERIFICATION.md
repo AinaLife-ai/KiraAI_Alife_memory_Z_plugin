@@ -2,8 +2,8 @@
 
 ## 2.22.21（2026-10-19）
 
-- KiraAI **3.0.1**：`1078 passed + 16 subtests`，0 failed。
-- KiraAI **2.34.8**：`1078 passed + 16 subtests`，0 failed。
+- KiraAI **3.0.1**：`1079 passed + 16 subtests`，0 failed。
+- KiraAI **2.34.8**：`1079 passed + 16 subtests`，0 failed。
 - 新增行为测试：相关人物（digest/smart/off、已召回不重复、名字码表只补必要 id）、轮换槽不重复注入、`overview`/`GetProfile` 主动合并、当前说话人画像优先。
 - 验证边界：真实宿主事件/请求/插件注册类；模型结果为确定性夹具，未调用生产模型。合并阈值保持 0.25 / 0.4 不变。
 

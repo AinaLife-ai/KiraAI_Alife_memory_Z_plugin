@@ -1185,7 +1185,11 @@ class AlifeMemoryPlugin(BasePlugin):
             return [str(entity_id)], str(entity_id), ""
         row = rows[0]
         tokens = [str(entity_id), str(row.get("name") or "")]
-        tokens += [str(h.get("name") or "") for h in row.get("history") or []]
+        # 只取最近 6 个曾用名：关系里通常存现名/稳定 id；全量历史名会把
+        # 反查 SQL 的 OR 条件撑大，反而拖慢热路径。
+        tokens += [
+            str(h.get("name") or "") for h in (row.get("history") or [])[:6]
+        ]
         return (
             [value for value in dict.fromkeys(tokens) if value],
             str(row.get("name") or entity_id),
@@ -1209,14 +1213,16 @@ class AlifeMemoryPlugin(BasePlugin):
         existing = {f.get("id") for f in facts if f.get("id")}
         seen = set(self.seen_window.get(recall_key).get("facts") or ())
         excluded = {
-            str(value) for value in [*users, *subjects, sid] if value
+            str(value) for value in [*users, *subjects, sid, self_id] if value
         }
         # 关系里可能存名字（不是 id）；参与者/已点名者的名字同样排除，
         # 免得把当前说话人或被问的人自己当成“相关人物”。
         excluded_names = set()
         try:
             excluded_rows = await self.store.call(
-                "entities", ids=[*users, *subjects], limit=20
+                "entities",
+                ids=[value for value in [*users, *subjects, self_id] if value],
+                limit=20,
             )
             excluded_names = {
                 str(row.get("name")) for row in excluded_rows if row.get("name")
@@ -1226,7 +1232,8 @@ class AlifeMemoryPlugin(BasePlugin):
         candidates = {}
         for entity_id in list(subjects)[:2]:
             entity_id = str(entity_id or "")
-            if not entity_id or entity_id in users or entity_id == sid:
+            if (not entity_id or entity_id in users
+                    or entity_id == sid or entity_id == self_id):
                 continue
             tokens, entity_name, kind = await self._entity_profile_tokens(entity_id)
             if kind in ("session", "group"):
@@ -1292,8 +1299,9 @@ class AlifeMemoryPlugin(BasePlugin):
                     continue
             if not name or name in excluded_names:
                 continue
-            entity_name = str(row.get("_entity_name") or "").strip()
-            predicate = str(row.get("_predicate") or "").strip()
+            name = str(name).strip()[:40]
+            entity_name = str(row.get("_entity_name") or "").strip()[:24]
+            predicate = str(row.get("_predicate") or "").strip()[:24]
             if not entity_name or not predicate:
                 continue
             if predicate in NEIGHBOR_VERB_PREDICATES:
@@ -1315,7 +1323,9 @@ class AlifeMemoryPlugin(BasePlugin):
                         item["imp"] = importance
                     # 正文自己就写明了「阿远是弗弗的表哥」时，不再重复
                     # `阿远（弗弗的表哥）｜` 这一层头，直接给事实行更紧凑。
-                    if name and entity_name and name in text and entity_name in text:
+                    if (name and entity_name and predicate
+                            and name in text and entity_name in text
+                            and predicate in text):
                         item["compact"] = 1
                     merge_rows.append(row)
             neighbors.append(item)
@@ -2302,6 +2312,13 @@ class AlifeMemoryPlugin(BasePlugin):
         cfg = self.runtime_settings()
         if not cfg.fact_merge_enabled or len(facts) < 2:
             return set()
+        # 防御性上限：loose/full 等极端配置下 facts 可能上百条，
+        # flag_similar_pairs 是 O(n²)（500 条约 600ms，实测）。只查前 80 条
+        # （已按相关度排序），避免一次召回把工具/回复拖慢；漏掉的重复仍会由
+        # 写入侧 queue_fact_merges / 审计兜底。
+        if len(facts) > 80:
+            logger.info("[记忆·Z] 召回事实 %d 条 ⇒ 合并检查只取前 80 条", len(facts))
+            facts = facts[:80]
         flagged = await self.store.call(
             "flag_similar_pairs",
             [fact["id"] for fact in facts],
@@ -2579,6 +2596,7 @@ class AlifeMemoryPlugin(BasePlugin):
                 event.sid,
                 cfg.recall_scope != "session",
                 cfg.merge_pending_hide,
+                _pool_n,
             )
             if profile:
                 rows_flat = [
@@ -3097,7 +3115,8 @@ class AlifeMemoryPlugin(BasePlugin):
             related.pop()
         # 相关人物：只补「关系事实还没进 facts」的人；已召回的就不重复。
         neighbors, neighbor_rows = [], []
-        if getattr(cfg, "profile_neighbors", "off") != "off" and not over_budget:
+        if (getattr(cfg, "profile_neighbors", "off") != "off"
+                and cfg.inject_mode != "full" and not over_budget):
             try:
                 neighbors, neighbor_rows = await self.profile_neighbors(
                     sid, subjects, users, facts, query, recall_key, cfg,
@@ -3135,6 +3154,8 @@ class AlifeMemoryPlugin(BasePlugin):
         # 不补所有事实主体（否则 10 个路人会把码表撑大，反而更费 token）。
         extra_ids = {str(value) for value in subjects if value}
         for fact in facts:
+            if fact.get("src_user"):
+                extra_ids.add(str(fact["src_user"]))
             for relation in (
                 fact.get("verified_relations") or fact.get("relations") or []
             ):

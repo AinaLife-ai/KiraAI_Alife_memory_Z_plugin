@@ -2936,8 +2936,15 @@ class Store:
             self.bump(db)
             return {"kind": kind, "target": target, "restored_from": version_id}
 
-    def profile(self, entity_id, summary_count=3, sid="", global_scope=True, hide_pending=False):
-        """Aggregated view of one entity: names, facts by category, relations, stats."""
+    def profile(
+        self, entity_id, summary_count=3, sid="", global_scope=True,
+        hide_pending=False, category_limit=0,
+    ):
+        """Aggregated view of one entity: names, facts by category, relations, stats.
+
+        ``category_limit`` 只用于 Bot 工具：每类最多取前 N 条，避免一个
+        500 条画像的人把整份数据搬进合并检查。Web 面板默认 0 = 全部。
+        """
         rows = self.entities(ids=[entity_id], limit=1)
         if not rows:
             return None
@@ -2977,6 +2984,11 @@ class Store:
         groups = {}
         for fact in facts:
             groups.setdefault(fact["category"], []).append(fact)
+        if category_limit and int(category_limit) > 0:
+            limit = int(category_limit)
+            groups = {
+                category: rows[:limit] for category, rows in groups.items()
+            }
         summary = [f["content"] for f in facts[:summary_count]]
         return {
             "entity": {
