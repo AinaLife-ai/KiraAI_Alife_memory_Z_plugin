@@ -3325,10 +3325,14 @@ class AlifeMemoryPlugin(BasePlugin):
         speakers = []
         for row in priority:
             name = self.model_text(row["speaker"] or "", keep_names)
-            if name and name not in speakers:
+            if name and name != "?" and name not in speakers:
                 speakers.append(name)
         # v2.18.19：**单字符串** ✓（原来 {legend, rows, more_hint} 三个键名白占 ~30 字符 ✗）
-        _head = "会话=%s｜说话人=%s" % (sid, "、".join(speakers) or "?")
+        # 没有可确认的说话人时不要写 `说话人=?`：问号不是信息，
+        # 只会让模型以为“发言人未知、不能回答”，还白占 5 个字符。
+        _head = "会话=%s" % sid
+        if speakers:
+            _head += "｜说话人=%s" % "、".join(speakers)
         selected = "\n".join([_head] + lines)
         if omitted:
             # 明确的**调用字样** ✓（不要用"说 more"这种自然语言提示 ✗）
