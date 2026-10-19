@@ -153,6 +153,15 @@ def test_legacy_records_and_facts_still_readable(tmp_path):
     assert any("蛋糕" in json.dumps(f, ensure_ascii=False) for f in facts), "老事实内容不对 ✗"
 
 
+def test_legacy_config_gets_new_recall_defaults(tmp_path):
+    """老配置没有 profile_neighbors / profile_neighbors_max ⇒ 用新默认，不报错。"""
+    data_root, cfg_file = _build_legacy_state(tmp_path)
+    p, _ = _make_plugin(tmp_path, _cfg_from_file(cfg_file), data_root)
+    run(p.initialize())
+    assert p.settings.profile_neighbors == "smart"
+    assert p.settings.profile_neighbors_max == 2
+
+
 def test_self_gate_settings_are_migrated(tmp_path):
     """③ 自我认知：老配置的门槛 6 ⇒ 升到 4；总开关补 False ✓"""
     data_root, cfg_file = _build_legacy_state(tmp_path)

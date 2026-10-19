@@ -112,6 +112,12 @@ _GROUPED_FACT_DOC = (
     "结尾「另有 N 条未展示」= 没给完。\n"
 )
 
+_FLAT_FACT_DOC = _GROUPED_FACT_DOC.replace(
+    "事实行 = <主体码> <类别码> <内容> ★重要度 <关系> <时间>（后三项可缺）。",
+    "事实行 = - <主体>｜<内容>（类别/重要度/关系/时间省略）。",
+)
+
+
 # 「相关人物」只在像在问人/关系时补一条事实正文；普通提名字只给关系摘要。
 NEIGHBOR_INTENT_WORDS = (
     "谁", "是谁", "什么人", "认识", "关系", "朋友", "亲人",
@@ -147,8 +153,10 @@ def memory_rules(view=None):
     """按事实视图给出规则块：grouped(默认)/flat(回滚) 各自自洽 ✓
 
     同一模式下逐字节稳定 ✓ → 提供方前缀缓存只在切换模式那一次失效 ✓"""
-    # v2.18.19：注入统一为紧凑简报 ✗ 两种「事实视图」的渲染已一致 ✓
-    # ⇒ 不再按视图切换说明 ✗（旧的两份文案都在教模型读已经不存在的键名 ✓）
+    # grouped 与 flat 的事实行格式不同：flat 用 `- 主体｜内容`，
+    # 说明必须跟着视图走，否则模型会去找不存在的“类别码/★重要度”。
+    if str(view or "") == "flat":
+        return MEMORY_RULES.replace(_GROUPED_FACT_DOC, _FLAT_FACT_DOC)
     return MEMORY_RULES
 
 
@@ -245,7 +253,21 @@ def brief(perception):
         else:                                     # 扁平视图 ✓
             for row in raw_facts:
                 if isinstance(row, dict):
-                    lines.append("- %s" % str(row.get("s") or row.get("content") or ""))
+                    # bot_facts() 的紧凑键是 x（内容）/ c（类别）/ u（主体）；
+                    # 旧代码只取 s/content ⇒ flat 视图会注入一排空 "- "（实测）。
+                    text = (
+                        row.get("x") or row.get("s") or row.get("content") or ""
+                    )
+                    if str(text).strip():
+                        subject = str(row.get("u") or "")
+                        raw = names_map.get(subject) if isinstance(names_map, dict) else None
+                        label = _name_of(raw) if raw else ""
+                        if label:
+                            lines.append("- %s｜%s" % (label, str(text)))
+                        elif subject:
+                            lines.append("- %s｜%s" % (subject, str(text)))
+                        else:
+                            lines.append("- %s" % str(text))
                 elif row:
                     lines.append("- %s" % str(row))
     else:
@@ -1239,7 +1261,14 @@ class AlifeMemoryPlugin(BasePlugin):
             if kind in ("session", "group"):
                 continue
             rows = await self.store.call(
-                "related_facts", entity_id, tuple(tokens), tuple(excluded), 60
+                "related_facts",
+                entity_id,
+                tuple(tokens),
+                tuple(excluded),
+                60,
+                cfg.recall_scope == "global",
+                sid,
+                tuple(users),
             )
             # 与主召回同一套闸门：工具结果/媒体壳不进；bot 自述低价值不进。
             rows = await self.store.call("attach_evidence", rows)

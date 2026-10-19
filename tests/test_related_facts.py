@@ -78,3 +78,29 @@ def test_related_facts_outgoing_direction(tmp_path):
     assert [row["id"] for row in rows] == [fact_id]
     assert rows[0]["_other"] == AY
     assert rows[0]["_predicate"] == "表哥"
+
+
+def test_related_facts_respects_recall_scope(tmp_path):
+    store = _store(tmp_path)
+    other = "qq:gm:2"
+    store.capture(other, "t", [
+        {"role": "user", "content": "别的会话", "users": [FF], "time": 2.0}
+    ])
+    other_rec = store.active(other)[-1]["id"]
+    with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        store._add_fact(db, other, {
+            "category": "relationship",
+            "subject": AY,
+            "content": "阿远在别的会话负责夜班巡逻",
+            "reason": "",
+            "scenario": "",
+            "tags": [],
+            "relations": [{"subject": AY, "predicate": "同事", "object": FF}],
+            "source_ids": [other_rec],
+            "importance": 8,
+        })
+    tokens = [FF, "弗弗"]
+    excluded = [FF]
+    assert len(store.related_facts(FF, tokens, excluded, 20, True)) == 1
+    assert store.related_facts(FF, tokens, excluded, 20, False, SID, [FF]) == []

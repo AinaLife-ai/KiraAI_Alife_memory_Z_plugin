@@ -3538,7 +3538,10 @@ class Store:
                 )
             ]
 
-    def related_facts(self, entity_id, tokens=(), exclude_subjects=(), limit=30):
+    def related_facts(
+        self, entity_id, tokens=(), exclude_subjects=(), limit=30,
+        global_scope=True, sid="", users=(),
+    ):
         """反查「与某实体有显式关系」的其他主体事实（只读，零模型）。
 
         用于被动召回的「相关人物」：正文里没有点名实体、但 relations 指向它的
@@ -3563,9 +3566,23 @@ class Store:
             "json_valid(f.relations)",
             "f.relations IS NOT NULL",
             "f.relations != ''",
+            "json_valid(f.sources)",
             "f.category IN ('profile','relationship')",
         ]
         args = []
+        if not global_scope:
+            # 与 facts() 的 include_shared 口径一致：当前会话 + global +
+            # 来源记录对当前用户可见的共享事实。否则 session/linked 的
+            # 「相关人物」会绕过访问范围，把别的会话内容带进来。
+            where.append(
+                "(f.sid=? OR f.sid='global' OR EXISTS ("
+                "SELECT 1 FROM records, json_each(f.sources) AS src "
+                "WHERE records.id=src.value AND records.deleted=0 "
+                "AND (records.visibility='global' OR (records.visibility='user' "
+                "AND EXISTS (SELECT 1 FROM json_each(records.users) "
+                "WHERE value IN (SELECT value FROM json_each(?)))))))"
+            )
+            args.extend([str(sid or ""), dump(list(users or ()))])
         if exclude_subjects:
             where.append("f.subject NOT IN (SELECT value FROM json_each(?))")
             args.append(dump(list(dict.fromkeys(

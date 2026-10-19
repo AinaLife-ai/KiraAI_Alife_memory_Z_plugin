@@ -131,6 +131,43 @@ async def test_passive_names_neighbors_and_no_duplicates(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_neighbor_facts_respect_recall_scope(tmp_path):
+    plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
+    try:
+        s = plugin.settings
+        s.jev_enabled = False
+        s.recall_scope = "session"
+        s.rotate_enabled = False
+        s.fact_merge_enabled = False
+        s.profile_neighbors = "smart"
+        event = _event("弗弗是谁？")
+        sid = event.sid
+        other = "test:group:other"
+        store.observe_name(sid, "测试群", context=sid, observed=1.0)
+        store.observe_name(FF, "弗弗", context=sid, observed=1.0)
+        store.observe_name(AY, "阿远", context=sid, observed=1.0)
+        store.capture(sid, "t", [
+            {"role": "user", "content": "开场", "users": [ME], "time": 1.0}
+        ])
+        store.capture(other, "t", [
+            {"role": "user", "content": "别的会话", "users": [FF], "time": 2.0}
+        ])
+        _add(store, other, AY, "relationship", "阿远在别的会话负责夜班巡逻", 9,
+             [{"subject": AY, "predicate": "同事", "object": FF}])
+
+        req = LLMRequest()
+        await plugin.on_request(event, req)
+        m = json.loads(next(
+            p.content for p in req.user_prompt if p.name == "alife_memory"
+        ))["m"]
+        assert "别的会话" not in m
+        assert "相关人物：" not in m
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
 async def test_neighbor_digest_and_off_modes(tmp_path):
     plugin, store = await build_plugin(tmp_path)
     await plugin.wait_migration()
@@ -167,6 +204,40 @@ async def test_neighbor_digest_and_off_modes(tmp_path):
             p.content for p in req2.user_prompt if p.name == "alife_memory"
         ))["m"]
         assert "相关人物：" not in m2
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_flat_view_still_works_with_neighbors(tmp_path):
+    plugin, store = await build_plugin(tmp_path)
+    await plugin.wait_migration()
+    try:
+        s = plugin.settings
+        s.jev_enabled = False
+        s.fact_view = "flat"
+        s.rotate_enabled = False
+        s.fact_merge_enabled = False
+        s.profile_neighbors = "smart"
+        event = _event("弗弗是谁？")
+        sid = event.sid
+        store.observe_name(sid, "测试群", context=sid, observed=1.0)
+        store.observe_name(FF, "弗弗", context=sid, observed=1.0)
+        store.observe_name(AY, "阿远", context=sid, observed=1.0)
+        store.capture(sid, "t", [
+            {"role": "user", "content": "开场", "users": [ME], "time": 1.0}
+        ])
+        _add(store, sid, FF, "profile", "弗弗是档案局的记录员", 9)
+        _add(store, sid, AY, "relationship", "阿远负责夜班巡逻", 7,
+             [{"subject": AY, "predicate": "同事", "object": FF}])
+
+        req = LLMRequest()
+        await plugin.on_request(event, req)
+        m = json.loads(next(
+            p.content for p in req.user_prompt if p.name == "alife_memory"
+        ))["m"]
+        assert "弗弗是档案局的记录员" in m
+        assert "相关人物：阿远（弗弗的同事）" in m
     finally:
         await plugin.terminate()
 
